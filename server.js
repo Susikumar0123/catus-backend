@@ -11,17 +11,16 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
-// 1. REGISTER API ROUTE
+// 1. REGISTER API ROUTE (Fixed)
 // ==========================================
 app.post('/api/register', (req, res) => {
     const { name, email, phone, pincode } = req.body;
     
     const address = "No address saved";
     const randomCustId = Math.floor(10000 + Math.random() * 90000);
-    const defaultWallet = 0; // <--- Wallet balance-ai 0 nu set panrom
 
-    const query = 'INSERT INTO users (id, name, email, phone, pincode, address, wallet) VALUES (?, ?, ?, ?, ?, ?, ?)';
-    db.query(query, [randomCustId, name, email, phone, pincode, address, defaultWallet], (err, result) => {
+    const query = 'INSERT INTO users (id, name, email, phone, pincode, address) VALUES (?, ?, ?, ?, ?, ?)';
+    db.query(query, [randomCustId, name, email, phone, pincode, address], (err, result) => {
         if (err) {
             if (err.code === 'ER_DUP_ENTRY') {
                 return res.status(400).json({ success: false, message: 'Mobile number already registered!' });
@@ -31,7 +30,7 @@ app.post('/api/register', (req, res) => {
         res.json({ 
             success: true, 
             message: 'User registered successfully!', 
-            user: { id: randomCustId, name, email, phone, pincode, address, wallet: defaultWallet } 
+            user: { id: randomCustId, name, email, phone, pincode, address } 
         });
     });
 });

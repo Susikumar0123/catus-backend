@@ -1,15 +1,21 @@
 const { Pool } = require('pg');
 require('dotenv').config();
 
-const db = new Pool({
+const pool = new Pool({
     connectionString: process.env.DATABASE_URL,
     ssl: {
         rejectUnauthorized: false
     }
 });
 
-db.connect()
-    .then(() => console.log('Connected to Supabase PostgreSQL database successfully!'))
-    .catch(err => console.error('Database connection failed:', err.stack));
+pool.connect((err, client, release) => {
+    if (err) {
+        return console.error('Database connection failed:', err);
+    }
+    console.log('Database connected successfully!');
+    release();
+});
 
-module.exports = db;
+module.exports = {
+    query: (text, params, callback) => pool.query(text, params, callback),
+};
