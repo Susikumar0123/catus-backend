@@ -1,5 +1,4 @@
 const { Pool } = require('pg');
-
 require('dotenv').config();
 
 const pool = new Pool({
@@ -11,33 +10,36 @@ const pool = new Pool({
 
 pool.connect((err, client, release) => {
     if (err) {
-        return console.error('Database connection failed:', err);
+        console.error('Database connection failed:', err);
+    } else {
+        console.log('Database connected successfully!');
+        release();
     }
-
-    console.log('Database connected successfully!');
-    release();
 });
 
-module.exports = {
+// Helper function to convert MySQL '?' style queries to PostgreSQL '$1, $2' style
+db = {
     query: (text, params, callback) => {
+        let queryText = text;
+        let queryParams = params;
 
-        // MySQL-style ? placeholders
-        // PostgreSQL-style $1, $2, $3...
-        let index = 0;
+        if (typeof params === 'function') {
+            callback = params;
+            queryParams = [];
+        }
 
-        const pgQuery = text.replace(/\?/g, () => {
-            index++;
-            return `$${index}`;
-        });
+        // Convert ? to $1, $2, etc.
+        let counter = 1;
+        queryText = queryText.replace(/\?/g, () => `$${counter++}`);
 
-        pool.query(pgQuery, params || [], (err, result) => {
-
+        return pool.query(queryText, queryParams, (err, res) => {
             if (err) {
                 return callback(err, null);
             }
-
-            // Make PostgreSQL behave like the old MySQL-style code
-            callback(null, result.rows, result);
+            // Return results in an array format compatible with mysql callback style (results, fields)
+            callback(null, res.rows);
         });
     }
 };
+
+module.exports = db;
