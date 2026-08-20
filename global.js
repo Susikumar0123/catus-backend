@@ -1,8 +1,8 @@
-const API_BASE_URL = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
-    ? 'http://localhost:3000'
+const API_BASE_URL = window.location.hostname === 'localhost' 
+    ? 'http://localhost:3000' 
     : 'https://catus-backend-d2js.onrender.com';
 
-    // ==========================================
+// ==========================================
 // 1. GLOBAL VARIABLES
 // ==========================================
 let cartItems = JSON.parse(localStorage.getItem('catus_cart')) || [];
@@ -12,6 +12,7 @@ let currentUser = JSON.parse(localStorage.getItem('catus_logged_user')) || null;
 let tempPhone = "";
 let checkoutMode = 'single'; 
 let checkoutSingleItem = null;
+let orderPollingInterval = null; // Clean polling timer reference
 
 // ==========================================
 // 2. UTILITY & TOAST FUNCTIONS
@@ -278,6 +279,10 @@ function backToPhoneStep() {
 
 function logoutUser() {
     if(confirm("Are you sure you want to logout securely?")) {
+        if (orderPollingInterval) {
+            clearInterval(orderPollingInterval);
+            orderPollingInterval = null;
+        }
         localStorage.removeItem('catus_logged_user');
         currentUser = null;
         closePremiumDashboard();
@@ -330,7 +335,8 @@ function verifyOTP() {
             openPremiumDashboard();
             showToast("Login Successful!", false);
             
-            setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
+            if (orderPollingInterval) clearInterval(orderPollingInterval);
+            orderPollingInterval = setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
         }
     } else {
         alert('Invalid OTP. Please enter 1234.');
@@ -342,7 +348,6 @@ async function submitRegistration() {
     const email = document.getElementById('regEmail').value.trim();
     const pincode = document.getElementById('regPincode').value.trim();
     
-    // Strict Email Validation Check (@ and . irukanum)
     const emailPattern = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 
     if (!name) {
@@ -379,7 +384,8 @@ async function submitRegistration() {
             openPremiumDashboard();
             showToast("Account Registered Successfully!", false);
             
-            setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
+            if (orderPollingInterval) clearInterval(orderPollingInterval);
+            orderPollingInterval = setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
         } else {
             alert(data.message || 'Registration failed.');
         }
@@ -790,7 +796,6 @@ async function fetchUserOrdersPremium(phone) {
                     if (isRated) {
                         ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#f1f5f9; color:#94a3b8; border-color:#e2e8f0; cursor:not-allowed;" onclick="showToast('You have already rated this service!', true)"><i class="fa-solid fa-check-circle"></i> Rated</button>`;
                     } else {
-                        // Pass exact displayProductId as 3rd parameter to link review to specific product
                         ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#10b981; color:white; border-color:#10b981;" onclick="openRatingModal('${order.order_id}', '${safeServiceName}', '${displayProductId}')"><i class="fa-solid fa-star"></i> Rate Service</button>`;
                     }
                     actionButtonsHTML = `
@@ -955,7 +960,6 @@ async function submitEditOrderAddress() {
 
         const data = await response.json();
         if (data.success) {
-            // Local Admin Cache-layum instant update-kaga save panrom
             const adminCache = JSON.parse(localStorage.getItem('catusAdminCache') || '{}');
             if (!adminCache[orderId]) adminCache[orderId] = {};
             adminCache[orderId].address = newAddress;
@@ -970,61 +974,9 @@ async function submitEditOrderAddress() {
         } else {
             alert("Failed to update address in database.");
         }
-    } catch (err) {
+    }   catch (err) {
         console.error("Connection error:", err);
         alert("Server connection error.");
-    }
-}
-
-function submitEditOrderAddress() {
-    const orderId = document.getElementById('editAddressOrderId').value;
-    
-    let missing = false;
-    ['editDoor', 'editStreet', 'editVillage', 'editCity', 'editTaluk', 'editDistrict', 'editPincode'].forEach(id => {
-        let el = document.getElementById(id);
-        if (el && !el.value.trim()) { 
-            el.classList.add('error'); 
-            missing = true; 
-        } else if(el) { 
-            el.classList.remove('error'); 
-        }
-    });
-
-    let pinEl = document.getElementById('editPincode');
-    if (pinEl && pinEl.value.trim().length !== 6) { 
-        pinEl.classList.add('error'); 
-        missing = true; 
-    }
-
-    if (missing) {
-        let alertBox = document.getElementById('editAddressAlert');
-        if(alertBox) alertBox.style.display = 'block';
-        return;
-    }
-    
-    let alertBox = document.getElementById('editAddressAlert');
-    if(alertBox) alertBox.style.display = 'none';
-
-    const door = document.getElementById('editDoor').value.trim();
-    const street = document.getElementById('editStreet').value.trim();
-    const village = document.getElementById('editVillage').value.trim();
-    const city = document.getElementById('editCity').value.trim();
-    const taluk = document.getElementById('editTaluk').value.trim();
-    const district = document.getElementById('editDistrict').value.trim();
-    const pincode = document.getElementById('editPincode').value.trim();
-
-    const newAddress = `${door}, ${street}, ${village}, ${city}, ${taluk}, ${district} - ${pincode}`;
-
-    const adminCache = JSON.parse(localStorage.getItem('catusAdminCache') || '{}');
-    if (!adminCache[orderId]) adminCache[orderId] = {};
-    adminCache[orderId].address = newAddress;
-    localStorage.setItem('catusAdminCache', JSON.stringify(adminCache));
-
-    alert("Address updated successfully for this booking.");
-    closeEditOrderAddressModal();
-
-    if (currentUser && currentUser.phone) {
-        fetchUserOrdersPremium(currentUser.phone);
     }
 }
 
@@ -1134,7 +1086,6 @@ async function submitServiceRating() {
     const orderId = document.getElementById('currentRatingOrderId').value;
     const prodIdInput = document.getElementById('currentRatingProductId');
     
-    // Captures exact product ID from booking history
     const targetServiceId = (prodIdInput && prodIdInput.value) ? prodIdInput.value : (typeof activeServiceId !== 'undefined' ? activeServiceId : 'tv-repair');
     const customerName = currentUser ? currentUser.name : "Customer";
     
@@ -1143,7 +1094,7 @@ async function submitServiceRating() {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ 
-                service_id: targetServiceId, // Exact specific product ID linked to booking
+                service_id: targetServiceId,
                 customer_name: customerName, 
                 rating: rating, 
                 review_text: reviewText 

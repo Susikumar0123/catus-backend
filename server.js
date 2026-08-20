@@ -5,7 +5,7 @@ const db = require('./db');
 require('dotenv').config();
 
 const app = express();
-const PORT = process.env.PORT || 3000;
+const PORT = process.env.PORT || 10000;
 
 app.use(cors());
 app.use(express.json());
@@ -43,9 +43,14 @@ app.post('/api/login', (req, res) => {
     
     const query = 'SELECT * FROM users WHERE phone = ?';
     db.query(query, [phone], (err, results) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (err) {
+            console.error("LOGIN DATABASE ERROR:", err);
+            console.error("LOGIN PHONE:", phone);
+            console.error("LOGIN QUERY:", query);
+            return res.status(500).json({ success: false, error: err.message });
+        }
 
-        if (results.length > 0) {
+        if (results && results.length > 0) {
             res.json({ success: true, exists: true, user: results[0] });
         } else {
             res.json({ success: true, exists: false, message: 'User not found. Please register.' });
@@ -110,15 +115,15 @@ app.post('/api/orders', (req, res) => {
 
     db.query(query, values, (err, result) => {
         if (err) {
-            console.error('Insert Error Detail:', err.sqlMessage || err.message); // <--- SQL error clear-ah console-la theriyum
+            console.error('Insert Error Detail:', err.sqlMessage || err.message);
             return res.status(500).json({ success: false, error: err.message });
         }
         res.json({ success: true, message: 'Order placed and saved to database successfully!' });
     });
-}); // <--- Ithu munnadi miss aana closing bracket!
+});
 
 // ==========================================
-// GET ALL CUSTOMERS FOR ADMIN MASTER WITH LIVE ORDER COUNT (FIXED)
+// GET ALL CUSTOMERS FOR ADMIN MASTER
 // ==========================================
 app.get('/api/admin/customers', (req, res) => {
     const usersQuery = 'SELECT * FROM users ORDER BY id DESC';
@@ -130,7 +135,6 @@ app.get('/api/admin/customers', (req, res) => {
         db.query(ordersQuery, (err2, orders) => {
             if (err2) return res.status(500).json({ success: false, error: err2.message });
 
-            // Ovvoru user-oda phone number-kum evlo orders irukku nu map/count panrom
             let orderCounts = {};
             orders.forEach(o => {
                 let cleanPhone = String(o.phone || '').trim();
@@ -139,7 +143,6 @@ app.get('/api/admin/customers', (req, res) => {
                 }
             });
 
-            // Users list-oda total_orders-ai attach panrom
             let enrichedUsers = users.map(u => {
                 let userPhone = String(u.phone || '').trim();
                 return {
@@ -193,9 +196,10 @@ app.post('/api/admin/bulk-delete', (req, res) => {
     });
 });
 
+// Secure Razorpay Initialization
 const razorpayInstance = new Razorpay({
-    key_id: "rzp_test_TQiJV43IJEq24x",
-    key_secret: "hsRVUhrE58cWxOB1GKjSVRV6"
+    key_id: process.env.RAZORPAY_KEY_ID,
+    key_secret: process.env.RAZORPAY_KEY_SECRET
 });
 
 // ==========================================
@@ -224,7 +228,7 @@ app.post('/api/create-razorpay-order', async (req, res) => {
 });
 
 // ==========================================
-// SERVICES API ROUTES FOR FRONTEND & ADMIN
+// SERVICES API ROUTES
 // ==========================================
 app.get('/api/services', (req, res) => {
     const query = 'SELECT * FROM services';
@@ -262,10 +266,9 @@ app.post('/api/admin/update-service', (req, res) => {
         artificial_reviews_count, artificial_reviews_data,
         image_url, image_url_2, image_url_3, image_url_4,
         enable_select_options,
-        product_note // <--- 1. Inga destructure la add pannunga
+        product_note 
     } = req.body;
     
-    // 2. Query-la product_note column-ai include panrom
     const query = `UPDATE services SET service_id = ?, service_name = ?, category = ?, price = ?, mrp = ?, is_hot_deal = ?, select_options = ?, why_choose_us = ?, discount_text = ?, artificial_reviews_count = ?, artificial_reviews_data = ?, image_url = ?, image_url_2 = ?, image_url_3 = ?, image_url_4 = ?, enable_select_options = ?, product_note = ? WHERE service_id = ?`;
     
     db.query(query, [
@@ -273,7 +276,7 @@ app.post('/api/admin/update-service', (req, res) => {
         discount_text || '3% off', artificial_reviews_count || 500, artificial_reviews_data || '', 
         image_url, image_url_2 || '', image_url_3 || '', image_url_4 || '', 
         enable_select_options ?? 1, 
-        product_note || '', // <--- 3. Value-ai pass panrom
+        product_note || '', 
         old_service_id
     ], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
@@ -371,7 +374,7 @@ app.post('/api/admin/add-service', (req, res) => {
         artificial_reviews_count, artificial_reviews_data,
         image_url, image_url_2, image_url_3, image_url_4,
         enable_select_options,
-        product_note // <--- 1. Destructure la irukku
+        product_note 
     } = req.body;
     
     const query = `INSERT INTO services (service_id, service_name, category, price, mrp, is_hot_deal, select_options, why_choose_us, discount_text, artificial_reviews_count, artificial_reviews_data, image_url, image_url_2, image_url_3, image_url_4, enable_select_options, product_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
@@ -393,7 +396,7 @@ app.post('/api/admin/add-service', (req, res) => {
         image_url_3 || '', 
         image_url_4 || '',
         enable_select_options ?? 1,
-        product_note || '' // <--- 2. Inga values array-la pass panrom! (Ithu thaan miss aachu)
+        product_note || '' 
     ], (err, result) => {
         if (err) {
             console.error('Add Service Error:', err.message);
@@ -403,7 +406,7 @@ app.post('/api/admin/add-service', (req, res) => {
     });
 });
 
-// 1. Save Transaction Route
+// Transactions Routes
 app.post('/api/transactions', (req, res) => {
     const { transaction_id, customer_id, customer_name, mobile, email, product_name, amount, payment_mode, status, date_time } = req.body;
     const query = `INSERT INTO transactions (transaction_id, customer_id, customer_name, mobile, email, product_name, amount, payment_mode, status, date_time) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
@@ -414,7 +417,6 @@ app.post('/api/transactions', (req, res) => {
     });
 });
 
-// 2. Fetch Transactions for Admin Panel
 app.get('/api/admin/transactions', (req, res) => {
     const query = 'SELECT * FROM transactions ORDER BY id DESC';
     db.query(query, (err, results) => {
@@ -422,6 +424,7 @@ app.get('/api/admin/transactions', (req, res) => {
         res.json({ success: true, transactions: results });
     });
 });
+
 app.get('/api/admin/dashboard-stats', (req, res) => {
     const query = `
         SELECT 
@@ -435,9 +438,7 @@ app.get('/api/admin/dashboard-stats', (req, res) => {
         res.json({ success: true, stats: results[0] });
     });
 });
-// ==========================================
-// UPDATE ORDER ADDRESS API ROUTE
-// ==========================================
+
 app.post('/api/admin/update-order-address', (req, res) => {
     const { order_id, address, district, pincode } = req.body;
     const query = 'UPDATE orders SET address = ?, district = ?, pincode = ? WHERE order_id = ?';
@@ -446,6 +447,8 @@ app.post('/api/admin/update-order-address', (req, res) => {
         res.json({ success: true, message: 'Order address updated successfully!' });
     });
 });
-app.listen(PORT, () => {
-    console.log(`Server is running on http://localhost:${PORT}`);
+
+// Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
+app.listen(PORT, '0.0.0.0', () => {
+    console.log(`Server is running on http://0.0.0.0:${PORT}`);
 });
