@@ -1,6 +1,8 @@
 const express = require('express');
 const cors = require('cors');
 const Razorpay = require('razorpay');
+const multer = require('multer');
+const path = require('path');
 const db = require('./db');
 require('dotenv').config();
 
@@ -449,6 +451,31 @@ app.post('/api/admin/update-order-address', (req, res) => {
 });
 
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
+// ==========================================
+// IMAGE UPLOAD CONFIGURATION (Multer)
+// ==========================================
+const storage = multer.diskStorage({
+    destination: (req, file, cb) => {
+        cb(null, 'public/uploads/'); // உங்கள் ப்ராஜெக்ட் ஃபோல்டரில் public/uploads இருக்க வேண்டும்
+    },
+    filename: (req, file, cb) => {
+        cb(null, Date.now() + path.extname(file.originalname));
+    }
+});
+const upload = multer({ storage: storage });
+
+// இமேஜ் அப்லோட் API Route
+app.post('/api/upload-image', upload.single('image'), (req, res) => {
+    if (!req.file) {
+        return res.status(400).json({ success: false, message: 'No file uploaded' });
+    }
+    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
+    res.json({ success: true, imageUrl: imageUrl });
+});
+
+// அப்லோட் செய்த இமேஜ்களை பார்க்க ஸ்டேடிக் ஃபோல்டர்
+app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
 });
