@@ -18,7 +18,7 @@ pool.connect((err, client, release) => {
 });
 
 // Helper function to convert MySQL '?' style queries to PostgreSQL '$1, $2' style
-db = {
+const db = {
     query: (text, params, callback) => {
         let queryText = text;
         let queryParams = params;

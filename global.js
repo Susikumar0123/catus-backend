@@ -301,23 +301,35 @@ async function requestOTP() {
     tempPhone = phone;
     
     try {
-        const response = await fetch(`${API_BASE_URL}/api/login`, {
+        // First check if user exists in database
+        const loginRes = await fetch(`${API_BASE_URL}/api/login`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify({ phone: tempPhone })
         });
-        const data = await response.json();
+        const loginData = await loginRes.json();
 
-        if (data.success) {
-            if (data.exists) {
-                currentUser = data.user;
+        if (loginData.success) {
+            if (loginData.exists) {
+                currentUser = loginData.user;
                 if(currentUser.wallet === undefined) currentUser.wallet = 2500;
-                document.getElementById('otpInfoText').textContent = `OTP sent to registered mobile for +91 ${tempPhone}. (Enter 1234)`;
-                showAuthStep('otp');
-            } else {
-                showAuthStep('register');
             }
-            showToast("OTP sent successfully!", false);
+
+            // Now trigger REAL SMS OTP via Fast2SMS backend route
+            const smsRes = await fetch(`${API_BASE_URL}/api/send-otp`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ phone: tempPhone })
+            });
+            const smsData = await smsRes.json();
+
+            if (smsData.success) {
+                showAuthStep('otp');
+                document.getElementById('otpInfoText').textContent = `Real OTP sent via SMS to +91 ${tempPhone}`;
+                showToast("OTP sent successfully to your mobile!", false);
+            } else {
+                alert(smsData.message || 'Failed to send real SMS OTP.');
+            }
         }
     } catch (err) {
         alert('Server connection error. Make sure backend is running.');
@@ -325,10 +337,30 @@ async function requestOTP() {
     }
 }
 
-function verifyOTP() {
+async function verifyOTP() {
     const otp = document.getElementById('inputOTP').value.trim();
-    if (otp === "1234") {
-        if (currentUser) {
+    if (otp.length !== 4) {
+        alert('Please enter the 4-digit OTP received via SMS.');
+        return;
+    }
+
+    try {
+        // Verify real OTP with backend
+        const response = await fetch(`${API_BASE_URL}/api/verify-otp`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ phone: tempPhone, otp: otp })
+        });
+        const data = await response.json();
+
+        if (data.success) {
+            // If user didn't exist during login check, direct them to register step
+            if (!currentUser) {
+                showAuthStep('register');
+                showToast("OTP Verified! Please complete registration.", false);
+                return;
+            }
+
             localStorage.setItem('catus_logged_user', JSON.stringify(currentUser));
             updateHeaderLoginUI();
             toggleAuthModal(false);
@@ -337,9 +369,12 @@ function verifyOTP() {
             
             if (orderPollingInterval) clearInterval(orderPollingInterval);
             orderPollingInterval = setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
+        } else {
+            alert(data.message || 'Invalid OTP. Please try again.');
         }
-    } else {
-        alert('Invalid OTP. Please enter 1234.');
+    } catch (err) {
+        alert('Server connection error during OTP verification.');
+        console.error(err);
     }
 }
 

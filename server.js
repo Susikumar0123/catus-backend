@@ -4,6 +4,7 @@ const Razorpay = require('razorpay');
 const multer = require('multer');
 const path = require('path');
 const db = require('./db');
+const axios = require('axios');
 require('dotenv').config();
 
 const app = express();
@@ -58,6 +59,62 @@ app.post('/api/login', (req, res) => {
             res.json({ success: true, exists: false, message: 'User not found. Please register.' });
         }
     });
+});
+
+// ==========================================
+// REAL OTP SMS API ROUTES (Fast2SMS)
+// ==========================================
+const otpStorage = {}; // தற்காலிகமாக OTP-களை சேமிக்க
+
+app.post('/api/send-otp', async (req, res) => {
+    const { phone } = req.body;
+    
+    if (!phone || phone.length !== 10) {
+        return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
+    }
+
+    // 4 இலக்க ரேண்டம் OTP ஜெனரேட் செய்தல்
+    const generatedOtp = Math.floor(1000 + Math.random() * 9000);
+    otpStorage[phone] = generatedOtp;
+
+    // உங்கள் Fast2SMS API Key
+    const apiKey = "M0fF6t4g2UDwhPzLRxGvKmuE18CV5jSipn9lsAoQH3X7dJaNWBBdci0bVzN5H3JkonOfTlZsSvG9jEDa"; 
+    const message = `Your Catus Electronics verification OTP is ${generatedOtp}. Do not share this with anyone.`;
+
+    try {
+        const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
+            params: {
+                authorization: apiKey,
+                route: 'q',
+                message: message,
+                language: 'english',
+                flash: 0,
+                numbers: phone
+            }
+        });
+
+        if (response.data && response.data.return) {
+            console.log(`[FAST2SMS SUCCESS] OTP ${generatedOtp} sent to ${phone}`);
+            res.json({ success: true, message: 'OTP sent successfully to your mobile!' });
+        } else {
+            console.error('Fast2SMS Error Response:', response.data);
+            res.status(500).json({ success: false, message: response.data.message || 'Failed to send SMS.' });
+        }
+    } catch (error) {
+        console.error('SMS Gateway Connection Error:', error.message);
+        res.status(500).json({ success: false, message: 'Server error while sending SMS.' });
+    }
+});
+
+app.post('/api/verify-otp', (req, res) => {
+    const { phone, otp } = req.body;
+    
+    if (otpStorage[phone] && String(otpStorage[phone]) === String(otp)) {
+        delete otpStorage[phone];
+        res.json({ success: true, message: 'OTP verified successfully!' });
+    } else {
+        res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+    }
 });
 
 // ==========================================
