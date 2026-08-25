@@ -62,9 +62,12 @@ app.post('/api/login', (req, res) => {
 });
 
 // ==========================================
-// OFFICIAL FAST2SMS OTP API ROUTES
+// OFFICIAL FAST2SMS OTP API ROUTES (Fixed & Working)
 // ==========================================
-const FAST2SMS_API_KEY = "M0fF6t4g2UDwhPzLRxGvKmuE18CV5jSipn9lsAoQH3X7dJaNWBBdci0bVzN5H3JkonOfTlZsSvG9jEDa"; 
+const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || "M0fF6t4g2UDwhPzLRxGvKmuE18CV5jSipn9lsAoQH3X7dJaNWBBdci0bVzN5H3JkonOfTlZsSvG9jEDa"; 
+
+// Temporary server memory store for OTPs (Production-ku appo DB-la table create pannikalam)
+global.otpStore = global.otpStore || {};
 
 // 1. Send OTP Route
 app.post('/api/send-otp', async (req, res) => {
@@ -74,20 +77,23 @@ app.post('/api/send-otp', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
     }
 
+    // 4 digit random OTP generate panrathu
+    const randomOtp = Math.floor(1000 + Math.random() * 9000);
+    global.otpStore[phone] = randomOtp; // Server memory-la save panrom
+
     try {
-        const response = await axios.post('https://www.fast2sms.com/dev/otp/send', {
-            mobile: phone,
-            otp_id: "your_otp_id_here", // <-- உங்களது Fast2SMS கணக்கில் approved ஆகியுள்ள OTP Template ID-ஐ இங்கே போடவும்
-            otp_length: 4             // 4 இலக்க OTP
-        }, {
-            headers: {
-                'Authorization': FAST2SMS_API_KEY,
-                'Content-Type': 'application/json'
+        const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
+            params: {
+                authorization: FAST2SMS_API_KEY,
+                route: 'otp',
+                variables_values: randomOtp,
+                flash: 0,
+                numbers: phone
             }
         });
 
         if (response.data && response.data.return) {
-            console.log(`[FAST2SMS SUCCESS] OTP sent to ${phone}`);
+            console.log(`[FAST2SMS SUCCESS] OTP ${randomOtp} sent to ${phone}`);
             res.json({ success: true, message: 'OTP sent successfully to your mobile!' });
         } else {
             console.error('Fast2SMS Error Response:', response.data);
@@ -95,7 +101,7 @@ app.post('/api/send-otp', async (req, res) => {
         }
     } catch (error) {
         console.error('SMS Gateway Connection Error:', error.response?.data || error.message);
-        res.status(500).json({ success: false, message: error.response?.data?.message || 'Server error while sending SMS.' });
+        res.status(500).json({ success: false, message: 'Server error while sending SMS.' });
     }
 });
 
@@ -107,27 +113,15 @@ app.post('/api/verify-otp', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Phone number and OTP are required.' });
     }
 
-    try {
-        const response = await axios.post('https://www.fast2sms.com/dev/otp/verify', {
-            mobile: phone,
-            otp: otp
-        }, {
-            headers: {
-                'Authorization': FAST2SMS_API_KEY,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.data && response.data.return) {
-            console.log(`[FAST2SMS SUCCESS] OTP verified for ${phone}`);
-            res.json({ success: true, message: 'OTP verified successfully!' });
-        } else {
-            res.status(400).json({ success: false, message: response.data.message || 'Invalid or expired OTP.' });
-        }
-    } catch (error) {
-        console.error('OTP Verification Error:', error.response?.data || error.message);
-        const errorMsg = error.response?.data?.message || 'Invalid OTP or verification failed.';
-        res.status(400).json({ success: false, message: errorMsg });
+    global.otpStore = global.otpStore || {};
+    
+    // Server-la irukra OTP-um user enter pannura OTP-um match aagutha nu check panrathu
+    if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
+        delete global.otpStore[phone]; // Verified aana odane clear panrom
+        console.log(`[FAST2SMS SUCCESS] OTP verified for ${phone}`);
+        return res.json({ success: true, message: 'OTP verified successfully!' });
+    } else {
+        return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
     }
 });
 
