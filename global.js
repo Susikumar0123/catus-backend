@@ -345,7 +345,7 @@ async function verifyOTP() {
     }
 
     try {
-        // Verify real OTP with backend
+        // Backend-oda real OTP verify route-ai call panrom
         const response = await fetch(`${API_BASE_URL}/api/verify-otp`, {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
@@ -354,7 +354,7 @@ async function verifyOTP() {
         const data = await response.json();
 
         if (data.success) {
-            // If user didn't exist during login check, direct them to register step
+            // User database-la illana registration step-kku anuppum
             if (!currentUser) {
                 showAuthStep('register');
                 showToast("OTP Verified! Please complete registration.", false);
@@ -370,7 +370,7 @@ async function verifyOTP() {
             if (orderPollingInterval) clearInterval(orderPollingInterval);
             orderPollingInterval = setInterval(() => fetchUserOrdersPremium(currentUser.phone), 5000);
         } else {
-            alert(data.message || 'Invalid OTP. Please try again.');
+            alert(data.message || 'Invalid or expired OTP. Please try again.');
         }
     } catch (err) {
         alert('Server connection error during OTP verification.');

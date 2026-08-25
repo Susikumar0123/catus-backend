@@ -66,7 +66,6 @@ app.post('/api/login', (req, res) => {
 // ==========================================
 const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || "M0fF6t4g2UDwhPzLRxGvKmuE18CV5jSipn9lsAoQH3X7dJaNWBBdci0bVzN5H3JkonOfTlZsSvG9jEDa"; 
 
-// Temporary server memory store for OTPs (Production-ku appo DB-la table create pannikalam)
 global.otpStore = global.otpStore || {};
 
 // 1. Send OTP Route
@@ -77,9 +76,8 @@ app.post('/api/send-otp', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
     }
 
-    // 4 digit random OTP generate panrathu
     const randomOtp = Math.floor(1000 + Math.random() * 9000);
-    global.otpStore[phone] = randomOtp; // Server memory-la save panrom
+    global.otpStore[phone] = randomOtp;
 
     try {
         const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
@@ -115,9 +113,8 @@ app.post('/api/verify-otp', async (req, res) => {
 
     global.otpStore = global.otpStore || {};
     
-    // Server-la irukra OTP-um user enter pannura OTP-um match aagutha nu check panrathu
     if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
-        delete global.otpStore[phone]; // Verified aana odane clear panrom
+        delete global.otpStore[phone];
         console.log(`[FAST2SMS SUCCESS] OTP verified for ${phone}`);
         return res.json({ success: true, message: 'OTP verified successfully!' });
     } else {
