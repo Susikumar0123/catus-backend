@@ -325,7 +325,7 @@ async function requestOTP() {
 
             if (smsData.success) {
                 showAuthStep('otp');
-                document.getElementById('otpInfoText').textContent = `Real OTP sent via SMS to +91 ${tempPhone}`;
+                document.getElementById('otpInfoText').textContent = `OTP sent via SMS to +91 ${tempPhone}`;
                 showToast("OTP sent successfully to your mobile!", false);
             } else {
                 alert(smsData.message || 'Failed to send real SMS OTP.');
