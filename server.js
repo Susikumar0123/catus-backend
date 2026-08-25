@@ -80,11 +80,13 @@ app.post('/api/send-otp', async (req, res) => {
     global.otpStore[phone] = randomOtp;
 
     try {
+        // Fast2SMS Quick SMS Route (No DLT/Website verification hassle!)
         const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
             params: {
                 authorization: FAST2SMS_API_KEY,
-                route: 'otp',
-                variables_values: randomOtp,
+                route: 'q', // Quick SMS route
+                message: `Your Catus Electronics login OTP is ${randomOtp}. Valid for 10 minutes.`,
+                language: 'english',
                 flash: 0,
                 numbers: phone
             }
