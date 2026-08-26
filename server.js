@@ -84,18 +84,15 @@ app.post('/api/send-otp', async (req, res) => {
 });
 
 app.post('/api/verify-otp-set-password', (req, res) => {
-    const { phone, password } = req.body;
+    const { phone } = req.body;
     
     const checkQuery = 'SELECT * FROM users WHERE phone = ?';
     db.query(checkQuery, [phone], (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
+        
         if (results && results.length > 0) {
-            db.query('UPDATE users SET password = ? WHERE phone = ?', [password, phone], (upErr) => {
-                if (upErr) return res.status(500).json({ success: false, error: upErr.message });
-                db.query(checkQuery, [phone], (fetchErr, updatedUser) => {
-                    res.json({ success: true, user: updatedUser[0] });
-                });
-            });
+            // Password column illathanal, direct-ah user-ai anuppudhu
+            res.json({ success: true, user: results[0] });
         } else {
             res.json({ success: true, user: null });
         }
