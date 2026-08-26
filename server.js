@@ -85,6 +85,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
                     });
                 });
             } else {
+                // 🟢 மிக முக்கியம்: புதிய யூசர் டேட்டாபேஸில் இல்லாவிட்டినా OTP சரி என்று அனுப்ப வேண்டும்
                 res.json({ success: true, user: null });
             }
         });
