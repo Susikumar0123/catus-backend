@@ -39,26 +39,58 @@ app.post('/api/register', (req, res) => {
 });
 
 // ==========================================
-// 2. LOGIN API ROUTE
+// 2. CHECK USER & PASSWORD LOGIN API ROUTES
 // ==========================================
-app.post('/api/login', (req, res) => {
+app.post('/api/check-user', (req, res) => {
     const { phone } = req.body;
-    
     const query = 'SELECT * FROM users WHERE phone = ?';
     db.query(query, [phone], (err, results) => {
-        if (err) {
-            console.error("LOGIN DATABASE ERROR:", err);
-            console.error("LOGIN PHONE:", phone);
-            console.error("LOGIN QUERY:", query);
-            return res.status(500).json({ success: false, error: err.message });
-        }
-
+        if (err) return res.status(500).json({ success: false, error: err.message });
         if (results && results.length > 0) {
-            res.json({ success: true, exists: true, user: results[0] });
+            const user = results[0];
+            res.json({ success: true, exists: true, hasPassword: user.password ? true : false, user: user });
         } else {
-            res.json({ success: true, exists: false, message: 'User not found. Please register.' });
+            res.json({ success: true, exists: false, hasPassword: false });
         }
     });
+});
+
+app.post('/api/login-password', (req, res) => {
+    const { phone, password } = req.body;
+    const query = 'SELECT * FROM users WHERE phone = ? AND password = ?';
+    db.query(query, [phone, password], (err, results) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (results && results.length > 0) {
+            res.json({ success: true, user: results[0] });
+        } else {
+            res.status(401).json({ success: false, message: 'Incorrect password.' });
+        }
+    });
+});
+
+app.post('/api/verify-otp-set-password', (req, res) => {
+    const { phone, otp, password } = req.body;
+    global.otpStore = global.otpStore || {};
+    
+    if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
+        delete global.otpStore[phone];
+        const checkQuery = 'SELECT * FROM users WHERE phone = ?';
+        db.query(checkQuery, [phone], (err, results) => {
+            if (err) return res.status(500).json({ success: false, error: err.message });
+            if (results && results.length > 0) {
+                db.query('UPDATE users SET password = ? WHERE phone = ?', [password, phone], (upErr) => {
+                    if (upErr) return res.status(500).json({ success: false, error: upErr.message });
+                    db.query(checkQuery, [phone], (fetchErr, updatedUser) => {
+                        res.json({ success: true, user: updatedUser[0] });
+                    });
+                });
+            } else {
+                res.json({ success: true, user: null });
+            }
+        });
+    } else {
+        res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+    }
 });
 
 // ==========================================
