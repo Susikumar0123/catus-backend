@@ -110,7 +110,7 @@ const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || "M0fF6t4g2UDwhPzLRxGvKm
 
 global.otpStore = global.otpStore || {};
 
-// 1. Send OTP Route
+// 1. Send OTP Route (Modified to Save Wallet Balance during Testing)
 app.post('/api/send-otp', async (req, res) => {
     const { phone } = req.body;
     
@@ -121,12 +121,17 @@ app.post('/api/send-otp', async (req, res) => {
     const randomOtp = Math.floor(1000 + Math.random() * 9000);
     global.otpStore[phone] = randomOtp;
 
+    // 🛑 டெஸ்டிங் மோட்: வாலட் பணம் குறையாமல் இருக்க நேரடியாக கன்சோலில் OTP காட்டப்படும்
+    console.log(`[TEST MODE] OTP for ${phone} is: ${randomOtp}`);
+    return res.json({ success: true, message: 'OTP generated successfully (Wallet Safe)!' });
+
+    /* 
+    // ⚠️ நீங்கள் ஒரிஜினல் SMS அனுப்ப விரும்பினால் மட்டும் கீழა உள்ள கமெண்டை நீக்கி Fast2SMS-ஐ ஆன் செய்து கொள்ளலாம்:
     try {
-        // Fast2SMS Quick SMS Route (No DLT/Website verification hassle!)
         const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
             params: {
                 authorization: FAST2SMS_API_KEY,
-                route: 'q', // Quick SMS route
+                route: 'q',
                 message: `Your Catus Electronics login OTP is ${randomOtp}. Valid for 10 minutes.`,
                 language: 'english',
                 flash: 0,
@@ -145,6 +150,7 @@ app.post('/api/send-otp', async (req, res) => {
         console.error('SMS Gateway Connection Error:', error.response?.data || error.message);
         res.status(500).json({ success: false, message: 'Server error while sending SMS.' });
     }
+    */
 });
 
 // 2. Verify OTP Route
