@@ -68,25 +68,10 @@ app.post('/api/login-password', (req, res) => {
     });
 });
 
-app.post('/api/verify-otp', async (req, res) => {
-    const { phone } = req.body;
-    
-    if (!phone) {
-        return res.status(400).json({ success: false, message: 'Phone number is required.' });
-    }
-
-    console.log(`[BYPASS MODE] OTP check bypassed for ${phone}`);
-    return res.json({ success: true, message: 'OTP verified successfully!' });
-});
 
 // ==========================================
-// OFFICIAL FAST2SMS OTP API ROUTES (Fixed & Working)
+// SAFE TRIAL MODE OTP ROUTES (WALLET SAFE)
 // ==========================================
-const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || "M0fF6t4g2UDwhPzLRxGvKmuE18CV5jSipn9lsAoQH3X7dJaNWBBdci0bVzN5H3JkonOfTlZsSvG9jEDa"; 
-
-global.otpStore = global.otpStore || {};
-
-// 1. Send OTP Route
 app.post('/api/send-otp', async (req, res) => {
     const { phone } = req.body;
     
@@ -94,83 +79,35 @@ app.post('/api/send-otp', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
     }
 
-    const randomOtp = Math.floor(1000 + Math.random() * 9000);
-    global.otpStore[phone] = randomOtp;
+    console.log(`[TRIAL MODE] OTP generated for ${phone}: 1234 (Wallet Safe)`);
+    return res.json({ success: true, message: 'OTP generated successfully (Wallet Safe)!' });
+});
 
-    try {
-        // Fast2SMS Quick SMS Route (No DLT/Website verification hassle!)
-        const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
-            params: {
-                authorization: FAST2SMS_API_KEY,
-                route: 'q', // Quick SMS route
-                message: `Your Catus Electronics login OTP is ${randomOtp}. Valid for 10 minutes.`,
-                language: 'english',
-                flash: 0,
-                numbers: phone
-            }
-        });
-
-        if (response.data && response.data.return) {
-            console.log(`[FAST2SMS SUCCESS] OTP ${randomOtp} sent to ${phone}`);
-            res.json({ success: true, message: 'OTP sent successfully to your mobile!' });
+app.post('/api/verify-otp-set-password', (req, res) => {
+    const { phone, password } = req.body;
+    
+    const checkQuery = 'SELECT * FROM users WHERE phone = ?';
+    db.query(checkQuery, [phone], (err, results) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        if (results && results.length > 0) {
+            db.query('UPDATE users SET password = ? WHERE phone = ?', [password, phone], (upErr) => {
+                if (upErr) return res.status(500).json({ success: false, error: upErr.message });
+                db.query(checkQuery, [phone], (fetchErr, updatedUser) => {
+                    res.json({ success: true, user: updatedUser[0] });
+                });
+            });
         } else {
-            console.error('Fast2SMS Error Response:', response.data);
-            res.status(500).json({ success: false, message: response.data.message || 'Failed to send SMS.' });
+            res.json({ success: true, user: null });
         }
-    } catch (error) {
-        console.error('SMS Gateway Connection Error:', error.response?.data || error.message);
-        res.status(500).json({ success: false, message: 'Server error while sending SMS.' });
-    }
+    });
 });
 
-// 2. Verify OTP Route
-app.post('/api/verify-otp', async (req, res) => {
-    const { phone, otp } = req.body;
-    
-    if (!phone || !otp) {
-        return res.status(400).json({ success: false, message: 'Phone number and OTP are required.' });
-    }
-
-    global.otpStore = global.otpStore || {};
-    
-    if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
-        delete global.otpStore[phone];
-        console.log(`[FAST2SMS SUCCESS] OTP verified for ${phone}`);
-        return res.json({ success: true, message: 'OTP verified successfully!' });
-    } else {
-        return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
-    }
-});
-
-// 3. Resend OTP Route (Optional/Bonus based on Fast2SMS documentation)
 app.post('/api/resend-otp', async (req, res) => {
     const { phone } = req.body;
-
     if (!phone || phone.length !== 10) {
         return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
     }
-
-    try {
-        const response = await axios.post('https://www.fast2sms.com/dev/otp/resend', {
-            mobile: phone
-        }, {
-            headers: {
-                'Authorization': FAST2SMS_API_KEY,
-                'Content-Type': 'application/json'
-            }
-        });
-
-        if (response.data && response.data.return) {
-            console.log(`[FAST2SMS SUCCESS] OTP resent to ${phone}`);
-            res.json({ success: true, message: 'OTP resent successfully!' });
-        } else {
-            res.status(400).json({ success: false, message: response.data.message || 'Failed to resend OTP.' });
-        }
-    } catch (error) {
-        console.error('OTP Resend Error:', error.response?.data || error.message);
-        const errorMsg = error.response?.data?.message || 'Resend limit reached or window expired.';
-        res.status(400).json({ success: false, message: errorMsg });
-    }
+    return res.json({ success: true, message: 'OTP resent successfully (Trial Mode)!' });
 });
 
 // ==========================================
