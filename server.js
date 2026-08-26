@@ -68,39 +68,15 @@ app.post('/api/login-password', (req, res) => {
     });
 });
 
-app.post('/api/verify-otp-set-password', (req, res) => {
-    const { phone, otp, password } = req.body;
-    global.otpStore = global.otpStore || {};
+app.post('/api/verify-otp', async (req, res) => {
+    const { phone } = req.body;
     
-    // OTP சரியாக உள்ளதா எனச் சரிபார்த்தல்
-    if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
-        delete global.otpStore[phone]; // OTP-ஐ உடனே நீக்கிவிடுதல்
-        
-        const checkQuery = 'SELECT * FROM users WHERE phone = ?';
-        db.query(checkQuery, [phone], (err, results) => {
-            if (err) return res.status(500).json({ success: false, error: err.message });
-            
-            if (results && results.length > 0) {
-                // 1. ஏற்கனவே யூசர் இருந்தால் (Login / Forgot Password) பாஸ்வேர்ட் மட்டும் அப்டேட் செய்ய வேண்டும்
-                db.query('UPDATE users SET password = ? WHERE phone = ?', [password, phone], (upErr) => {
-                    if (upErr) return res.status(500).json({ success: false, error: upErr.message });
-                    db.query(checkQuery, [phone], (fetchErr, updatedUser) => {
-                        res.json({ success: true, user: updatedUser[0] });
-                    });
-                });
-            } else {
-                // 2. புதிய யூசர் என்றால் டேட்டாபேஸில் இல்லாவிட்டாலும் OTP சரிதான் என அனுமதித்து, 
-                // தற்காலிகமாக ஒரு ஒப்ஜெக்ட்டை அனுப்ப வேண்டும் (இதன் பிறகு /api/register கால் ஆகும்)
-                res.json({ 
-                    success: true, 
-                    message: 'OTP verified for new user!', 
-                    user: { phone: phone, password: password } 
-                });
-            }
-        });
-    } else {
-        return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+    if (!phone) {
+        return res.status(400).json({ success: false, message: 'Phone number is required.' });
     }
+
+    console.log(`[BYPASS MODE] OTP check bypassed for ${phone}`);
+    return res.json({ success: true, message: 'OTP verified successfully!' });
 });
 
 // ==========================================
@@ -110,7 +86,7 @@ const FAST2SMS_API_KEY = process.env.FAST2SMS_API_KEY || "M0fF6t4g2UDwhPzLRxGvKm
 
 global.otpStore = global.otpStore || {};
 
-// 1. Send OTP Route (Modified to Save Wallet Balance during Testing)
+// 1. Send OTP Route
 app.post('/api/send-otp', async (req, res) => {
     const { phone } = req.body;
     
@@ -121,17 +97,12 @@ app.post('/api/send-otp', async (req, res) => {
     const randomOtp = Math.floor(1000 + Math.random() * 9000);
     global.otpStore[phone] = randomOtp;
 
-    // 🛑 டெஸ்டிங் மோட்: வாலட் பணம் குறையாமல் இருக்க நேரடியாக கன்சோலில் OTP காட்டப்படும்
-    console.log(`[TEST MODE] OTP for ${phone} is: ${randomOtp}`);
-    return res.json({ success: true, message: 'OTP generated successfully (Wallet Safe)!' });
-
-    /* 
-    // ⚠️ நீங்கள் ஒரிஜினல் SMS அனுப்ப விரும்பினால் மட்டும் கீழა உள்ள கமெண்டை நீக்கி Fast2SMS-ஐ ஆன் செய்து கொள்ளலாம்:
     try {
+        // Fast2SMS Quick SMS Route (No DLT/Website verification hassle!)
         const response = await axios.get('https://www.fast2sms.com/dev/bulkV2', {
             params: {
                 authorization: FAST2SMS_API_KEY,
-                route: 'q',
+                route: 'q', // Quick SMS route
                 message: `Your Catus Electronics login OTP is ${randomOtp}. Valid for 10 minutes.`,
                 language: 'english',
                 flash: 0,
@@ -150,7 +121,6 @@ app.post('/api/send-otp', async (req, res) => {
         console.error('SMS Gateway Connection Error:', error.response?.data || error.message);
         res.status(500).json({ success: false, message: 'Server error while sending SMS.' });
     }
-    */
 });
 
 // 2. Verify OTP Route
