@@ -72,12 +72,16 @@ app.post('/api/verify-otp-set-password', (req, res) => {
     const { phone, otp, password } = req.body;
     global.otpStore = global.otpStore || {};
     
+    // OTP சரியாக உள்ளதா எனச் சரிபார்த்தல்
     if (global.otpStore[phone] && String(global.otpStore[phone]) === String(otp)) {
-        delete global.otpStore[phone];
+        delete global.otpStore[phone]; // OTP-ஐ உடனே நீக்கிவிடுதல்
+        
         const checkQuery = 'SELECT * FROM users WHERE phone = ?';
         db.query(checkQuery, [phone], (err, results) => {
             if (err) return res.status(500).json({ success: false, error: err.message });
+            
             if (results && results.length > 0) {
+                // 1. ஏற்கனவே யூசர் இருந்தால் (Login / Forgot Password) பாஸ்வேர்ட் மட்டும் அப்டேட் செய்ய வேண்டும்
                 db.query('UPDATE users SET password = ? WHERE phone = ?', [password, phone], (upErr) => {
                     if (upErr) return res.status(500).json({ success: false, error: upErr.message });
                     db.query(checkQuery, [phone], (fetchErr, updatedUser) => {
@@ -85,12 +89,17 @@ app.post('/api/verify-otp-set-password', (req, res) => {
                     });
                 });
             } else {
-                // 🟢 மிக முக்கியம்: புதிய யூசர் டேட்டாபேஸில் இல்லாவிட்டినా OTP சரி என்று அனுப்ப வேண்டும்
-                res.json({ success: true, user: null });
+                // 2. புதிய யூசர் என்றால் டேட்டாபேஸில் இல்லாவிட்டாலும் OTP சரிதான் என அனுமதித்து, 
+                // தற்காலிகமாக ஒரு ஒப்ஜெக்ட்டை அனுப்ப வேண்டும் (இதன் பிறகு /api/register கால் ஆகும்)
+                res.json({ 
+                    success: true, 
+                    message: 'OTP verified for new user!', 
+                    user: { phone: phone, password: password } 
+                });
             }
         });
     } else {
-        res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
+        return res.status(400).json({ success: false, message: 'Invalid or expired OTP.' });
     }
 });
 
