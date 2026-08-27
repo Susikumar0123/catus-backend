@@ -634,6 +634,21 @@ function renderAuditLogs() {
 
 async function fetchUserOrdersPremium(phone) {
     try {
+        // Fetch services map first so we can grab the correct image per product_id
+        let servicesMap = {};
+        try {
+            const sRes = await fetch(`${API_BASE_URL}/api/services`);
+            const sData = await sRes.json();
+            if (sData.success && sData.services) {
+                sData.services.forEach(srv => {
+                    servicesMap[String(srv.service_id).trim()] = srv.image_url;
+                    servicesMap[srv.service_name.toLowerCase().trim()] = srv.image_url;
+                });
+            }
+        } catch(e) {
+            console.error("Could not preload services map for images", e);
+        }
+
         const response = await fetch(`${API_BASE_URL}/api/orders/${phone}`);
         const data = await response.json();
         
@@ -643,7 +658,7 @@ async function fetchUserOrdersPremium(phone) {
         const adminCache = JSON.parse(localStorage.getItem('catusAdminCache') || '{}');
         const ratedOrders = JSON.parse(localStorage.getItem('catus_rated_orders')) || [];
 
-        if (data.success && data.orders && data.orders.length > 0) {
+        if (data.success && data.orders) {
             let processedOrders = data.orders.map(o => {
                 let cached = adminCache[o.order_id];
                 if (cached) {
@@ -687,8 +702,11 @@ async function fetchUserOrdersPremium(phone) {
                     
                     let orderDateObj = new Date(currentOrder.order_date);
                     let dateStringLive = orderDateObj.toLocaleDateString() + ' ' + orderDateObj.toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                    let displayProductId = currentOrder.product_id || Math.floor(100 + Math.random() * 900);
+                    let displayProductId = currentOrder.product_id || 'tv-repair';
                     
+                    // Match the correct product image dynamically
+                    let orderImgUrl = servicesMap[String(displayProductId).trim()] || servicesMap[currentOrder.service_name.toLowerCase().trim()] || 'https://images.unsplash.com/photo-1540932239986-30128078f3c5?auto=format&fit=crop&w=150&q=80';
+
                     let stepBookedClass = 'prem-step-compact done';
                     let stepAssignedClass = 'prem-step-compact';
                     let stepWayClass = 'prem-step-compact';
@@ -763,7 +781,7 @@ async function fetchUserOrdersPremium(phone) {
                         
                         <div class="prem-live-middle-row">
                             <div class="prem-tech-info-compact">
-                                <img src="https://images.unsplash.com/photo-1560250097-0b93528c311a?auto=format&fit=crop&w=150&q=80" alt="Technician" class="prem-tech-img-compact">
+                                <img src="${orderImgUrl}" alt="Service Image" class="prem-tech-img-compact">
                                 <div class="prem-tech-details-compact">
                                     <h4>${techName}</h4>
                                     <p><i class="fa-solid fa-star" style="color:#f59e0b;"></i> 4.9 • ${techPhoneText}</p>
@@ -811,63 +829,71 @@ async function fetchUserOrdersPremium(phone) {
                 liveContainer.innerHTML = '';
             }
 
-            // Update My Bookings Tab List (History)
-            ordersList.innerHTML = ''; 
-            processedOrders.forEach(order => {
-                let statusColor = (order.status.toLowerCase() === 'cancelled' || order.status.toLowerCase() === 'rejected') ? '#ef4444' : '#16a34a';
-                let statusBg = (order.status.toLowerCase() === 'cancelled' || order.status.toLowerCase() === 'rejected') ? '#fef2f2' : '#f0fdf4';
-                
-                let dateString = new Date(order.order_date).toLocaleDateString() + ' ' + new Date(order.order_date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
-                
-                let displayProductId = order.product_id || Math.floor(100 + Math.random() * 900);
-                let safeCustName = currentUser.name ? currentUser.name.replace(/'/g, "\\'") : 'Customer';
-                let safeServiceName = order.service_name.replace(/'/g, "\\'");
-                
-                let isRated = ratedOrders.includes(String(order.order_id));
-                let ratingBtnHTML = '';
-                let actionButtonsHTML = '';
+            if (processedOrders.length > 0) {
+                ordersList.innerHTML = ''; 
+                processedOrders.forEach(order => {
+                    let statusColor = (order.status.toLowerCase() === 'cancelled' || order.status.toLowerCase() === 'rejected') ? '#ef4444' : '#16a34a';
+                    let statusBg = (order.status.toLowerCase() === 'cancelled' || order.status.toLowerCase() === 'rejected') ? '#fef2f2' : '#f0fdf4';
+                    
+                    let dateString = new Date(order.order_date).toLocaleDateString() + ' ' + new Date(order.order_date).toLocaleTimeString([], {hour: '2-digit', minute:'2-digit'});
+                    
+                    let displayProductId = order.product_id || 'tv-repair';
+                    let safeCustName = currentUser.name ? currentUser.name.replace(/'/g, "\\'") : 'Customer';
+                    let safeServiceName = order.service_name.replace(/'/g, "\\'");
+                    
+                    // Match the correct product image dynamically for history list
+                    let orderImgUrl = servicesMap[String(displayProductId).trim()] || servicesMap[order.service_name.toLowerCase().trim()] || 'https://images.unsplash.com/photo-1540932239986-30128078f3c5?auto=format&fit=crop&w=150&q=80';
 
-                if(order.status.toLowerCase() === 'completed') {
-                    if (isRated) {
-                        ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#f1f5f9; color:#94a3b8; border-color:#e2e8f0; cursor:not-allowed;" onclick="showToast('You have already rated this service!', true)"><i class="fa-solid fa-check-circle"></i> Rated</button>`;
+                    let isRated = ratedOrders.includes(String(order.order_id));
+                    let ratingBtnHTML = '';
+
+                    let actionButtonsHTML = '';
+                    if(order.status.toLowerCase() === 'completed') {
+                        if (isRated) {
+                            ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#f1f5f9; color:#94a3b8; border-color:#e2e8f0; cursor:not-allowed;" onclick="showToast('You have already rated this service!', true)"><i class="fa-solid fa-check-circle"></i> Rated</button>`;
+                        } else {
+                            ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#10b981; color:white; border-color:#10b981;" onclick="openRatingModal('${order.order_id}', '${safeServiceName}')"><i class="fa-solid fa-star"></i> Rate Service</button>`;
+                        }
+                        actionButtonsHTML = `
+                            <button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px;" onclick="downloadInvoice('${order.order_id}', '${safeServiceName}', '${order.amount}', '${order.status}', '${dateString}', '${displayProductId}', '${safeCustName}', '${currentUser.phone}')"><i class="fa-solid fa-file-pdf"></i> Download PDF</button>
+                            <button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#eff6ff; color:#0284c7; border-color:#bfdbfe;" onclick="openInvoiceView('${order.order_id}', '${safeServiceName}', '${order.amount}', '${order.status}', '${dateString}', '${displayProductId}')"><i class="fa-solid fa-file-invoice"></i> View Invoice</button>
+                            ${ratingBtnHTML}
+                        `;
                     } else {
-                        ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#10b981; color:white; border-color:#10b981;" onclick="openRatingModal('${order.order_id}', '${safeServiceName}', '${displayProductId}')"><i class="fa-solid fa-star"></i> Rate Service</button>`;
+                        ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#f1f5f9; color:#94a3b8; border-color:#e2e8f0; cursor:not-allowed;" disabled><i class="fa-solid fa-star"></i> Rate Service</button>`;
+                        actionButtonsHTML = `
+                            ${ratingBtnHTML}
+                        `;
                     }
-                    actionButtonsHTML = `
-                        <button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px;" onclick="downloadInvoice('${order.order_id}', '${safeServiceName}', '${order.amount}', '${order.status}', '${dateString}', '${displayProductId}', '${safeCustName}', '${currentUser.phone}')"><i class="fa-solid fa-file-pdf"></i> Download PDF</button>
-                        <button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#eff6ff; color:#0284c7; border-color:#bfdbfe;" onclick="openInvoiceView('${order.order_id}', '${safeServiceName}', '${order.amount}', '${order.status}', '${dateString}', '${displayProductId}')"><i class="fa-solid fa-file-invoice"></i> View Invoice</button>
-                        ${ratingBtnHTML}
-                    `;
-                } else {
-                    ratingBtnHTML = `<button class="prem-btn-small" style="flex:1; padding:8px; font-size:11px; background:#f1f5f9; color:#94a3b8; border-color:#e2e8f0; cursor:not-allowed;" disabled><i class="fa-solid fa-star"></i> Rate Service</button>`;
-                    actionButtonsHTML = `${ratingBtnHTML}`;
-                }
 
-                ordersList.innerHTML += `
-                    <div class="prem-card-box" style="margin-bottom:10px; padding:15px; border-radius:8px; box-shadow: 0 2px 4px rgba(0,0,0,0.03);">
-                        <div style="display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9; padding-bottom:10px; margin-bottom:10px;">
-                            <div style="display:flex; gap:12px;">
-                                <img src="https://images.unsplash.com/photo-1540932239986-30128078f3c5?auto=format&fit=crop&w=150&q=80" style="width:45px; height:45px; border-radius:6px; object-fit:cover; border:1px solid #e2e8f0;">
-                                <div>
-                                    <strong style="color:#0f172a; font-size:14px; display:block; margin-bottom:6px;">${order.service_name}</strong>
-                                    <div style="font-size:11px; color:#64748b; display:flex; flex-wrap:wrap; align-items:center; gap:6px;">
-                                        <span><b>Order ID:</b> #${order.order_id}</span> <span style="color:#cbd5e1;">|</span>
-                                        <span><b>Product ID:</b> #${displayProductId}</span> <span style="color:#cbd5e1;">|</span>
-                                        <span><b>Date:</b> ${dateString}</span>
+                    ordersList.innerHTML += `
+                        <div class="prem-card-box" style="margin-bottom:10px; padding:15px; border-radius:8px; box-shadow: 0 2px 4px rgba(0,0,0,0.03);">
+                            <div style="display:flex; justify-content:space-between; align-items:flex-start; border-bottom:1px solid #f1f5f9; padding-bottom:10px; margin-bottom:10px;">
+                                <div style="display:flex; gap:12px;">
+                                    <img src="${orderImgUrl}" style="width:45px; height:45px; border-radius:6px; object-fit:cover; border:1px solid #e2e8f0;">
+                                    <div>
+                                        <strong style="color:#0f172a; font-size:14px; display:block; margin-bottom:6px;">${order.service_name}</strong>
+                                        <div style="font-size:11px; color:#64748b; display:flex; flex-wrap:wrap; align-items:center; gap:6px;">
+                                            <span><b>Order ID:</b> #${order.order_id}</span> <span style="color:#cbd5e1;">|</span>
+                                            <span><b>Product ID:</b> #${displayProductId}</span> <span style="color:#cbd5e1;">|</span>
+                                            <span><b>Date:</b> ${dateString}</span>
+                                        </div>
                                     </div>
                                 </div>
+                                <div style="text-align:right;">
+                                    <span style="background:${statusBg}; color:${statusColor}; padding:4px 8px; border-radius:4px; font-size:10px; font-weight:700;">${order.status}</span>
+                                    <div style="font-size:15px; font-weight:800; color:#0f172a; margin-top:8px;">₹${order.amount}</div>
+                                </div>
                             </div>
-                            <div style="text-align:right;">
-                                <span style="background:${statusBg}; color:${statusColor}; padding:4px 8px; border-radius:4px; font-size:10px; font-weight:700;">${order.status}</span>
-                                <div style="font-size:15px; font-weight:800; color:#0f172a; margin-top:8px;">₹${order.amount}</div>
+                            <div style="display:flex; gap:8px;">
+                                ${actionButtonsHTML}
                             </div>
                         </div>
-                        <div style="display:flex; gap:8px;">
-                            ${actionButtonsHTML}
-                        </div>
-                    </div>
-                `;
-            });
+                    `;
+                });
+            } else {
+                ordersList.innerHTML = `<p style="color:#64748b; text-align:center; padding: 20px;">No bookings found yet.</p>`;
+            }
         } else {
             window.currentOrders = [];
             document.getElementById('sumTotal').textContent = "0";
