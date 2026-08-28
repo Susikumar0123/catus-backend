@@ -85,102 +85,101 @@ app.post('/api/login-password', (req, res) => {
 
 app.post('/api/send-otp', (req, res) => {
     const { phone } = req.body;
+    const cleanPhone = String(phone || '').trim();
 
-    if (!phone || String(phone).trim().length !== 10) {
+    if (!/^\d{10}$/.test(cleanPhone)) {
         return res.status(400).json({
             success: false,
             message: 'Invalid 10-digit mobile number.'
         });
     }
 
-    const cleanPhone = String(phone).trim();
-
-    // Trial OTP
-    const generatedOtp = '1234';
+    const otp = '1234';
     const expiresAt = Date.now() + (5 * 60 * 1000);
 
     const query = `
         UPDATE users
         SET otp_code = ?, otp_expires_at = ?
         WHERE phone = ?
+        RETURNING id, phone, otp_code, otp_expires_at
     `;
 
-    db.query(
-        query,
-        [generatedOtp, expiresAt, cleanPhone],
-        (err, result) => {
-            if (err) {
-                console.error('OTP Save Error:', err);
-                return res.status(500).json({
-                    success: false,
-                    message: 'Failed to save OTP.'
-                });
-            }
-
-            if (result.affectedRows === 0) {
-                return res.status(404).json({
-                    success: false,
-                    message: 'User not found.'
-                });
-            }
-
-            console.log(
-                `[OTP SERVICE] OTP generated for ${cleanPhone}: ${generatedOtp}`
-            );
-
-            res.json({
-                success: true,
-                message: 'OTP sent successfully!'
-            });
-        }
-    );
-});
-
-app.post('/api/verify-otp-set-password', (req, res) => {
-    const { phone, otp, password } = req.body;
-
-    const cleanPhone = String(phone || '').trim();
-    const cleanOtp = String(otp || '').trim();
-    const newPassword = String(password || '').trim();
-
-    if (!cleanPhone || !cleanOtp) {
-        return res.status(400).json({
-            success: false,
-            message: 'Phone and OTP are required.'
-        });
-    }
-
-    if (!newPassword || newPassword.length < 4) {
-        return res.status(400).json({
-            success: false,
-            message: 'Password must be at least 4 characters.'
-        });
-    }
-
-    const findUserQuery = `
-        SELECT * FROM users
-        WHERE phone = ?
-        LIMIT 1
-    `;
-
-    db.query(findUserQuery, [cleanPhone], (err, results) => {
+    db.query(query, [otp, expiresAt, cleanPhone], (err, rows) => {
         if (err) {
+            console.error('OTP Save Error:', err);
             return res.status(500).json({
                 success: false,
-                error: err.message
+                message: err.message
             });
         }
 
-        if (!results || results.length === 0) {
+        if (!rows || rows.length === 0) {
             return res.status(404).json({
                 success: false,
                 message: 'User not found.'
             });
         }
 
-        const user = results[0];
+        console.log(`[OTP SERVICE] ${cleanPhone} => ${otp}`);
 
-        // OTP exists?
+        return res.json({
+            success: true,
+            message: 'OTP sent successfully!'
+        });
+    });
+});
+
+app.post('/api/verify-otp-set-password', (req, res) => {
+    const phone = String(req.body.phone || '').trim();
+    const otp = String(req.body.otp || '').trim();
+    const password = String(req.body.password || '').trim();
+
+    if (!phone || !otp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Phone and OTP are required.'
+        });
+    }
+
+    if (!/^\d{4}$/.test(otp)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid OTP format.'
+        });
+    }
+
+    if (password.length < 4) {
+        return res.status(400).json({
+            success: false,
+            message: 'Password must be at least 4 characters.'
+        });
+    }
+
+    const findQuery = `
+        SELECT *
+        FROM users
+        WHERE phone = ?
+        LIMIT 1
+    `;
+
+    db.query(findQuery, [phone], (err, rows) => {
+        if (err) {
+            console.error('Find User Error:', err);
+            return res.status(500).json({
+                success: false,
+                message: err.message
+            });
+        }
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found.'
+            });
+        }
+
+        const user = rows[0];
+
         if (!user.otp_code) {
             return res.status(400).json({
                 success: false,
@@ -188,68 +187,54 @@ app.post('/api/verify-otp-set-password', (req, res) => {
             });
         }
 
-        // Expired?
-        if (!user.otp_expires_at || Date.now() > Number(user.otp_expires_at)) {
+        if (
+            !user.otp_expires_at ||
+            Date.now() > Number(user.otp_expires_at)
+        ) {
             return res.status(400).json({
                 success: false,
-                message: 'OTP has expired. Please request a new OTP.'
+                message: 'OTP has expired. Please request a new one.'
             });
         }
 
-        // Match?
-        if (String(user.otp_code).trim() !== cleanOtp) {
+        if (String(user.otp_code).trim() !== otp) {
             return res.status(400).json({
                 success: false,
                 message: 'Invalid or incorrect OTP.'
             });
         }
 
-        // OTP correct -> update password and clear OTP
         const updateQuery = `
             UPDATE users
             SET password = ?,
                 otp_code = NULL,
                 otp_expires_at = NULL
             WHERE phone = ?
+            RETURNING *
         `;
 
-        db.query(
-            updateQuery,
-            [newPassword, cleanPhone],
-            (updateErr) => {
-                if (updateErr) {
-                    return res.status(500).json({
-                        success: false,
-                        error: updateErr.message
-                    });
-                }
-
-                const fetchQuery = `
-                    SELECT * FROM users
-                    WHERE phone = ?
-                    LIMIT 1
-                `;
-
-                db.query(
-                    fetchQuery,
-                    [cleanPhone],
-                    (fetchErr, updatedResults) => {
-                        if (fetchErr) {
-                            return res.status(500).json({
-                                success: false,
-                                error: fetchErr.message
-                            });
-                        }
-
-                        res.json({
-                            success: true,
-                            message: 'Password updated successfully!',
-                            user: updatedResults[0]
-                        });
-                    }
-                );
+        db.query(updateQuery, [password, phone], (updateErr, updatedRows) => {
+            if (updateErr) {
+                console.error('Password Update Error:', updateErr);
+                return res.status(500).json({
+                    success: false,
+                    message: updateErr.message
+                });
             }
-        );
+
+            if (!updatedRows || updatedRows.length === 0) {
+                return res.status(500).json({
+                    success: false,
+                    message: 'Password update failed.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Password updated successfully!',
+                user: updatedRows[0]
+            });
+        });
     });
 });
 
