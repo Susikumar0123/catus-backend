@@ -656,15 +656,27 @@ app.post('/api/upload-image', upload.single('image'), (req, res) => {
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
 app.get('/api/debug-db', (req, res) => {
     const query = `
-        SELECT 
+        SELECT
             current_database() AS database_name,
             current_schema() AS schema_name,
-            current_user AS database_user
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                AND table_name = 'users'
+                AND column_name = 'otp_code'
+            ) AS otp_code_exists,
+            EXISTS (
+                SELECT 1
+                FROM information_schema.columns
+                WHERE table_schema = 'public'
+                AND table_name = 'users'
+                AND column_name = 'otp_expires_at'
+            ) AS otp_expires_at_exists
     `;
 
     db.query(query, [], (err, rows) => {
         if (err) {
-            console.error('DEBUG DB ERROR:', err);
             return res.status(500).json({
                 success: false,
                 error: err.message
