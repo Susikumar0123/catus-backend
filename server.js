@@ -698,6 +698,28 @@ app.get('/api/fix-otp-db', (req, res) => {
         });
     });
 });
-app.listen(PORT, '0.0.0.0', () => {
-    console.log(`Server is running on http://0.0.0.0:${PORT}`);
-});
+// ==========================================
+// DATABASE STARTUP MIGRATION
+// ==========================================
+const initDatabase = () => {
+    const query = `
+        ALTER TABLE public.users
+        ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10),
+        ADD COLUMN IF NOT EXISTS otp_expires_at BIGINT
+    `;
+
+    db.query(query, [], (err) => {
+        if (err) {
+            console.error('❌ OTP columns migration failed:', err.message);
+            process.exit(1);
+        }
+
+        console.log('✅ OTP columns verified/created successfully.');
+
+        app.listen(PORT, '0.0.0.0', () => {
+            console.log(`✅ Server is running on port ${PORT}`);
+        });
+    });
+};
+
+initDatabase();
