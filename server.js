@@ -654,7 +654,29 @@ app.post('/api/upload-image', upload.single('image'), (req, res) => {
 
 // அப்லோட் செய்த இமேஜ்களை பார்க்க ஸ்டேடிக் ஃபோல்டர்
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
+app.get('/api/debug-db', (req, res) => {
+    const query = `
+        SELECT 
+            current_database() AS database_name,
+            current_schema() AS schema_name,
+            current_user AS database_user
+    `;
 
+    db.query(query, [], (err, rows) => {
+        if (err) {
+            console.error('DEBUG DB ERROR:', err);
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            database: rows[0]
+        });
+    });
+});
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
 });
