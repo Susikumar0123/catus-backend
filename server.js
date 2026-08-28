@@ -654,29 +654,16 @@ app.post('/api/upload-image', upload.single('image'), (req, res) => {
 
 // அப்லோட் செய்த இமேஜ்களை பார்க்க ஸ்டேடிக் ஃபோல்டர்
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
-app.get('/api/debug-db', (req, res) => {
+app.get('/api/fix-otp-db', (req, res) => {
     const query = `
-        SELECT
-            current_database() AS database_name,
-            current_schema() AS schema_name,
-            EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = 'users'
-                AND column_name = 'otp_code'
-            ) AS otp_code_exists,
-            EXISTS (
-                SELECT 1
-                FROM information_schema.columns
-                WHERE table_schema = 'public'
-                AND table_name = 'users'
-                AND column_name = 'otp_expires_at'
-            ) AS otp_expires_at_exists
+        ALTER TABLE public.users
+        ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10),
+        ADD COLUMN IF NOT EXISTS otp_expires_at BIGINT
     `;
 
     db.query(query, [], (err, rows) => {
         if (err) {
+            console.error('OTP DB FIX ERROR:', err);
             return res.status(500).json({
                 success: false,
                 error: err.message
@@ -685,7 +672,7 @@ app.get('/api/debug-db', (req, res) => {
 
         res.json({
             success: true,
-            database: rows[0]
+            message: 'OTP columns created/verified in live database'
         });
     });
 });
