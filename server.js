@@ -102,88 +102,59 @@ app.post('/api/send-otp', async (req, res) => {
     return res.json({ success: true, message: 'OTP sent successfully!' });
 });
 
+// ==========================================
+// 2. VERIFY OTP & SET PASSWORD ROUTE (Fixed)
+// ==========================================
 app.post('/api/verify-otp-set-password', (req, res) => {
     const { phone, otp, password } = req.body;
-
+    
     if (!phone || !otp) {
-        return res.status(400).json({
-            success: false,
-            message: 'Phone and OTP are required.'
-        });
+        return res.status(400).json({ success: false, message: 'Phone and OTP are required.' });
     }
 
     const storedData = otpStore[phone];
 
-    if (!storedData) {
-        return res.status(400).json({
-            success: false,
-            message: 'OTP not found. Please request a new OTP.'
-        });
+    // 🛑 Check if OTP exists and matches
+    if (!storedData || String(storedData.otp).trim() !== String(otp).trim()) {
+        return res.status(400).json({ success: false, message: 'Invalid or incorrect OTP.' });
     }
 
+    // 🛑 Check if OTP expired
     if (Date.now() > storedData.expiresAt) {
         delete otpStore[phone];
-
-        return res.status(400).json({
-            success: false,
-            message: 'OTP has expired. Please request a new one.'
-        });
+        return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
     }
 
-    if (String(storedData.otp).trim() !== String(otp).trim()) {
-        return res.status(400).json({
-            success: false,
-            message: 'Invalid or incorrect OTP.'
-        });
-    }
-
+    // OTP Correct -> Clear from store
     delete otpStore[phone];
 
-    const newPass = String(password || '').trim();
+    let query = '';
+    let params = [];
 
-    if (newPass.length < 4) {
-        return res.status(400).json({
-            success: false,
-            message: 'Password must be at least 4 characters.'
-        });
+    if (password && password.trim().length >= 4) {
+        query = 'UPDATE users SET password = ? WHERE phone = ?';
+        params = [password.trim(), phone];
+    } else {
+        query = 'SELECT * FROM users WHERE phone = ?';
+        params = [phone];
     }
 
-    const updateQuery =
-        'UPDATE users SET password = ? WHERE phone = ?';
-
-    db.query(updateQuery, [newPass, phone], (err, result) => {
-        if (err) {
-            return res.status(500).json({
-                success: false,
-                error: err.message
-            });
-        }
-
-        if (result.affectedRows === 0) {
-            return res.status(404).json({
-                success: false,
-                message: 'User not found.'
-            });
-        }
-
-        const fetchQuery =
-            'SELECT * FROM users WHERE phone = ?';
-
+    db.query(query, params, (err, result) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        
+        const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
         db.query(fetchQuery, [phone], (err2, results) => {
-            if (err2) {
-                return res.status(500).json({
-                    success: false,
-                    error: err2.message
-                });
+            if (err2) return res.status(500).json({ success: false, error: err2.message });
+            
+            if (results && results.length > 0) {
+                res.json({ success: true, user: results[0] });
+            } else {
+                res.json({ success: false, message: 'User record not found.' });
             }
-
-            res.json({
-                success: true,
-                user: results[0]
-            });
         });
     });
 });
+
 
 // Direct Password Reset Route
 app.post('/api/update-password', (req, res) => {
