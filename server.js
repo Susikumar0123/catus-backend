@@ -84,7 +84,14 @@ app.post('/api/login-password', (req, res) => {
 // ==========================================
 
 app.post('/api/send-otp', (req, res) => {
-    const { phone } = req.body;
+    const {
+        phone,
+        mode,
+        name,
+        email,
+        pincode
+    } = req.body;
+
     const cleanPhone = String(phone || '').trim();
 
     if (!/^\d{10}$/.test(cleanPhone)) {
@@ -94,41 +101,154 @@ app.post('/api/send-otp', (req, res) => {
         });
     }
 
-    const otp = '1234';
+    const generatedOtp = '1234';
     const expiresAt = Date.now() + (5 * 60 * 1000);
 
-    const query = `
-        UPDATE users
-        SET otp_code = ?, otp_expires_at = ?
+
+    // ==========================================
+    // NEW USER REGISTRATION
+    // ==========================================
+    if (mode === 'register') {
+
+        // Check whether mobile already exists
+        const checkQuery = `
+            SELECT id
+            FROM public.users
+            WHERE phone = ?
+            LIMIT 1
+        `;
+
+        return db.query(checkQuery, [cleanPhone], (checkErr, rows) => {
+
+            if (checkErr) {
+                console.error('Registration check error:', checkErr);
+
+                return res.status(500).json({
+                    success: false,
+                    message: checkErr.message
+                });
+            }
+
+            // Already registered
+            if (rows && rows.length > 0) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Mobile number already registered. Please login.'
+                });
+            }
+
+            // Create temporary user record
+            const randomCustId =
+                Math.floor(10000 + Math.random() * 90000);
+
+            const insertQuery = `
+                INSERT INTO public.users
+                (id, name, email, phone, pincode, address, password, otp_code, otp_expires_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            `;
+
+            db.query(
+                insertQuery,
+                [
+                    randomCustId,
+                    name || '',
+                    email || '',
+                    cleanPhone,
+                    pincode || '',
+                    'No address saved',
+                    '',
+                    generatedOtp,
+                    expiresAt
+                ],
+                (insertErr) => {
+
+                    if (insertErr) {
+                        console.error(
+                            'Registration user creation error:',
+                            insertErr
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            message: insertErr.message
+                        });
+                    }
+
+                    console.log(
+                        `[REG OTP] ${cleanPhone} => ${generatedOtp}`
+                    );
+
+                    return res.json({
+                        success: true,
+                        message: 'OTP sent successfully!'
+                    });
+                }
+            );
+        });
+    }
+
+    // ==========================================
+    // FORGOT PASSWORD
+    // ==========================================
+
+    const checkQuery = `
+        SELECT id
+        FROM public.users
         WHERE phone = ?
-        RETURNING id, phone, otp_code, otp_expires_at
+        LIMIT 1
     `;
 
-    db.query(query, [otp, expiresAt, cleanPhone], (err, rows) => {
-        if (err) {
-            console.error('OTP Save Error:', err);
+    db.query(checkQuery, [cleanPhone], (checkErr, rows) => {
+
+        if (checkErr) {
             return res.status(500).json({
                 success: false,
-                message: err.message
+                message: checkErr.message
             });
         }
 
+        // Forgot password only for existing users
         if (!rows || rows.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'User not found.'
+                message: 'Mobile number is not registered.'
             });
         }
 
-        console.log(`[OTP SERVICE] ${cleanPhone} => ${otp}`);
+        const updateQuery = `
+            UPDATE public.users
+            SET otp_code = ?,
+                otp_expires_at = ?
+            WHERE phone = ?
+        `;
 
-        return res.json({
-            success: true,
-            message: 'OTP sent successfully!'
-        });
+        db.query(
+            updateQuery,
+            [generatedOtp, expiresAt, cleanPhone],
+            (updateErr) => {
+
+                if (updateErr) {
+                    return res.status(500).json({
+                        success: false,
+                        message: updateErr.message
+                    });
+                }
+
+                console.log(
+                    `[RESET OTP] ${cleanPhone} => ${generatedOtp}`
+                );
+
+                res.json({
+                    success: true,
+                    message: 'OTP sent successfully!'
+                });
+            }
+        );
     });
 });
-
+// ==========================================
+// VERIFY OTP & SET PASSWORD
+// ==========================================
 app.post('/api/verify-otp-set-password', (req, res) => {
     const phone = String(req.body.phone || '').trim();
     const otp = String(req.body.otp || '').trim();
@@ -148,23 +268,25 @@ app.post('/api/verify-otp-set-password', (req, res) => {
         });
     }
 
-    if (password.length < 4) {
+    if (!password || password.length < 4) {
         return res.status(400).json({
             success: false,
             message: 'Password must be at least 4 characters.'
         });
     }
 
-    const findQuery = `
+    const findUserQuery = `
         SELECT *
-        FROM users
+        FROM public.users
         WHERE phone = ?
         LIMIT 1
     `;
 
-    db.query(findQuery, [phone], (err, rows) => {
+    db.query(findUserQuery, [phone], (err, rows) => {
+
         if (err) {
             console.error('Find User Error:', err);
+
             return res.status(500).json({
                 success: false,
                 message: err.message
@@ -205,7 +327,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
         }
 
         const updateQuery = `
-            UPDATE users
+            UPDATE public.users
             SET password = ?,
                 otp_code = NULL,
                 otp_expires_at = NULL
@@ -213,31 +335,36 @@ app.post('/api/verify-otp-set-password', (req, res) => {
             RETURNING *
         `;
 
-        db.query(updateQuery, [password, phone], (updateErr, updatedRows) => {
-            if (updateErr) {
-                console.error('Password Update Error:', updateErr);
-                return res.status(500).json({
-                    success: false,
-                    message: updateErr.message
+        db.query(
+            updateQuery,
+            [password, phone],
+            (updateErr, updatedRows) => {
+
+                if (updateErr) {
+                    console.error('Password Update Error:', updateErr);
+
+                    return res.status(500).json({
+                        success: false,
+                        message: updateErr.message
+                    });
+                }
+
+                if (!updatedRows || updatedRows.length === 0) {
+                    return res.status(500).json({
+                        success: false,
+                        message: 'Password update failed.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    message: 'Password updated successfully!',
+                    user: updatedRows[0]
                 });
             }
-
-            if (!updatedRows || updatedRows.length === 0) {
-                return res.status(500).json({
-                    success: false,
-                    message: 'Password update failed.'
-                });
-            }
-
-            return res.json({
-                success: true,
-                message: 'Password updated successfully!',
-                user: updatedRows[0]
-            });
-        });
+        );
     });
 });
-
 
 // ==========================================
 // 3. GET USER ORDERS API ROUTE
