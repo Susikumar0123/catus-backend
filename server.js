@@ -105,13 +105,10 @@ app.post('/api/verify-otp-set-password', (req, res) => {
     });
 });
 
-// ==========================================
-// DIRECT PASSWORD RESET ROUTE (Fixed)
-// ==========================================
+
+// Direct Password Reset Route
 app.post('/api/update-password', (req, res) => {
     const { phone, password } = req.body;
-    
-    // கொடுக்கப்பட்ட மொபைல் எண்ணுக்கு மட்டும் புதிய பாஸ்வேர்டை உறுதியாக அவுட்பேட் செய்யும்
     const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
     db.query(updateQuery, [password, phone], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
@@ -119,7 +116,6 @@ app.post('/api/update-password', (req, res) => {
         const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
         db.query(fetchQuery, [phone], (err2, results) => {
             if (err2) return res.status(500).json({ success: false, error: err2.message });
-            
             if (results && results.length > 0) {
                 res.json({ success: true, user: results[0], message: 'Password updated successfully!' });
             } else {
