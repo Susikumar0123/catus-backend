@@ -652,31 +652,8 @@ app.post('/api/upload-image', upload.single('image'), (req, res) => {
     res.json({ success: true, imageUrl: imageUrl });
 });
 
-// அப்லோட் செய்த இமேஜ்களை பார்க்க ஸ்டேடிக் ஃபோல்டர்
+
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
-
-app.get('/api/fix-otp-db', (req, res) => {
-    const query = `
-        ALTER TABLE public.users
-        ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10),
-        ADD COLUMN IF NOT EXISTS otp_expires_at BIGINT
-    `;
-
-    db.query(query, [], (err, rows) => {
-        if (err) {
-            console.error('OTP DB FIX ERROR:', err);
-            return res.status(500).json({
-                success: false,
-                error: err.message
-            });
-        }
-
-        res.json({
-            success: true,
-            message: 'OTP columns created/verified in live database'
-        });
-    });
-});
 
 // ==========================================
 // DATABASE STARTUP MIGRATION
