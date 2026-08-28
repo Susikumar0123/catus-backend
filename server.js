@@ -80,8 +80,11 @@ app.post('/api/login-password', (req, res) => {
 });
 
 // ==========================================
-// SAFE TRIAL MODE OTP ROUTES (WALLET SAFE)
+// SECURE MEMORY OTP STORE (Temporary Storage)
 // ==========================================
+const otpStore = {}; // { phone_number: { otp: '1234', expiresAt: timestamp } }
+
+// 1. SEND OTP ROUTE
 app.post('/api/send-otp', async (req, res) => {
     const { phone } = req.body;
     
@@ -89,20 +92,39 @@ app.post('/api/send-otp', async (req, res) => {
         return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
     }
 
-    console.log(`[TRIAL MODE] OTP generated for ${phone}: 1234 (Wallet Safe)`);
-    return res.json({ success: true, message: 'OTP generated successfully (Wallet Safe)!' });
+    // Trial mode-ku fixed OTP '1234' (Or random 4-digit: Math.floor(1000 + Math.random() * 9000))
+    const generatedOtp = '1234'; 
+    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+
+    otpStore[phone] = { otp: generatedOtp, expiresAt: expiresAt };
+
+    console.log(`[OTP SERVICE] OTP generated for ${phone}: ${generatedOtp}`);
+    return res.json({ success: true, message: 'OTP sent successfully!' });
 });
 
-// ==========================================
-// VERIFY OTP & SET PASSWORD ROUTE (Fixed)
-// ==========================================
+// 2. VERIFY OTP & SET PASSWORD ROUTE (For Registration & Forgot Password)
 app.post('/api/verify-otp-set-password', (req, res) => {
     const { phone, otp, password } = req.body;
     
-    // Trial Mode-la '1234' mattum valid OTP-ah accept panna (or any 4-digit code)
-    if (!otp || (otp !== '1234' && otp.length !== 4)) {
-        return res.status(400).json({ success: false, message: 'Invalid or incorrect OTP. Please enter 1234 for trial mode.' });
+    if (!phone || !otp) {
+        return res.status(400).json({ success: false, message: 'Phone and OTP are required.' });
     }
+
+    const storedData = otpStore[phone];
+
+    // Check if OTP exists and matches
+    if (!storedData || String(storedData.otp).trim() !== String(otp).trim()) {
+        return res.status(400).json({ success: false, message: 'Invalid or incorrect OTP.' });
+    }
+
+    // Check if OTP expired
+    if (Date.now() > storedData.expiresAt) {
+        delete otpStore[phone]; // clear expired otp
+        return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
+    }
+
+    // OTP Correct -> Clear from store so it can't be reused
+    delete otpStore[phone];
 
     const newPass = password || 'default123';
     const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
@@ -110,7 +132,6 @@ app.post('/api/verify-otp-set-password', (req, res) => {
     db.query(updateQuery, [newPass, phone], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         
-        // Oru vela user 'users' table-la illanalum, aavathu create aaganum naanga check panrom
         const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
         db.query(fetchQuery, [phone], (err2, results) => {
             if (err2) return res.status(500).json({ success: false, error: err2.message });
@@ -118,7 +139,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
             if (results && results.length > 0) {
                 res.json({ success: true, user: results[0] });
             } else {
-                res.json({ success: false, message: 'User record not found after verification.' });
+                res.json({ success: false, message: 'User record not found.' });
             }
         });
     });
