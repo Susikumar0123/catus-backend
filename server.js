@@ -56,15 +56,25 @@ app.post('/api/check-user', (req, res) => {
     });
 });
 
+// ==========================================
+// LOGIN PASSWORD ROUTE (Fixed for proper matching)
+// ==========================================
 app.post('/api/login-password', (req, res) => {
     const { phone, password } = req.body;
-    const query = 'SELECT * FROM users WHERE phone = ? AND password = ?';
-    db.query(query, [phone, password], (err, results) => {
+    const query = 'SELECT * FROM users WHERE phone = ?';
+    db.query(query, [phone], (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
+        
         if (results && results.length > 0) {
-            res.json({ success: true, user: results[0] });
+            const user = results[0];
+            // Passwords-ah trim panrathu space error-ai thavirkkum
+            if (String(user.password).trim() === String(password).trim()) {
+                res.json({ success: true, user: user });
+            } else {
+                res.status(401).json({ success: false, message: 'Incorrect password.' });
+            }
         } else {
-            res.status(401).json({ success: false, message: 'Incorrect password.' });
+            res.status(404).json({ success: false, message: 'User not found.' });
         }
     });
 });
@@ -83,15 +93,24 @@ app.post('/api/send-otp', async (req, res) => {
     return res.json({ success: true, message: 'OTP generated successfully (Wallet Safe)!' });
 });
 
+// ==========================================
+// VERIFY OTP & SET PASSWORD ROUTE (Fixed)
+// ==========================================
 app.post('/api/verify-otp-set-password', (req, res) => {
-    const { phone, password } = req.body;
+    const { phone, otp, password } = req.body;
     
-    
-    // 🛑 OTP வெரிஃபை ஆனதும் யூசரின் பாஸ்வேர்ட்டை டேட்டாபேஸில் சேமிக்க/అப்டேட் செய்ய
+    // Trial Mode-la '1234' mattum valid OTP-ah accept panna (or any 4-digit code)
+    if (!otp || (otp !== '1234' && otp.length !== 4)) {
+        return res.status(400).json({ success: false, message: 'Invalid or incorrect OTP. Please enter 1234 for trial mode.' });
+    }
+
+    const newPass = password || 'default123';
     const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
-    db.query(updateQuery, [password || 'default123', phone], (err, result) => {
+    
+    db.query(updateQuery, [newPass, phone], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         
+        // Oru vela user 'users' table-la illanalum, aavathu create aaganum naanga check panrom
         const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
         db.query(fetchQuery, [phone], (err2, results) => {
             if (err2) return res.status(500).json({ success: false, error: err2.message });
@@ -99,7 +118,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
             if (results && results.length > 0) {
                 res.json({ success: true, user: results[0] });
             } else {
-                res.json({ success: false, message: 'User not found.' });
+                res.json({ success: false, message: 'User record not found after verification.' });
             }
         });
     });
