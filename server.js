@@ -39,7 +39,7 @@ app.post('/api/register', (req, res) => {
 });
 
 // ==========================================
-// 2. CHECK USER & PASSWORD LOGIN API ROUTES
+// 2. CHECK USER & PASSWORD LOGIN API ROUTES (Updated)
 // ==========================================
 app.post('/api/check-user', (req, res) => {
     const { phone } = req.body;
@@ -48,7 +48,8 @@ app.post('/api/check-user', (req, res) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         if (results && results.length > 0) {
             const user = results[0];
-            res.json({ success: true, exists: true, hasPassword: user.password ? true : false, user: user });
+            // 🛑 நம்பர் டேட்டாபேஸில் இருந்தால், பாஸ்வேர்ட் இருக்கிறதா இல்லையா என்பதைப் பொருட்படுத்தாமல் லாகின் பக்கத்திற்கு அனுப்ப true கொடுக்கிறோம்
+            res.json({ success: true, exists: true, hasPassword: true, user: user });
         } else {
             res.json({ success: true, exists: false, hasPassword: false });
         }
@@ -68,7 +69,6 @@ app.post('/api/login-password', (req, res) => {
     });
 });
 
-
 // ==========================================
 // SAFE TRIAL MODE OTP ROUTES (WALLET SAFE)
 // ==========================================
@@ -84,18 +84,48 @@ app.post('/api/send-otp', async (req, res) => {
 });
 
 app.post('/api/verify-otp-set-password', (req, res) => {
-    const { phone } = req.body;
+    const { phone, password } = req.body;
     
-    const checkQuery = 'SELECT * FROM users WHERE phone = ?';
-    db.query(checkQuery, [phone], (err, results) => {
+    
+    // 🛑 OTP வெரிஃபை ஆனதும் யூசரின் பாஸ்வேர்ட்டை டேட்டாபேஸில் சேமிக்க/అப்டேட் செய்ய
+    const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
+    db.query(updateQuery, [password || 'default123', phone], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         
-        if (results && results.length > 0) {
-            // Password column illathanal, direct-ah user-ai anuppudhu
-            res.json({ success: true, user: results[0] });
-        } else {
-            res.json({ success: true, user: null });
-        }
+        const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
+        db.query(fetchQuery, [phone], (err2, results) => {
+            if (err2) return res.status(500).json({ success: false, error: err2.message });
+            
+            if (results && results.length > 0) {
+                res.json({ success: true, user: results[0] });
+            } else {
+                res.json({ success: false, message: 'User not found.' });
+            }
+        });
+    });
+});
+
+// ==========================================
+// DIRECT PASSWORD RESET ROUTE (Fixed)
+// ==========================================
+app.post('/api/update-password', (req, res) => {
+    const { phone, password } = req.body;
+    
+    // கொடுக்கப்பட்ட மொபைல் எண்ணுக்கு மட்டும் புதிய பாஸ்வேர்டை உறுதியாக அவுட்பேட் செய்யும்
+    const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
+    db.query(updateQuery, [password, phone], (err, result) => {
+        if (err) return res.status(500).json({ success: false, error: err.message });
+        
+        const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
+        db.query(fetchQuery, [phone], (err2, results) => {
+            if (err2) return res.status(500).json({ success: false, error: err2.message });
+            
+            if (results && results.length > 0) {
+                res.json({ success: true, user: results[0], message: 'Password updated successfully!' });
+            } else {
+                res.json({ success: false, message: 'User not found.' });
+            }
+        });
     });
 });
 
