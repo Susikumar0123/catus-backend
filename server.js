@@ -82,106 +82,177 @@ app.post('/api/login-password', (req, res) => {
 // ==========================================
 // SECURE MEMORY OTP STORE (Temporary Storage)
 // ==========================================
-const otpStore = {}; // { phone_number: { otp: '1234', expiresAt: timestamp } }
 
-// 1. SEND OTP ROUTE
-app.post('/api/send-otp', async (req, res) => {
+app.post('/api/send-otp', (req, res) => {
     const { phone } = req.body;
-    
-    if (!phone || phone.length !== 10) {
-        return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
+
+    if (!phone || String(phone).trim().length !== 10) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid 10-digit mobile number.'
+        });
     }
 
-    // Trial mode-ku fixed OTP '1234' (Or random 4-digit: Math.floor(1000 + Math.random() * 9000))
-    const generatedOtp = '1234'; 
-    const expiresAt = Date.now() + 5 * 60 * 1000; // 5 minutes expiry
+    const cleanPhone = String(phone).trim();
 
-    otpStore[phone] = { otp: generatedOtp, expiresAt: expiresAt };
+    // Trial OTP
+    const generatedOtp = '1234';
+    const expiresAt = Date.now() + (5 * 60 * 1000);
 
-    console.log(`[OTP SERVICE] OTP generated for ${phone}: ${generatedOtp}`);
-    return res.json({ success: true, message: 'OTP sent successfully!' });
+    const query = `
+        UPDATE users
+        SET otp_code = ?, otp_expires_at = ?
+        WHERE phone = ?
+    `;
+
+    db.query(
+        query,
+        [generatedOtp, expiresAt, cleanPhone],
+        (err, result) => {
+            if (err) {
+                console.error('OTP Save Error:', err);
+                return res.status(500).json({
+                    success: false,
+                    message: 'Failed to save OTP.'
+                });
+            }
+
+            if (result.affectedRows === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'User not found.'
+                });
+            }
+
+            console.log(
+                `[OTP SERVICE] OTP generated for ${cleanPhone}: ${generatedOtp}`
+            );
+
+            res.json({
+                success: true,
+                message: 'OTP sent successfully!'
+            });
+        }
+    );
 });
 
-// ==========================================
-// 2. VERIFY OTP & SET PASSWORD ROUTE (Fixed)
-// ==========================================
 app.post('/api/verify-otp-set-password', (req, res) => {
     const { phone, otp, password } = req.body;
-    
-    if (!phone || !otp) {
-        return res.status(400).json({ success: false, message: 'Phone and OTP are required.' });
-    }
 
-    const storedData = otpStore[phone];
+    const cleanPhone = String(phone || '').trim();
+    const cleanOtp = String(otp || '').trim();
+    const newPassword = String(password || '').trim();
 
-    // 🛑 Check if OTP exists and matches
-    if (!storedData || String(storedData.otp).trim() !== String(otp).trim()) {
-        return res.status(400).json({ success: false, message: 'Invalid or incorrect OTP.' });
-    }
-
-    // 🛑 Check if OTP expired
-    if (Date.now() > storedData.expiresAt) {
-        delete otpStore[phone];
-        return res.status(400).json({ success: false, message: 'OTP has expired. Please request a new one.' });
-    }
-
-    // OTP Correct -> Clear from store
-    delete otpStore[phone];
-
-    let query = '';
-    let params = [];
-
-    if (password && password.trim().length >= 4) {
-        query = 'UPDATE users SET password = ? WHERE phone = ?';
-        params = [password.trim(), phone];
-    } else {
-        query = 'SELECT * FROM users WHERE phone = ?';
-        params = [phone];
-    }
-
-    db.query(query, params, (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        
-        const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
-        db.query(fetchQuery, [phone], (err2, results) => {
-            if (err2) return res.status(500).json({ success: false, error: err2.message });
-            
-            if (results && results.length > 0) {
-                res.json({ success: true, user: results[0] });
-            } else {
-                res.json({ success: false, message: 'User record not found.' });
-            }
+    if (!cleanPhone || !cleanOtp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Phone and OTP are required.'
         });
+    }
+
+    if (!newPassword || newPassword.length < 4) {
+        return res.status(400).json({
+            success: false,
+            message: 'Password must be at least 4 characters.'
+        });
+    }
+
+    const findUserQuery = `
+        SELECT * FROM users
+        WHERE phone = ?
+        LIMIT 1
+    `;
+
+    db.query(findUserQuery, [cleanPhone], (err, results) => {
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        if (!results || results.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'User not found.'
+            });
+        }
+
+        const user = results[0];
+
+        // OTP exists?
+        if (!user.otp_code) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP not found. Please request a new OTP.'
+            });
+        }
+
+        // Expired?
+        if (!user.otp_expires_at || Date.now() > Number(user.otp_expires_at)) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP has expired. Please request a new OTP.'
+            });
+        }
+
+        // Match?
+        if (String(user.otp_code).trim() !== cleanOtp) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or incorrect OTP.'
+            });
+        }
+
+        // OTP correct -> update password and clear OTP
+        const updateQuery = `
+            UPDATE users
+            SET password = ?,
+                otp_code = NULL,
+                otp_expires_at = NULL
+            WHERE phone = ?
+        `;
+
+        db.query(
+            updateQuery,
+            [newPassword, cleanPhone],
+            (updateErr) => {
+                if (updateErr) {
+                    return res.status(500).json({
+                        success: false,
+                        error: updateErr.message
+                    });
+                }
+
+                const fetchQuery = `
+                    SELECT * FROM users
+                    WHERE phone = ?
+                    LIMIT 1
+                `;
+
+                db.query(
+                    fetchQuery,
+                    [cleanPhone],
+                    (fetchErr, updatedResults) => {
+                        if (fetchErr) {
+                            return res.status(500).json({
+                                success: false,
+                                error: fetchErr.message
+                            });
+                        }
+
+                        res.json({
+                            success: true,
+                            message: 'Password updated successfully!',
+                            user: updatedResults[0]
+                        });
+                    }
+                );
+            }
+        );
     });
 });
 
-
-// Direct Password Reset Route
-app.post('/api/update-password', (req, res) => {
-    const { phone, password } = req.body;
-    const updateQuery = 'UPDATE users SET password = ? WHERE phone = ?';
-    db.query(updateQuery, [password, phone], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        
-        const fetchQuery = 'SELECT * FROM users WHERE phone = ?';
-        db.query(fetchQuery, [phone], (err2, results) => {
-            if (err2) return res.status(500).json({ success: false, error: err2.message });
-            if (results && results.length > 0) {
-                res.json({ success: true, user: results[0], message: 'Password updated successfully!' });
-            } else {
-                res.json({ success: false, message: 'User not found.' });
-            }
-        });
-    });
-});
-
-app.post('/api/resend-otp', async (req, res) => {
-    const { phone } = req.body;
-    if (!phone || phone.length !== 10) {
-        return res.status(400).json({ success: false, message: 'Invalid 10-digit mobile number.' });
-    }
-    return res.json({ success: true, message: 'OTP resent successfully (Trial Mode)!' });
-});
 
 // ==========================================
 // 3. GET USER ORDERS API ROUTE
