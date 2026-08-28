@@ -676,6 +676,28 @@ app.get('/api/fix-otp-db', (req, res) => {
         });
     });
 });
+app.get('/api/fix-otp-db', (req, res) => {
+    const query = `
+        ALTER TABLE public.users
+        ADD COLUMN IF NOT EXISTS otp_code VARCHAR(10),
+        ADD COLUMN IF NOT EXISTS otp_expires_at BIGINT
+    `;
+
+    db.query(query, [], (err, rows) => {
+        if (err) {
+            console.error('OTP DB FIX ERROR:', err);
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'OTP columns created/verified successfully'
+        });
+    });
+});
 app.listen(PORT, '0.0.0.0', () => {
     console.log(`Server is running on http://0.0.0.0:${PORT}`);
 });
