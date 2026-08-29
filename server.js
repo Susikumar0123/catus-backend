@@ -1144,6 +1144,40 @@ app.get('/api/test-location-db', (req, res) => {
         });
     });
 });
+
+app.get('/api/check-location-tables', (req, res) => {
+
+    const query = `
+        SELECT
+            table_schema,
+            table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        AND table_name IN (
+            'locations',
+            'location_services',
+            'services'
+        )
+        ORDER BY table_name
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Location table check error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            tables: results
+        });
+    });
+});
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 // IMAGE UPLOAD CONFIGURATION (Multer)
