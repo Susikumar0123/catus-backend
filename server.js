@@ -1178,6 +1178,35 @@ app.get('/api/check-location-tables', (req, res) => {
         });
     });
 });
+app.get('/api/test-location-direct', (req, res) => {
+    const query = `
+        SELECT
+            current_database() AS database_name,
+            current_schema() AS schema_name,
+            current_user AS database_user,
+            inet_server_addr() AS server_address,
+            inet_server_port() AS server_port,
+            to_regclass('public.locations') AS locations_table,
+            to_regclass('public.location_services') AS location_services_table,
+            to_regclass('public.services') AS services_table
+    `;
+
+    db.query(query, [], (err, results) => {
+        if (err) {
+            console.error('Location direct test error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            database: results[0]
+        });
+    });
+});
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 // IMAGE UPLOAD CONFIGURATION (Multer)
