@@ -959,6 +959,36 @@ app.get('/api/test-location-table', (req, res) => {
     });
 });
 // ==========================================
+// TEMPORARY DATABASE TABLE TEST
+// ==========================================
+
+app.get('/api/test-public-tables', (req, res) => {
+
+    const query = `
+        SELECT table_name
+        FROM information_schema.tables
+        WHERE table_schema = 'public'
+        ORDER BY table_name
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Public tables test error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            tables: results
+        });
+    });
+});
+// ==========================================
 // LOCATION + SERVICE SEO LANDING PAGE API
 // ==========================================
 
