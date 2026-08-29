@@ -30,6 +30,7 @@ const db = {
 
         let counter = 1;
 
+        // Convert MySQL-style ? placeholders to PostgreSQL $1, $2, $3...
         queryText = queryText.replace(/\?/g, () => `$${counter++}`);
 
         return pool.query(queryText, queryParams, (err, res) => {
