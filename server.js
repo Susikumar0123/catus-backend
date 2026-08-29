@@ -246,6 +246,94 @@ app.post('/api/send-otp', (req, res) => {
         );
     });
 });
+
+// ==========================================
+// VERIFY OTP ONLY - FOR FORGOT PASSWORD
+// ==========================================
+app.post('/api/verify-otp', (req, res) => {
+
+    const phone =
+        String(req.body.phone || '').trim();
+
+    const otp =
+        String(req.body.otp || '').trim();
+
+    if (!phone || !otp) {
+        return res.status(400).json({
+            success: false,
+            message: 'Phone and OTP are required.'
+        });
+    }
+
+    if (!/^\d{4}$/.test(otp)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid OTP format.'
+        });
+    }
+
+    const query = `
+        SELECT id, phone, otp_code, otp_expires_at
+        FROM public.users
+        WHERE phone = ?
+        LIMIT 1
+    `;
+
+    db.query(query, [phone], (err, rows) => {
+
+        if (err) {
+            console.error('OTP verify error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: err.message
+            });
+        }
+
+        if (!rows || rows.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Mobile number is not registered.'
+            });
+        }
+
+        const user = rows[0];
+
+        if (!user.otp_code) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP not found. Please request a new OTP.'
+            });
+        }
+
+        if (
+            !user.otp_expires_at ||
+            Date.now() > Number(user.otp_expires_at)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP has expired. Please request a new one.'
+            });
+        }
+
+        if (
+            String(user.otp_code).trim() !== otp
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid or incorrect OTP.'
+            });
+        }
+
+        // Do NOT clear OTP yet.
+        // It must remain valid until password is updated.
+
+        return res.json({
+            success: true,
+            message: 'OTP verified successfully.'
+        });
+    });
+});
 // ==========================================
 // VERIFY OTP & SET PASSWORD
 // ==========================================
