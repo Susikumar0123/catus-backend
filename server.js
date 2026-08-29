@@ -1061,6 +1061,33 @@ app.get('/api/location-page/:location/:service', (req, res) => {
         }
     );
 });
+app.get('/api/test-database', (req, res) => {
+
+    const query = `
+        SELECT
+            current_database() AS database_name,
+            current_schema() AS schema_name,
+            current_user AS database_user,
+            inet_server_addr() AS server_address
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Database identity error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            database: results[0]
+        });
+    });
+});
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 // IMAGE UPLOAD CONFIGURATION (Multer)
