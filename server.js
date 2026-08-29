@@ -928,7 +928,36 @@ app.post('/api/admin/update-order-address', (req, res) => {
         res.json({ success: true, message: 'Order address updated successfully!' });
     });
 });
+// ==========================================
+// DATABASE LOCATION TABLE TEST
+// ==========================================
 
+app.get('/api/test-location-table', (req, res) => {
+
+    const query = `
+        SELECT table_schema, table_name
+        FROM information_schema.tables
+        WHERE table_name IN ('locations', 'location_services')
+        ORDER BY table_name
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Table test error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            tables: results
+        });
+    });
+});
 // ==========================================
 // LOCATION + SERVICE SEO LANDING PAGE API
 // ==========================================
