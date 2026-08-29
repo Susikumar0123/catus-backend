@@ -84,13 +84,14 @@ app.post('/api/login-password', (req, res) => {
 // ==========================================
 
 app.post('/api/send-otp', (req, res) => {
-    const {
-        phone,
-        mode,
-        name,
-        email,
-        pincode
-    } = req.body;
+    const { 
+    phone, 
+    mode,
+    resend,
+    name, 
+    email, 
+    pincode 
+} = req.body;
 
     const cleanPhone = String(phone || '').trim();
 
@@ -106,22 +107,31 @@ app.post('/api/send-otp', (req, res) => {
 
 
     // ==========================================
-    // NEW USER REGISTRATION
-    // ==========================================
-    if (mode === 'register') {
+// NEW USER REGISTRATION
+// ==========================================
+if (mode === 'register') {
 
-        // Check whether mobile already exists
-        const checkQuery = `
-            SELECT id
-            FROM public.users
-            WHERE phone = ?
-            LIMIT 1
-        `;
+    const isResend =
+        resend === true || resend === 'true';
 
-        return db.query(checkQuery, [cleanPhone], (checkErr, rows) => {
+    const checkQuery = `
+        SELECT *
+        FROM public.users
+        WHERE phone = ?
+        LIMIT 1
+    `;
+
+    return db.query(
+        checkQuery,
+        [cleanPhone],
+        (checkErr, rows) => {
 
             if (checkErr) {
-                console.error('Registration check error:', checkErr);
+
+                console.error(
+                    'Registration check error:',
+                    checkErr
+                );
 
                 return res.status(500).json({
                     success: false,
@@ -129,21 +139,94 @@ app.post('/api/send-otp', (req, res) => {
                 });
             }
 
-            // Already registered
+
+            // ==========================================
+            // EXISTING PHONE + RESEND OTP
+            // ==========================================
             if (rows && rows.length > 0) {
+
+                const existingUser = rows[0];
+
+                if (isResend) {
+
+                    const updateResendQuery = `
+                        UPDATE public.users
+                        SET name = ?,
+                            email = ?,
+                            pincode = ?,
+                            otp_code = ?,
+                            otp_expires_at = ?
+                        WHERE phone = ?
+                    `;
+
+                    return db.query(
+                        updateResendQuery,
+                        [
+                            name || existingUser.name || '',
+                            email || existingUser.email || '',
+                            pincode || existingUser.pincode || '',
+                            generatedOtp,
+                            expiresAt,
+                            cleanPhone
+                        ],
+                        (updateErr) => {
+
+                            if (updateErr) {
+
+                                console.error(
+                                    'Registration resend OTP update error:',
+                                    updateErr
+                                );
+
+                                return res.status(500).json({
+                                    success: false,
+                                    message: updateErr.message
+                                });
+                            }
+
+                            console.log(
+                                `[REG OTP RESEND] ${cleanPhone} => ${generatedOtp}`
+                            );
+
+                            return res.json({
+                                success: true,
+                                message: 'OTP resent successfully!'
+                            });
+                        }
+                    );
+                }
+
+
+                // ==========================================
+                // EXISTING USER - NORMAL REGISTRATION ATTEMPT
+                // ==========================================
                 return res.status(400).json({
                     success: false,
-                    message: 'Mobile number already registered. Please login.'
+                    message:
+                        'Mobile number already registered. Please login.'
                 });
             }
 
-            // Create temporary user record
+
+            // ==========================================
+            // BRAND NEW USER
+            // ==========================================
             const randomCustId =
                 Math.floor(10000 + Math.random() * 90000);
 
             const insertQuery = `
                 INSERT INTO public.users
-                (id, name, email, phone, pincode, address, password, otp_code, otp_expires_at)
+                (
+                    id,
+                    name,
+                    email,
+                    phone,
+                    pincode,
+                    address,
+                    password,
+                    otp_code,
+                    otp_expires_at
+                )
                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             `;
 
@@ -163,6 +246,7 @@ app.post('/api/send-otp', (req, res) => {
                 (insertErr) => {
 
                     if (insertErr) {
+
                         console.error(
                             'Registration user creation error:',
                             insertErr
@@ -184,8 +268,9 @@ app.post('/api/send-otp', (req, res) => {
                     });
                 }
             );
-        });
-    }
+        }
+    );
+}
 
     // ==========================================
     // FORGOT PASSWORD
