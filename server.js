@@ -929,6 +929,109 @@ app.post('/api/admin/update-order-address', (req, res) => {
     });
 });
 
+// ==========================================
+// LOCATION + SERVICE SEO LANDING PAGE API
+// ==========================================
+
+app.get('/api/location-page/:location/:service', (req, res) => {
+
+    const locationSlug = String(req.params.location || '')
+        .trim()
+        .toLowerCase();
+
+    const serviceSlug = String(req.params.service || '')
+        .trim()
+        .toLowerCase();
+
+    if (!locationSlug || !serviceSlug) {
+        return res.status(400).json({
+            success: false,
+            message: 'Location and service are required.'
+        });
+    }
+
+    const query = `
+        SELECT
+            l.id AS location_id,
+            l.name AS location_name,
+            l.slug AS location_slug,
+            l.district,
+            l.state,
+            l.pincode,
+
+            s.service_id,
+            s.service_name,
+            s.category,
+            s.price AS service_price,
+            s.mrp,
+            s.rating,
+            s.image_url,
+            s.image_url_2,
+            s.image_url_3,
+            s.image_url_4,
+            s.why_choose_us,
+            s.discount_text,
+            s.product_note,
+
+            ls.price AS location_price,
+            ls.is_available,
+            ls.seo_title,
+            ls.seo_description,
+            ls.content
+
+        FROM locations l
+
+        INNER JOIN location_services ls
+            ON ls.location_id = l.id
+
+        INNER JOIN services s
+            ON s.service_id = ls.service_id
+
+        WHERE
+            LOWER(l.slug) = ?
+            AND LOWER(s.service_id) = ?
+            AND l.is_active = TRUE
+            AND ls.is_available = TRUE
+
+        LIMIT 1
+    `;
+
+    db.query(
+        query,
+        [locationSlug, serviceSlug],
+        (err, results) => {
+
+            if (err) {
+
+                console.error(
+                    'Location SEO API Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Database error',
+                    error: err.message
+                });
+            }
+
+            if (!results || results.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: 'This service is not available in this location.'
+                });
+            }
+
+            const page = results[0];
+
+            return res.json({
+                success: true,
+                page: page
+            });
+        }
+    );
+});
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 // IMAGE UPLOAD CONFIGURATION (Multer)
