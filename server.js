@@ -573,10 +573,25 @@ app.post('/api/orders', (req, res) => {
     } = req.body;
     
     const query = `
-        INSERT INTO orders 
-        (order_id, customer_id, product_id, service_name, customer_name, phone, whatsapp, address, district, pincode, amount, order_date, status) 
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-    `;
+    INSERT INTO orders 
+    (
+        order_id,
+        customer_id,
+        product_id,
+        service_name,
+        customer_name,
+        phone,
+        whatsapp,
+        address,
+        district,
+        pincode,
+        amount,
+        order_date,
+        status,
+        booked_at
+    ) 
+    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+`;
     
     const values = [
         order_id, 
@@ -641,12 +656,101 @@ app.get('/api/admin/customers', (req, res) => {
 // 6. UPDATE STATUS
 // ==========================================
 app.post('/api/admin/update-status', (req, res) => {
+
     const { order_id, status } = req.body;
-    const query = 'UPDATE orders SET status = ? WHERE order_id = ?';
-    db.query(query, [status, order_id], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Status updated successfully' });
-    });
+
+    const cleanStatus =
+        String(status || '').trim().toLowerCase();
+
+    let query = '';
+
+    if (cleanStatus === 'assigned') {
+
+        query = `
+            UPDATE orders
+            SET status = ?,
+                assigned_at = COALESCE(assigned_at, NOW())
+            WHERE order_id = ?
+            RETURNING *
+        `;
+
+    } else if (cleanStatus === 'on the way') {
+
+        query = `
+            UPDATE orders
+            SET status = ?,
+                on_the_way_at = COALESCE(on_the_way_at, NOW())
+            WHERE order_id = ?
+            RETURNING *
+        `;
+
+    } else if (
+        cleanStatus === 'in service' ||
+        cleanStatus === 'service' ||
+        cleanStatus === 'active'
+    ) {
+
+        query = `
+            UPDATE orders
+            SET status = ?,
+                service_started_at = COALESCE(service_started_at, NOW())
+            WHERE order_id = ?
+            RETURNING *
+        `;
+
+    } else if (cleanStatus === 'completed') {
+
+        query = `
+            UPDATE orders
+            SET status = ?,
+                completed_at = COALESCE(completed_at, NOW())
+            WHERE order_id = ?
+            RETURNING *
+        `;
+
+    } else {
+
+        query = `
+            UPDATE orders
+            SET status = ?
+            WHERE order_id = ?
+            RETURNING *
+        `;
+    }
+
+    db.query(
+        query,
+        [status, order_id],
+        (err, results) => {
+
+            if (err) {
+
+                console.error(
+                    'Order Status Update Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            if (!results || results.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: 'Order not found'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Status updated successfully',
+                order: results[0]
+            });
+        }
+    );
 });
 
 // ==========================================
@@ -1262,7 +1366,15 @@ app.get('/api/admin/orders', (req, res) => {
 
 app.post('/api/admin/assign-technician-manual', (req, res) => {
     const { order_id, technician_name, technician_phone, eta } = req.body;
-    const query = 'UPDATE orders SET technician_name = ?, technician_phone = ?, eta = ?, status = ? WHERE order_id = ?';
+    const query = `
+    UPDATE orders
+    SET technician_name = ?,
+        technician_phone = ?,
+        eta = ?,
+        status = ?,
+        assigned_at = COALESCE(assigned_at, NOW())
+    WHERE order_id = ?
+`;
     db.query(query, [technician_name, technician_phone, eta, 'Assigned', order_id], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, message: 'Technician assigned successfully!' });
