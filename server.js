@@ -992,7 +992,15 @@ app.get('/api/test-public-tables', (req, res) => {
 // LOCATION + SERVICE SEO LANDING PAGE API
 // ==========================================
 
-app.get('/api/location-page/:location/:service', (req, res) => {
+app.get('/api/location-page/:state/:district/:location/:service', (req, res) => {
+
+    const stateSlug = String(req.params.state || '')
+        .trim()
+        .toLowerCase();
+
+    const districtSlug = String(req.params.district || '')
+        .trim()
+        .toLowerCase();
 
     const locationSlug = String(req.params.location || '')
         .trim()
@@ -1002,10 +1010,10 @@ app.get('/api/location-page/:location/:service', (req, res) => {
         .trim()
         .toLowerCase();
 
-    if (!locationSlug || !serviceSlug) {
+    if (!stateSlug || !districtSlug || !locationSlug || !serviceSlug) {
         return res.status(400).json({
             success: false,
-            message: 'Location and service are required.'
+            message: 'State, district, location and service are required.'
         });
     }
 
@@ -1019,17 +1027,17 @@ app.get('/api/location-page/:location/:service', (req, res) => {
             l.pincode,
 
             s.service_id,
-s.service_name,
-s.category,
-s.price AS service_price,
-s.mrp,
-s.image_url,
-s.image_url_2,
-s.image_url_3,
-s.image_url_4,
-s.why_choose_us,
-s.discount_text,
-s.product_note,
+            s.service_name,
+            s.category,
+            s.price AS service_price,
+            s.mrp,
+            s.image_url,
+            s.image_url_2,
+            s.image_url_3,
+            s.image_url_4,
+            s.why_choose_us,
+            s.discount_text,
+            s.product_note,
 
             ls.price AS location_price,
             ls.is_available,
@@ -1046,8 +1054,28 @@ s.product_note,
             ON s.service_id = ls.service_id
 
         WHERE
-            LOWER(l.slug) = ?
+            LOWER(
+                REGEXP_REPLACE(
+                    TRIM(l.state),
+                    '[^a-zA-Z0-9]+',
+                    '-',
+                    'g'
+                )
+            ) = ?
+
+            AND LOWER(
+                REGEXP_REPLACE(
+                    TRIM(l.district),
+                    '[^a-zA-Z0-9]+',
+                    '-',
+                    'g'
+                )
+            ) = ?
+
+            AND LOWER(l.slug) = ?
+
             AND LOWER(s.service_id) = ?
+
             AND l.is_active = TRUE
             AND ls.is_available = TRUE
 
@@ -1056,11 +1084,15 @@ s.product_note,
 
     db.query(
         query,
-        [locationSlug, serviceSlug],
+        [
+            stateSlug,
+            districtSlug,
+            locationSlug,
+            serviceSlug
+        ],
         (err, results) => {
 
             if (err) {
-
                 console.error(
                     'Location SEO API Error:',
                     err
@@ -1074,22 +1106,21 @@ s.product_note,
             }
 
             if (!results || results.length === 0) {
-
                 return res.status(404).json({
                     success: false,
-                    message: 'This service is not available in this location.'
+                    message:
+                        'This service is not available in this location.'
                 });
             }
 
-            const page = results[0];
-
             return res.json({
                 success: true,
-                page: page
+                page: results[0]
             });
         }
     );
 });
+
 app.get('/api/test-database', (req, res) => {
 
     const query = `
