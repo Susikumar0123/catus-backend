@@ -1167,27 +1167,88 @@ app.get('/api/home-services', (req, res) => {
 });
 
 app.post('/api/admin/update-service', (req, res) => {
+
     const { 
-        old_service_id, service_id, service_name, category, price, mrp, 
-        is_hot_deal, select_options, why_choose_us, discount_text,
-        artificial_reviews_count, artificial_reviews_data,
-        image_url, image_url_2, image_url_3, image_url_4,
+        old_service_id,
+        service_id,
+        service_name,
+        category,
+        group_id,
+        price,
+        mrp,
+        is_hot_deal,
+        select_options,
+        why_choose_us,
+        discount_text,
+        artificial_reviews_count,
+        artificial_reviews_data,
+        image_url,
+        image_url_2,
+        image_url_3,
+        image_url_4,
         enable_select_options,
         product_note 
     } = req.body;
-    
-    const query = `UPDATE services SET service_id = ?, service_name = ?, category = ?, price = ?, mrp = ?, is_hot_deal = ?, select_options = ?, why_choose_us = ?, discount_text = ?, artificial_reviews_count = ?, artificial_reviews_data = ?, image_url = ?, image_url_2 = ?, image_url_3 = ?, image_url_4 = ?, enable_select_options = ?, product_note = ? WHERE service_id = ?`;
-    
+
+    const query = `
+        UPDATE services
+        SET
+            service_id = ?,
+            service_name = ?,
+            category = ?,
+            group_id = ?,
+            price = ?,
+            mrp = ?,
+            is_hot_deal = ?,
+            select_options = ?,
+            why_choose_us = ?,
+            discount_text = ?,
+            artificial_reviews_count = ?,
+            artificial_reviews_data = ?,
+            image_url = ?,
+            image_url_2 = ?,
+            image_url_3 = ?,
+            image_url_4 = ?,
+            enable_select_options = ?,
+            product_note = ?
+        WHERE service_id = ?
+    `;
+
     db.query(query, [
-        service_id, service_name, category, price, mrp, is_hot_deal, select_options, why_choose_us, 
-        discount_text || '3% off', artificial_reviews_count || 500, artificial_reviews_data || '', 
-        image_url, image_url_2 || '', image_url_3 || '', image_url_4 || '', 
-        enable_select_options ?? 1, 
-        product_note || '', 
+        service_id,
+        service_name,
+        category,
+        group_id || null,
+        price,
+        mrp,
+        is_hot_deal,
+        select_options,
+        why_choose_us,
+        discount_text || '3% off',
+        artificial_reviews_count || 500,
+        artificial_reviews_data || '',
+        image_url,
+        image_url_2 || '',
+        image_url_3 || '',
+        image_url_4 || '',
+        enable_select_options ?? 1,
+        product_note || '',
         old_service_id
     ], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Service updated successfully!' });
+
+        if (err) {
+            console.error('Update Service Error:', err.message);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            message: 'Service updated successfully!'
+        });
     });
 });
 
@@ -1275,41 +1336,88 @@ app.get('/', (req, res) => {
 });
 
 app.post('/api/admin/add-service', (req, res) => {
+
     const { 
-        service_id, service_name, category, price, mrp, 
-        is_hot_deal, select_options, why_choose_us, discount_text,
-        artificial_reviews_count, artificial_reviews_data,
-        image_url, image_url_2, image_url_3, image_url_4,
+        service_id,
+        service_name,
+        category,
+        group_id,
+        price,
+        mrp,
+        is_hot_deal,
+        select_options,
+        why_choose_us,
+        discount_text,
+        artificial_reviews_count,
+        artificial_reviews_data,
+        image_url,
+        image_url_2,
+        image_url_3,
+        image_url_4,
         enable_select_options,
         product_note 
     } = req.body;
-    
-    const query = `INSERT INTO services (service_id, service_name, category, price, mrp, is_hot_deal, select_options, why_choose_us, discount_text, artificial_reviews_count, artificial_reviews_data, image_url, image_url_2, image_url_3, image_url_4, enable_select_options, product_note) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`;
-    
+
+    const query = `
+        INSERT INTO services
+        (
+            service_id,
+            service_name,
+            category,
+            group_id,
+            price,
+            mrp,
+            is_hot_deal,
+            select_options,
+            why_choose_us,
+            discount_text,
+            artificial_reviews_count,
+            artificial_reviews_data,
+            image_url,
+            image_url_2,
+            image_url_3,
+            image_url_4,
+            enable_select_options,
+            product_note
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `;
+
     db.query(query, [
-        service_id, 
-        service_name, 
-        category || 'General', 
-        price || 0, 
-        mrp || 0, 
-        is_hot_deal ?? 1, 
-        select_options || 'Standard Service', 
-        why_choose_us || 'Verified Professionals: Background-verified expert technicians.|30-Day Warranty: Post-service warranty on all repairs.', 
+        service_id,
+        service_name,
+        category || 'General',
+        group_id || null,
+        price || 0,
+        mrp || 0,
+        is_hot_deal ?? 1,
+        select_options || 'Standard Service',
+        why_choose_us ||
+            'Verified Professionals: Background-verified expert technicians.|30-Day Warranty: Post-service warranty on all repairs.',
         discount_text || '3% off',
         artificial_reviews_count || 500,
         artificial_reviews_data || '',
-        image_url, 
-        image_url_2 || '', 
-        image_url_3 || '', 
+        image_url,
+        image_url_2 || '',
+        image_url_3 || '',
         image_url_4 || '',
         enable_select_options ?? 1,
-        product_note || '' 
+        product_note || ''
     ], (err, result) => {
+
         if (err) {
             console.error('Add Service Error:', err.message);
-            return res.status(500).json({ success: false, error: err.message });
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
         }
-        res.json({ success: true, message: 'New service added successfully!' });
+
+        res.json({
+            success: true,
+            message: 'New service added successfully!'
+        });
     });
 });
 
