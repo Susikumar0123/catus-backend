@@ -777,6 +777,366 @@ app.get('/api/admin/service-groups', (req, res) => {
     });
 });
 
+// ==========================================
+// ADMIN - ADD NEW HOME ICON / SERVICE GROUP
+// ==========================================
+
+app.post('/api/admin/add-service-group', (req, res) => {
+
+    const {
+        group_id,
+        group_name,
+        icon_url,
+        display_order,
+        is_active
+    } = req.body;
+
+    const cleanGroupId = String(group_id || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+    const cleanGroupName = String(group_name || '').trim();
+    const cleanIconUrl = String(icon_url || '').trim();
+
+    if (!cleanGroupId || !cleanGroupName) {
+        return res.status(400).json({
+            success: false,
+            message: 'Group ID and Group Name are required.'
+        });
+    }
+
+    const query = `
+        INSERT INTO public.service_groups
+        (
+            group_id,
+            group_name,
+            icon_url,
+            display_order,
+            is_active
+        )
+        VALUES (?, ?, ?, ?, ?)
+        RETURNING *
+    `;
+
+    db.query(
+        query,
+        [
+            cleanGroupId,
+            cleanGroupName,
+            cleanIconUrl,
+            Number(display_order) || 0,
+            is_active === false ? false : true
+        ],
+        (err, results) => {
+
+            if (err) {
+
+                console.error(
+                    'Add Service Group Error:',
+                    err
+                );
+
+                // PostgreSQL unique violation
+                if (err.code === '23505') {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'This Group ID already exists.'
+                    });
+                }
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Home icon added successfully!',
+                group: results && results[0]
+                    ? results[0]
+                    : null
+            });
+        }
+    );
+});
+
+
+// ==========================================
+// ADMIN - UPDATE HOME ICON / SERVICE GROUP
+// ==========================================
+
+app.post('/api/admin/update-service-group', (req, res) => {
+
+    const {
+        old_group_id,
+        group_id,
+        group_name,
+        icon_url,
+        display_order,
+        is_active
+    } = req.body;
+
+    const cleanOldGroupId =
+        String(old_group_id || '').trim();
+
+    const cleanGroupId = String(group_id || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+
+    const cleanGroupName =
+        String(group_name || '').trim();
+
+    const cleanIconUrl =
+        String(icon_url || '').trim();
+
+    if (
+        !cleanOldGroupId ||
+        !cleanGroupId ||
+        !cleanGroupName
+    ) {
+        return res.status(400).json({
+            success: false,
+            message:
+                'Old Group ID, Group ID and Group Name are required.'
+        });
+    }
+
+    const query = `
+        UPDATE public.service_groups
+        SET
+            group_id = ?,
+            group_name = ?,
+            icon_url = ?,
+            display_order = ?,
+            is_active = ?
+        WHERE group_id = ?
+        RETURNING *
+    `;
+
+    db.query(
+        query,
+        [
+            cleanGroupId,
+            cleanGroupName,
+            cleanIconUrl,
+            Number(display_order) || 0,
+            is_active === false ? false : true,
+            cleanOldGroupId
+        ],
+        (err, results) => {
+
+            if (err) {
+
+                console.error(
+                    'Update Service Group Error:',
+                    err
+                );
+
+                if (err.code === '23505') {
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            'Another Home Icon already uses this Group ID.'
+                    });
+                }
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            if (!results || results.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Home Icon not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Home icon updated successfully!',
+                group: results[0]
+            });
+        }
+    );
+});
+
+// ==========================================
+// ADMIN - TOGGLE HOME ICON ACTIVE / HIDDEN
+// ==========================================
+
+app.post('/api/admin/toggle-service-group', (req, res) => {
+
+    const {
+        group_id,
+        is_active
+    } = req.body;
+
+    const cleanGroupId =
+        String(group_id || '').trim();
+
+    if (!cleanGroupId) {
+        return res.status(400).json({
+            success: false,
+            message: 'Group ID is required.'
+        });
+    }
+
+    const query = `
+        UPDATE public.service_groups
+        SET is_active = ?
+        WHERE group_id = ?
+        RETURNING *
+    `;
+
+    db.query(
+        query,
+        [
+            is_active === true,
+            cleanGroupId
+        ],
+        (err, results) => {
+
+            if (err) {
+                console.error(
+                    'Toggle Service Group Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            if (!results || results.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Home Icon not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message:
+                    is_active === true
+                        ? 'Home icon activated successfully!'
+                        : 'Home icon hidden successfully!',
+                group: results[0]
+            });
+        }
+    );
+});
+
+
+// ==========================================
+// ADMIN - SAFE DELETE HOME ICON
+// ==========================================
+
+app.post('/api/admin/delete-service-group', (req, res) => {
+
+    const {
+        group_id
+    } = req.body;
+
+    const cleanGroupId =
+        String(group_id || '').trim();
+
+    if (!cleanGroupId) {
+        return res.status(400).json({
+            success: false,
+            message: 'Group ID is required.'
+        });
+    }
+
+    // First check whether any services are using this group
+    const checkQuery = `
+        SELECT COUNT(*)::int AS service_count
+        FROM public.services
+        WHERE group_id = ?
+    `;
+
+    db.query(
+        checkQuery,
+        [cleanGroupId],
+        (checkErr, checkResults) => {
+
+            if (checkErr) {
+                console.error(
+                    'Service Group Delete Check Error:',
+                    checkErr
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    error: checkErr.message
+                });
+            }
+
+            const serviceCount =
+                checkResults &&
+                checkResults[0]
+                    ? Number(checkResults[0].service_count)
+                    : 0;
+
+            if (serviceCount > 0) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        `Cannot delete this Home Icon. ${serviceCount} service(s) are using this group. Reassign those services first.`
+                });
+            }
+
+            const deleteQuery = `
+                DELETE FROM public.service_groups
+                WHERE group_id = ?
+                RETURNING *
+            `;
+
+            db.query(
+                deleteQuery,
+                [cleanGroupId],
+                (deleteErr, deleteResults) => {
+
+                    if (deleteErr) {
+                        console.error(
+                            'Delete Service Group Error:',
+                            deleteErr
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            error: deleteErr.message
+                        });
+                    }
+
+                    if (
+                        !deleteResults ||
+                        deleteResults.length === 0
+                    ) {
+                        return res.status(404).json({
+                            success: false,
+                            message: 'Home Icon not found.'
+                        });
+                    }
+
+                    return res.json({
+                        success: true,
+                        message:
+                            'Home icon deleted successfully!'
+                    });
+                }
+            );
+        }
+    );
+});
+
 app.get('/api/services', (req, res) => {
     const query = 'SELECT * FROM services';
     db.query(query, (err, results) => {
