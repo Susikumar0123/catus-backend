@@ -711,6 +711,72 @@ app.post('/api/create-razorpay-order', async (req, res) => {
 // ==========================================
 // SERVICES API ROUTES
 // ==========================================
+// ==========================================
+// SERVICE GROUPS / HOME ICONS API
+// ==========================================
+
+// Get all active home service groups/icons
+app.get('/api/service-groups', (req, res) => {
+
+    const query = `
+        SELECT
+            id,
+            group_id,
+            group_name,
+            icon_url,
+            display_order,
+            is_active
+        FROM public.service_groups
+        WHERE is_active = TRUE
+        ORDER BY display_order ASC, id ASC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Service Groups Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            groups: results
+        });
+    });
+});
+
+
+// Get all service groups for Admin
+app.get('/api/admin/service-groups', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.service_groups
+        ORDER BY display_order ASC, id ASC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Admin Service Groups Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            groups: results
+        });
+    });
+});
+
 app.get('/api/services', (req, res) => {
     const query = 'SELECT * FROM services';
     db.query(query, (err, results) => {
