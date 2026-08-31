@@ -1453,7 +1453,7 @@ app.get('/api/sitemap.xml', (req, res) => {
             l.slug AS location_slug,
             l.district,
             l.state,
-            s.service_id
+            s.service_id,
             s.slug AS service_slug
         FROM public.locations l
         INNER JOIN public.location_services ls
