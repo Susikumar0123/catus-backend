@@ -1454,6 +1454,7 @@ app.get('/api/sitemap.xml', (req, res) => {
             l.district,
             l.state,
             s.service_id
+            s.slug AS service_slug
         FROM public.locations l
         INNER JOIN public.location_services ls
             ON ls.location_id = l.id
@@ -1508,7 +1509,7 @@ app.get('/api/sitemap.xml', (req, res) => {
                 slugify(row.location_slug);
 
             const serviceSlug =
-                slugify(row.service_id);
+                slugify(row.service_slug);
 
             if (
                 stateSlug &&
