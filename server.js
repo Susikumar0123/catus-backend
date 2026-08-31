@@ -1442,6 +1442,104 @@ app.post('/api/reviews', (req, res) => {
     });
 });
 
+// ==========================================
+// SEO - DYNAMIC SITEMAP
+// ==========================================
+
+app.get('/api/sitemap.xml', (req, res) => {
+
+    const query = `
+        SELECT
+            l.slug AS location_slug,
+            l.district,
+            l.state,
+            s.service_id
+        FROM public.locations l
+        INNER JOIN public.location_services ls
+            ON ls.location_id = l.id
+        INNER JOIN public.services s
+            ON s.service_id = ls.service_id
+        WHERE l.is_active = TRUE
+          AND ls.is_available = TRUE
+        ORDER BY l.state, l.district, l.slug, s.service_id
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Sitemap generation error:', err);
+
+            return res.status(500)
+                .type('text/plain')
+                .send('Sitemap generation failed');
+        }
+
+        const frontendBase =
+            'https://catus-frontend-nu.vercel.app';
+
+        const slugify = (value) =>
+            String(value || '')
+                .trim()
+                .toLowerCase()
+                .replace(/[^a-z0-9]+/g, '-')
+                .replace(/^-+|-+$/g, '');
+
+        const escapeXml = (value) =>
+            String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&apos;');
+
+        const urls = [
+            `${frontendBase}/`
+        ];
+
+        (results || []).forEach(row => {
+
+            const stateSlug =
+                slugify(row.state);
+
+            const districtSlug =
+                slugify(row.district);
+
+            const locationSlug =
+                slugify(row.location_slug);
+
+            const serviceSlug =
+                slugify(row.service_id);
+
+            if (
+                stateSlug &&
+                districtSlug &&
+                locationSlug &&
+                serviceSlug
+            ) {
+                urls.push(
+                    `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceSlug}`
+                );
+            }
+        });
+
+        const uniqueUrls =
+            [...new Set(urls)];
+
+        const xml =
+`<?xml version="1.0" encoding="UTF-8"?>
+<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
+${uniqueUrls.map(url => `  <url>
+    <loc>${escapeXml(url)}</loc>
+  </url>`).join('\n')}
+</urlset>`;
+
+        res
+            .status(200)
+            .set('Content-Type', 'application/xml; charset=utf-8')
+            .send(xml);
+    });
+});
+
 // Root URL check
 app.get('/', (req, res) => {
     res.send('Catus Backend Server is running successfully!');
