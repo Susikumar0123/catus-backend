@@ -1757,27 +1757,43 @@ app.get('/api/match-location', (req, res) => {
           AND REGEXP_REPLACE(LOWER(TRIM(name)), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^a-z0-9]', '', 'g')
           AND REGEXP_REPLACE(LOWER(TRIM(district)), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^a-z0-9]', '', 'g')
           AND REGEXP_REPLACE(LOWER(TRIM(state)), '[^a-z0-9]', '', 'g') = REGEXP_REPLACE(LOWER(TRIM(?)), '[^a-z0-9]', '', 'g')
-        ORDER BY 
-          CASE WHEN ? <> '' AND pincode = ? THEN 0 ELSE 1 END
-        LIMIT 1
     `;
 
-    db.query(query, [name, district, state, pincode, pincode], (err, results) => {
+    db.query(query, [name, district, state], (err, results) => {
         if (err) {
             console.error('Match location error:', err);
             return res.status(500).json({ success: false, error: err.message });
         }
 
-        if (results && results.length > 0) {
+        if (!results || results.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Location not found in Catus service database.'
+            });
+        }
+
+        if (results.length === 1) {
             return res.json({
                 success: true,
                 location: results[0]
             });
         }
 
-        return res.status(404).json({
+        if (pincode) {
+            const pincodeMatches = results.filter(row => String(row.pincode || '').trim() === pincode);
+            if (pincodeMatches.length === 1) {
+                return res.json({
+                    success: true,
+                    location: pincodeMatches[0]
+                });
+            }
+        }
+
+        return res.status(409).json({
             success: false,
-            message: 'Location not found in Catus service database.'
+            ambiguous: true,
+            message: 'Multiple Catus locations matched.',
+            locations: results
         });
     });
 });
