@@ -1819,7 +1819,7 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
 
             AND LOWER(l.slug) = ?
 
-            AND LOWER(s.service_id) = ?
+            AND LOWER(s.slug) = ?
 
             AND l.is_active = TRUE
             AND ls.is_available = TRUE
