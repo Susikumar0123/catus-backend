@@ -1,5 +1,7 @@
 const express = require('express');
 const cors = require('cors');
+const bcrypt = require('bcryptjs');
+const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const multer = require('multer');
 const path = require('path');
@@ -139,13 +141,13 @@ app.post('/api/check-user', (req, res) => {
 app.post('/api/login-password', (req, res) => {
     const { phone, password } = req.body;
     const query = 'SELECT * FROM users WHERE phone = ?';
-    db.query(query, [phone], (err, results) => {
+    db.query(query, [phone], async (err, results) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         
         if (results && results.length > 0) {
             const user = results[0];
             // Passwords-ah trim panrathu space error-ai thavirkkum
-            if (String(user.password).trim() === String(password).trim()) {
+            if (await bcrypt.compare(String(password), String(user.password))) {
                 res.json({ success: true, user: user });
             } else {
                 res.status(401).json({ success: false, message: 'Incorrect password.' });
@@ -179,7 +181,9 @@ app.post('/api/send-otp', (req, res) => {
         });
     }
 
-    const generatedOtp = '1234';
+    const generatedOtp = String(
+    Math.floor(1000 + Math.random() * 9000)
+);
     const expiresAt = Date.now() + (5 * 60 * 1000);
 
 
@@ -532,7 +536,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
         LIMIT 1
     `;
 
-    db.query(findUserQuery, [phone], (err, rows) => {
+    db.query(findUserQuery, [phone], async (err, rows) => {
 
         if (err) {
             console.error('Find User Error:', err);
@@ -575,6 +579,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
                 message: 'Invalid or incorrect OTP.'
             });
         }
+        const hashedPassword = await bcrypt.hash(password, 12);
 
         const updateQuery = `
             UPDATE public.users
@@ -587,7 +592,7 @@ app.post('/api/verify-otp-set-password', (req, res) => {
 
         db.query(
             updateQuery,
-            [password, phone],
+            [hashedPassword, phone],
             (updateErr, updatedRows) => {
 
                 if (updateErr) {
@@ -633,65 +638,195 @@ app.get('/api/orders/:phone', (req, res) => {
 // 4. CREATE ORDER API ROUTE (Checkout)
 // ==========================================
 app.post('/api/orders', (req, res) => {
-    const { 
-        order_id, 
-        customer_id, 
-        product_id, 
-        service_name, 
-        customer_name, 
-        phone, 
-        whatsapp, 
-        address, 
-        district, 
-        pincode, 
-        amount, 
-        order_date, 
-        status 
-    } = req.body;
-    
-    const query = `
-    INSERT INTO orders 
-    (
+
+    const {
         order_id,
         customer_id,
-        product_id,
-        service_name,
         customer_name,
         phone,
         whatsapp,
         address,
         district,
         pincode,
-        amount,
         order_date,
         status,
-        booked_at
-    ) 
-    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
-`;
-    
-    const values = [
-        order_id, 
-        customer_id, 
-        product_id || 'tv-repair', 
-        service_name, 
-        customer_name, 
-        phone, 
-        whatsapp || '', 
-        address, 
-        district, 
-        pincode, 
-        amount, 
-        order_date, 
-        status || 'Active' 
-    ];
+        payment_verification,
+        items
+    } = req.body;
 
-    db.query(query, values, (err, result) => {
-        if (err) {
-            console.error('Insert Error Detail:', err.sqlMessage || err.message);
-            return res.status(500).json({ success: false, error: err.message });
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid service items are required.'
+        });
+    }
+
+    const cleanItems = items
+        .map(item => ({
+            product_id: String(item.product_id || '').trim(),
+            quantity: Math.max(1, parseInt(item.quantity, 10) || 1)
+        }))
+        .filter(item => item.product_id);
+
+    if (cleanItems.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid service items.'
+        });
+    }
+
+    const productIds = [...new Set(
+        cleanItems.map(item => item.product_id)
+    )];
+
+    const placeholders = productIds.map(() => '?').join(',');
+
+    const priceQuery = `
+        SELECT service_id, service_name, price
+        FROM public.services
+        WHERE service_id IN (${placeholders})
+    `;
+
+    db.query(priceQuery, productIds, (priceErr, services) => {
+
+        if (priceErr) {
+            console.error('Order Price Error:', priceErr);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to calculate order amount.'
+            });
         }
-        res.json({ success: true, message: 'Order placed and saved to database successfully!' });
+
+        if (!services || services.length !== productIds.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'One or more services are invalid.'
+            });
+        }
+
+        const serviceMap = {};
+
+        services.forEach(service => {
+            serviceMap[String(service.service_id)] = service;
+        });
+
+        let subtotal = 0;
+
+        cleanItems.forEach(item => {
+            subtotal +=
+                (Number(serviceMap[item.product_id].price) || 0)
+                * item.quantity;
+        });
+
+        const visitationFee = 49;
+        const platformFee = 15;
+        const taxes =
+            Math.round((subtotal + visitationFee) * 0.05);
+
+        const finalAmount =
+            subtotal + visitationFee + platformFee + taxes;
+
+        const combinedProductIds =
+            cleanItems.map(item => item.product_id).join(', ');
+
+        const combinedServiceName =
+            cleanItems.map(item =>
+                serviceMap[item.product_id].service_name
+            ).join(', ');
+
+        let safeStatus = 'Pending';
+
+if (
+    status === 'Paid' &&
+    payment_verification &&
+    payment_verification.razorpay_order_id &&
+    payment_verification.razorpay_payment_id &&
+    payment_verification.razorpay_signature
+) {
+    const verificationBody =
+        payment_verification.razorpay_order_id +
+        '|' +
+        payment_verification.razorpay_payment_id;
+
+    const expectedSignature = crypto
+        .createHmac(
+            'sha256',
+            process.env.RAZORPAY_KEY_SECRET
+        )
+        .update(verificationBody)
+        .digest('hex');
+
+    if (
+        expectedSignature ===
+        payment_verification.razorpay_signature
+    ) {
+        safeStatus = 'Paid';
+    } else {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid Razorpay payment verification.'
+        });
+    }
+}
+
+        const query = `
+            INSERT INTO orders
+            (
+                order_id,
+                customer_id,
+                product_id,
+                service_name,
+                customer_name,
+                phone,
+                whatsapp,
+                address,
+                district,
+                pincode,
+                amount,
+                order_date,
+                status,
+                booked_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+        `;
+
+        const values = [
+            order_id,
+            customer_id,
+            combinedProductIds,
+            combinedServiceName,
+            customer_name,
+            phone,
+            whatsapp || '',
+            address,
+            district,
+            pincode,
+            finalAmount,
+            order_date,
+            safeStatus
+        ];
+
+        db.query(query, values, (err) => {
+
+            if (err) {
+                console.error(
+                    'Insert Order Error:',
+                    err.message
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Order placed successfully!',
+                amount: finalAmount
+            });
+        });
     });
 });
 
@@ -868,25 +1003,247 @@ const razorpayInstance = new Razorpay({
 // 9. RAZORPAY PAYMENT ORDER CREATION API
 // ==========================================
 app.post('/api/create-razorpay-order', async (req, res) => {
-    const { amount } = req.body;
-    
-    const options = {
-        amount: amount, 
-        currency: "INR",
-        receipt: "receipt_" + Math.random().toString(36).substring(7)
-    };
 
-    try {
-        const order = await razorpayInstance.orders.create(options);
-        res.json({
-            success: true,
-            id: order.id,
-            amount: order.amount
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'No service items provided.'
         });
-    } catch (error) {
-        console.error('Razorpay Error:', error);
-        res.status(500).json({ success: false, error: error.message });
     }
+
+    const cleanItems = items
+        .map(item => ({
+            product_id: String(item.product_id || '').trim(),
+            quantity: Math.max(1, parseInt(item.quantity, 10) || 1)
+        }))
+        .filter(item => item.product_id);
+
+    if (cleanItems.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid service items.'
+        });
+    }
+
+    const productIds = [...new Set(
+        cleanItems.map(item => item.product_id)
+    )];
+
+    const placeholders = productIds.map(() => '?').join(',');
+
+    const priceQuery = `
+        SELECT service_id, price
+        FROM public.services
+        WHERE service_id IN (${placeholders})
+    `;
+
+    db.query(priceQuery, productIds, async (err, services) => {
+
+        if (err) {
+            console.error('Razorpay Price Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to calculate payment amount.'
+            });
+        }
+
+        if (!services || services.length !== productIds.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'One or more services are invalid.'
+            });
+        }
+
+        const priceMap = {};
+
+        services.forEach(service => {
+            priceMap[String(service.service_id)] =
+                Number(service.price) || 0;
+        });
+
+        let subtotal = 0;
+
+        cleanItems.forEach(item => {
+            subtotal +=
+                priceMap[item.product_id] * item.quantity;
+        });
+
+        const visitationFee = 49;
+const platformFee = 15;
+const taxes = Math.round((subtotal + visitationFee) * 0.05);
+
+const finalAmount =
+    subtotal + visitationFee + platformFee + taxes;
+
+        if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid payment amount.'
+            });
+        }
+
+        const options = {
+            amount: Math.round(finalAmount * 100),
+            currency: 'INR',
+            receipt:
+                'receipt_' +
+                Math.random().toString(36).substring(7)
+        };
+
+        try {
+
+            const order =
+                await razorpayInstance.orders.create(options);
+
+            return res.json({
+                success: true,
+                id: order.id,
+                amount: order.amount
+            });
+
+        } catch (error) {
+
+            console.error('Razorpay Error:', error);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to create payment order.'
+            });
+        }
+    });
+});
+
+app.post('/api/calculate-order-total', (req, res) => {
+
+    const { items } = req.body;
+
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'No service items provided.'
+        });
+    }
+
+    const cleanItems = items
+        .map(item => ({
+            product_id: String(item.product_id || '').trim(),
+            quantity: Math.max(1, parseInt(item.quantity, 10) || 1)
+        }))
+        .filter(item => item.product_id);
+
+    if (cleanItems.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid service items.'
+        });
+    }
+
+    const productIds = [...new Set(
+        cleanItems.map(item => item.product_id)
+    )];
+
+    const placeholders = productIds.map(() => '?').join(',');
+
+    const query = `
+        SELECT service_id, price
+        FROM public.services
+        WHERE service_id IN (${placeholders})
+    `;
+
+    db.query(query, productIds, (err, services) => {
+
+        if (err) {
+            console.error('Order Total Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to calculate order total.'
+            });
+        }
+
+        if (!services || services.length !== productIds.length) {
+            return res.status(400).json({
+                success: false,
+                message: 'One or more services are invalid.'
+            });
+        }
+
+        const priceMap = {};
+
+        services.forEach(service => {
+            priceMap[String(service.service_id)] =
+                Number(service.price) || 0;
+        });
+
+        let subtotal = 0;
+
+        cleanItems.forEach(item => {
+            subtotal +=
+                priceMap[item.product_id] * item.quantity;
+        });
+
+        const visitationFee = 49;
+        const platformFee = 15;
+        const taxes = Math.round((subtotal + visitationFee) * 0.05);
+
+        const finalAmount =
+            subtotal + visitationFee + platformFee + taxes;
+
+        return res.json({
+            success: true,
+            subtotal,
+            visitationFee,
+            platformFee,
+            taxes,
+            finalAmount
+        });
+    });
+});
+
+// ==========================================
+// RAZORPAY PAYMENT SIGNATURE VERIFICATION
+// ==========================================
+app.post('/api/verify-razorpay-payment', (req, res) => {
+
+    const {
+        razorpay_order_id,
+        razorpay_payment_id,
+        razorpay_signature
+    } = req.body;
+
+    if (
+        !razorpay_order_id ||
+        !razorpay_payment_id ||
+        !razorpay_signature
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Payment verification details are missing.'
+        });
+    }
+
+    const body =
+        razorpay_order_id + '|' + razorpay_payment_id;
+
+    const expectedSignature = crypto
+        .createHmac('sha256', process.env.RAZORPAY_KEY_SECRET)
+        .update(body)
+        .digest('hex');
+
+    if (expectedSignature !== razorpay_signature) {
+        return res.status(400).json({
+            success: false,
+            message: 'Payment verification failed.'
+        });
+    }
+
+    return res.json({
+        success: true,
+        message: 'Payment verified successfully.'
+    });
 });
 
 // ==========================================
