@@ -1735,6 +1735,81 @@ app.get('/api/test-public-tables', (req, res) => {
 });
 
 // ==========================================
+// CATUS LOCATION SEARCH API
+// ==========================================
+app.get('/api/search-locations', (req, res) => {
+
+    const search = String(req.query.q || '').trim();
+
+    if (search.length < 2) {
+        return res.json({
+            success: true,
+            locations: []
+        });
+    }
+
+    const query = `
+        SELECT
+            id,
+            name,
+            slug,
+            district,
+            state,
+            pincode
+        FROM public.locations
+        WHERE is_active = TRUE
+          AND (
+              name ILIKE ?
+              OR slug ILIKE ?
+              OR district ILIKE ?
+              OR pincode ILIKE ?
+          )
+        ORDER BY
+            CASE
+                WHEN LOWER(name) = LOWER(?) THEN 0
+                WHEN LOWER(name) LIKE LOWER(?) THEN 1
+                ELSE 2
+            END,
+            name ASC
+        LIMIT 30
+    `;
+
+    const contains = `%${search}%`;
+    const startsWith = `${search}%`;
+
+    db.query(
+        query,
+        [
+            contains,
+            contains,
+            contains,
+            contains,
+            search,
+            startsWith
+        ],
+        (err, results) => {
+
+            if (err) {
+                console.error(
+                    'Location search error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            return res.json({
+                success: true,
+                locations: results || []
+            });
+        }
+    );
+});
+
+// ==========================================
 // CATUS LOCATION VALIDATION API
 // ==========================================
 app.get('/api/match-location', (req, res) => {
