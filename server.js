@@ -14,6 +14,83 @@ app.use(cors());
 app.use(express.json());
 
 // ==========================================
+// SUPABASE STORAGE - IMAGE UPLOAD
+// ==========================================
+
+const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: {
+        fileSize: 5 * 1024 * 1024 // 5 MB
+    }
+});
+
+app.post('/api/upload-image', upload.single('image'), async (req, res) => {
+    try {
+
+        if (!req.file) {
+            return res.status(400).json({
+                success: false,
+                message: 'No image uploaded'
+            });
+        }
+
+        const SUPABASE_URL = String(process.env.SUPABASE_URL || '')
+            .replace(/\/rest\/v1\/?$/, '');
+
+        const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+
+        if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+            return res.status(500).json({
+                success: false,
+                message: 'Supabase Storage configuration missing'
+            });
+        }
+
+        const extension =
+            path.extname(req.file.originalname).toLowerCase() || '.jpg';
+
+        const fileName =
+            `home-icons/${Date.now()}-${Math.random()
+                .toString(36)
+                .substring(2, 8)}${extension}`;
+
+        await axios.post(
+            `${SUPABASE_URL}/storage/v1/object/catus-images/${fileName}`,
+            req.file.buffer,
+            {
+                headers: {
+                    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
+                    apikey: SUPABASE_SECRET_KEY,
+                    'Content-Type': req.file.mimetype
+                },
+                maxBodyLength: Infinity
+            }
+        );
+
+        const imageUrl =
+            `${SUPABASE_URL}/storage/v1/object/public/catus-images/${fileName}`;
+
+        return res.json({
+            success: true,
+            imageUrl: imageUrl
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Supabase Image Upload Error:',
+            error.response?.data || error.message
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Image upload failed',
+            error: error.response?.data || error.message
+        });
+    }
+});
+
+// ==========================================
 // 1. REGISTER API ROUTE (Fixed)
 // ==========================================
 app.post('/api/register', (req, res) => {
@@ -2124,26 +2201,7 @@ app.get('/api/test-location-direct', (req, res) => {
 });
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
-// IMAGE UPLOAD CONFIGURATION (Multer)
-// ==========================================
-const storage = multer.diskStorage({
-    destination: (req, file, cb) => {
-        cb(null, 'public/uploads/'); // உங்கள் ப்ராஜெக்ட் ஃபோல்டரில் public/uploads இருக்க வேண்டும்
-    },
-    filename: (req, file, cb) => {
-        cb(null, Date.now() + path.extname(file.originalname));
-    }
-});
-const upload = multer({ storage: storage });
 
-// இமேஜ் அப்லோட் API Route
-app.post('/api/upload-image', upload.single('image'), (req, res) => {
-    if (!req.file) {
-        return res.status(400).json({ success: false, message: 'No file uploaded' });
-    }
-    const imageUrl = `${req.protocol}://${req.get('host')}/uploads/${req.file.filename}`;
-    res.json({ success: true, imageUrl: imageUrl });
-});
 
 
 app.use('/uploads', express.static(path.join(__dirname, 'public/uploads')));
