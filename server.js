@@ -1361,8 +1361,6 @@ app.post('/api/admin/update-service', (req, res) => {
         select_options,
         why_choose_us,
         discount_text,
-        artificial_reviews_count,
-        artificial_reviews_data,
         image_url,
         image_url_2,
         image_url_3,
@@ -1384,8 +1382,6 @@ app.post('/api/admin/update-service', (req, res) => {
             select_options = ?,
             why_choose_us = ?,
             discount_text = ?,
-            artificial_reviews_count = ?,
-            artificial_reviews_data = ?,
             image_url = ?,
             image_url_2 = ?,
             image_url_3 = ?,
@@ -1406,8 +1402,6 @@ app.post('/api/admin/update-service', (req, res) => {
         select_options,
         why_choose_us,
         discount_text || '3% off',
-        artificial_reviews_count || 500,
-        artificial_reviews_data || '',
         image_url,
         image_url_2 || '',
         image_url_3 || '',
@@ -1502,21 +1496,195 @@ app.post('/api/admin/edit-banner', (req, res) => {
 // REVIEWS API ROUTES
 // ==========================================
 app.get('/api/reviews/:service_id', (req, res) => {
+
     const serviceId = req.params.service_id;
-    const query = 'SELECT * FROM product_reviews WHERE service_id = ? ORDER BY id DESC';
+
+    const query =
+        'SELECT * FROM product_reviews WHERE service_id = ? ORDER BY id DESC';
+
     db.query(query, [serviceId], (err, results) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, reviews: results });
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        const validReviews = (results || []).filter(r => {
+
+            const rating = Number(r.rating);
+
+            return (
+                Number.isFinite(rating) &&
+                rating >= 1 &&
+                rating <= 5
+            );
+        });
+
+        const reviewCount = validReviews.length;
+
+        const totalRating = validReviews.reduce(
+            (sum, r) => sum + Number(r.rating),
+            0
+        );
+
+        const averageRating =
+            reviewCount > 0
+                ? totalRating / reviewCount
+                : 0;
+
+        res.json({
+            success: true,
+            average_rating: Number(averageRating.toFixed(1)),
+            review_count: reviewCount,
+            reviews: validReviews
+        });
     });
 });
 
 app.post('/api/reviews', (req, res) => {
-    const { service_id, customer_name, rating, review_text } = req.body;
-    const query = 'INSERT INTO product_reviews (service_id, customer_name, rating, review_text) VALUES (?, ?, ?, ?)';
-    db.query(query, [service_id, customer_name, rating, review_text], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Review added successfully!' });
-    });
+
+    const {
+        service_id,
+        order_id,
+        phone,
+        rating,
+        review_text
+    } = req.body;
+
+    const cleanServiceId = String(service_id || '').trim();
+    const cleanOrderId = String(order_id || '').trim();
+    const cleanPhone = String(phone || '').trim();
+    const cleanReview = String(review_text || '').trim();
+    const ratingValue = Number(rating);
+
+    if (
+        !cleanServiceId ||
+        !cleanOrderId ||
+        !cleanPhone ||
+        !Number.isInteger(ratingValue) ||
+        ratingValue < 1 ||
+        ratingValue > 5
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid review details.'
+        });
+    }
+
+    const orderQuery = `
+        SELECT
+            order_id,
+            product_id,
+            customer_name,
+            phone,
+            status
+        FROM orders
+        WHERE order_id = ?
+          AND phone = ?
+        LIMIT 1
+    `;
+
+    db.query(
+        orderQuery,
+        [cleanOrderId, cleanPhone],
+        (orderErr, orders) => {
+
+            if (orderErr) {
+                console.error('Review Order Check Error:', orderErr);
+
+                return res.status(500).json({
+                    success: false,
+                    message: orderErr.message
+                });
+            }
+
+            if (!orders || orders.length === 0) {
+                return res.status(403).json({
+                    success: false,
+                    message: 'This booking does not belong to this customer.'
+                });
+            }
+
+            const order = orders[0];
+
+            if (
+                String(order.status || '').trim().toLowerCase()
+                !== 'completed'
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Review is allowed only after service completion.'
+                });
+            }
+
+            if (
+                String(order.product_id || '').trim()
+                !== cleanServiceId
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message: 'Service does not match this booking.'
+                });
+            }
+
+            const insertQuery = `
+                INSERT INTO product_reviews
+                (
+                    service_id,
+                    order_id,
+                    customer_name,
+                    rating,
+                    review_text
+                )
+                VALUES (?, ?, ?, ?, ?)
+            `;
+
+            db.query(
+                insertQuery,
+                [
+                    cleanServiceId,
+                    cleanOrderId,
+                    order.customer_name || 'CATUS Customer',
+                    ratingValue,
+                    cleanReview
+                ],
+                (insertErr) => {
+
+                    if (insertErr) {
+
+                        if (
+                            insertErr.code === '23505' ||
+                            String(insertErr.message || '')
+                                .toLowerCase()
+                                .includes('unique')
+                        ) {
+                            return res.status(409).json({
+                                success: false,
+                                message: 'You have already reviewed this booking.'
+                            });
+                        }
+
+                        console.error(
+                            'Review Insert Error:',
+                            insertErr
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            message: insertErr.message
+                        });
+                    }
+
+                    return res.json({
+                        success: true,
+                        message: 'Verified review added successfully!'
+                    });
+                }
+            );
+        }
+    );
 });
 
 // ==========================================
@@ -1636,8 +1804,6 @@ app.post('/api/admin/add-service', (req, res) => {
         select_options,
         why_choose_us,
         discount_text,
-        artificial_reviews_count,
-        artificial_reviews_data,
         image_url,
         image_url_2,
         image_url_3,
@@ -1659,8 +1825,6 @@ app.post('/api/admin/add-service', (req, res) => {
             select_options,
             why_choose_us,
             discount_text,
-            artificial_reviews_count,
-            artificial_reviews_data,
             image_url,
             image_url_2,
             image_url_3,
@@ -1668,7 +1832,7 @@ app.post('/api/admin/add-service', (req, res) => {
             enable_select_options,
             product_note
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     db.query(query, [
@@ -1683,8 +1847,6 @@ app.post('/api/admin/add-service', (req, res) => {
         why_choose_us ||
             'Verified Professionals: Background-verified expert technicians.|30-Day Warranty: Post-service warranty on all repairs.',
         discount_text || '3% off',
-        artificial_reviews_count || 500,
-        artificial_reviews_data || '',
         image_url,
         image_url_2 || '',
         image_url_3 || '',
