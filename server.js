@@ -104,6 +104,51 @@ const SUPABASE_SECRET_KEY =
     }
 });
 
+async function deleteSupabaseImage(imageUrl) {
+    try {
+        if (!imageUrl) return;
+
+        const SUPABASE_URL = String(
+            process.env.SUPABASE_URL ||
+            process.env.PROJECT_URL ||
+            ''
+        ).replace(/\/rest\/v1\/?$/, '');
+
+        const SUPABASE_SECRET_KEY =
+            process.env.SUPABASE_SECRET_KEY ||
+            process.env.SUPABASE_SERVICE_ROLE_KEY ||
+            process.env.SUPABASE_SERVICE_KEY ||
+            '';
+
+        const publicPrefix =
+            `${SUPABASE_URL}/storage/v1/object/public/catus-images/`;
+
+        if (!imageUrl.startsWith(publicPrefix)) {
+            return;
+        }
+
+        const filePath = imageUrl.substring(publicPrefix.length);
+
+        await axios.delete(
+            `${SUPABASE_URL}/storage/v1/object/catus-images/${filePath}`,
+            {
+                headers: {
+                    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
+                    apikey: SUPABASE_SECRET_KEY
+                }
+            }
+        );
+
+        console.log('Old Supabase image deleted:', filePath);
+
+    } catch (error) {
+        console.error(
+            'Old Supabase image delete failed:',
+            error.response?.data || error.message
+        );
+    }
+}
+
 // ==========================================
 // TECHNICIAN PARTNER REGISTRATION
 // ==========================================
@@ -1845,6 +1890,29 @@ app.post('/api/admin/update-service-group', (req, res) => {
         });
     }
 
+    const oldIconQuery = `
+    SELECT icon_url
+    FROM public.service_groups
+    WHERE group_id = ?
+    LIMIT 1
+`;
+
+db.query(oldIconQuery, [cleanOldGroupId], (findErr, oldRows) => {
+
+    if (findErr) {
+        console.error('Old Home Icon Fetch Error:', findErr.message);
+
+        return res.status(500).json({
+            success: false,
+            error: findErr.message
+        });
+    }
+
+    const oldIconUrl =
+        oldRows && oldRows[0]
+            ? oldRows[0].icon_url
+            : '';
+
     const query = `
         UPDATE public.service_groups
         SET
@@ -1867,7 +1935,7 @@ app.post('/api/admin/update-service-group', (req, res) => {
             is_active === false ? false : true,
             cleanOldGroupId
         ],
-        (err, results) => {
+        async (err, results) => {
 
             if (err) {
 
@@ -1897,6 +1965,10 @@ app.post('/api/admin/update-service-group', (req, res) => {
                 });
             }
 
+            if (oldIconUrl && oldIconUrl !== cleanIconUrl) {
+    await deleteSupabaseImage(oldIconUrl);
+}
+
             return res.json({
                 success: true,
                 message: 'Home icon updated successfully!',
@@ -1904,6 +1976,7 @@ app.post('/api/admin/update-service-group', (req, res) => {
             });
         }
     );
+});
 });
 
 // ==========================================
@@ -2127,60 +2200,96 @@ app.post('/api/admin/update-service', (req, res) => {
         product_note 
     } = req.body;
 
-    const query = `
-        UPDATE services
-        SET
-            service_id = ?,
-            service_name = ?,
-            category = ?,
-            group_id = ?,
-            price = ?,
-            mrp = ?,
-            is_hot_deal = ?,
-            select_options = ?,
-            why_choose_us = ?,
-            discount_text = ?,
-            image_url = ?,
-            image_url_2 = ?,
-            image_url_3 = ?,
-            image_url_4 = ?,
-            enable_select_options = ?,
-            product_note = ?
+       const oldImageQuery = `
+        SELECT image_url, image_url_2, image_url_3, image_url_4
+        FROM public.services
         WHERE service_id = ?
+        LIMIT 1
     `;
 
-    db.query(query, [
-        service_id,
-        service_name,
-        category,
-        group_id || null,
-        price,
-        mrp,
-        is_hot_deal,
-        select_options,
-        why_choose_us,
-        discount_text || '3% off',
-        image_url,
-        image_url_2 || '',
-        image_url_3 || '',
-        image_url_4 || '',
-        enable_select_options ?? 1,
-        product_note || '',
-        old_service_id
-    ], (err, result) => {
+    db.query(oldImageQuery, [old_service_id], (findErr, oldRows) => {
 
-        if (err) {
-            console.error('Update Service Error:', err.message);
+        if (findErr) {
+            console.error('Old Service Images Fetch Error:', findErr.message);
 
             return res.status(500).json({
                 success: false,
-                error: err.message
+                error: findErr.message
             });
         }
 
-        res.json({
-            success: true,
-            message: 'Service updated successfully!'
+        const oldService = oldRows && oldRows[0]
+            ? oldRows[0]
+            : {};
+
+        const query = `
+            UPDATE services
+            SET
+                service_id = ?,
+                service_name = ?,
+                category = ?,
+                group_id = ?,
+                price = ?,
+                mrp = ?,
+                is_hot_deal = ?,
+                select_options = ?,
+                why_choose_us = ?,
+                discount_text = ?,
+                image_url = ?,
+                image_url_2 = ?,
+                image_url_3 = ?,
+                image_url_4 = ?,
+                enable_select_options = ?,
+                product_note = ?
+            WHERE service_id = ?
+        `;
+
+        db.query(query, [
+            service_id,
+            service_name,
+            category,
+            group_id || null,
+            price,
+            mrp,
+            is_hot_deal,
+            select_options,
+            why_choose_us,
+            discount_text || '3% off',
+            image_url,
+            image_url_2 || '',
+            image_url_3 || '',
+            image_url_4 || '',
+            enable_select_options ?? 1,
+            product_note || '',
+            old_service_id
+        ], async (err, result) => {
+
+            if (err) {
+                console.error('Update Service Error:', err.message);
+
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+            const imageChanges = [
+                [oldService.image_url, image_url],
+                [oldService.image_url_2, image_url_2],
+                [oldService.image_url_3, image_url_3],
+                [oldService.image_url_4, image_url_4]
+            ];
+
+            for (const [oldUrl, newUrl] of imageChanges) {
+                if (oldUrl && oldUrl !== newUrl) {
+                    await deleteSupabaseImage(oldUrl);
+                }
+            }
+
+            res.json({
+                success: true,
+                message: 'Service updated successfully!'
+            });
         });
     });
 });
@@ -2233,20 +2342,117 @@ app.post('/api/admin/add-banner', (req, res) => {
 
 app.post('/api/admin/delete-banner', (req, res) => {
     const { id } = req.body;
-    const query = 'DELETE FROM hero_banners WHERE id = ?';
-    db.query(query, [id], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Banner deleted successfully!' });
+
+    const query = `
+        DELETE FROM public.hero_banners
+        WHERE id = ?
+        RETURNING image_url
+    `;
+
+    db.query(query, [id], async (err, results) => {
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        if (!results || results.length === 0) {
+            return res.status(404).json({
+                success: false,
+                message: 'Banner not found.'
+            });
+        }
+
+        if (results[0].image_url) {
+            await deleteSupabaseImage(results[0].image_url);
+        }
+
+        res.json({
+            success: true,
+            message: 'Banner deleted successfully!'
+        });
     });
 });
 
 app.post('/api/admin/edit-banner', (req, res) => {
-    const { id, title, subtitle, image_url, product_id, bg_color, text_color, button_text } = req.body;
-    const query = 'UPDATE hero_banners SET title = ?, subtitle = ?, image_url = ?, product_id = ?, bg_color = ?, text_color = ?, button_text = ? WHERE id = ?';
-    
-    db.query(query, [title, subtitle, image_url, product_id, bg_color, text_color, button_text, id], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Banner updated successfully!' });
+
+    const {
+        id,
+        title,
+        subtitle,
+        image_url,
+        product_id,
+        bg_color,
+        text_color,
+        button_text
+    } = req.body;
+
+    const oldBannerQuery = `
+        SELECT image_url
+        FROM public.hero_banners
+        WHERE id = ?
+        LIMIT 1
+    `;
+
+    db.query(oldBannerQuery, [id], (findErr, oldRows) => {
+
+        if (findErr) {
+            return res.status(500).json({
+                success: false,
+                error: findErr.message
+            });
+        }
+
+        const oldImageUrl =
+            oldRows && oldRows[0]
+                ? oldRows[0].image_url
+                : '';
+
+        const query = `
+            UPDATE public.hero_banners
+            SET title = ?,
+                subtitle = ?,
+                image_url = ?,
+                product_id = ?,
+                bg_color = ?,
+                text_color = ?,
+                button_text = ?
+            WHERE id = ?
+        `;
+
+        db.query(
+            query,
+            [
+                title,
+                subtitle,
+                image_url,
+                product_id,
+                bg_color,
+                text_color,
+                button_text,
+                id
+            ],
+            async (err) => {
+
+                if (err) {
+                    return res.status(500).json({
+                        success: false,
+                        error: err.message
+                    });
+                }
+
+                if (oldImageUrl && oldImageUrl !== image_url) {
+                    await deleteSupabaseImage(oldImageUrl);
+                }
+
+                res.json({
+                    success: true,
+                    message: 'Banner updated successfully!'
+                });
+            }
+        );
     });
 });
 
