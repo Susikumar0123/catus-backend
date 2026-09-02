@@ -39,10 +39,19 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
             });
         }
 
-        const SUPABASE_URL = String(process.env.SUPABASE_URL || '')
-            .replace(/\/rest\/v1\/?$/, '');
+        const SUPABASE_URL = String(
+    process.env.SUPABASE_URL ||
+    process.env.PROJECT_URL ||
+    ''
+).replace(/\/rest\/v1\/?$/, '');
 
-        const SUPABASE_SECRET_KEY = process.env.SUPABASE_SECRET_KEY;
+const SUPABASE_SECRET_KEY =
+    process.env.SUPABASE_SECRET_KEY ||
+    process.env.SUPABASE_SERVICE_ROLE_KEY ||
+    process.env.SUPABASE_SERVICE_KEY ||
+    '';
+
+        
 
         if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
             return res.status(500).json({
@@ -64,10 +73,12 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
             req.file.buffer,
             {
                 headers: {
-                    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
-                    apikey: SUPABASE_SECRET_KEY,
-                    'Content-Type': req.file.mimetype
-                },
+    apikey: SUPABASE_SECRET_KEY,
+    'Content-Type': req.file.mimetype,
+    ...(SUPABASE_SECRET_KEY.startsWith('eyJ')
+        ? { Authorization: `Bearer ${SUPABASE_SECRET_KEY}` }
+        : {})
+},
                 maxBodyLength: Infinity
             }
         );
