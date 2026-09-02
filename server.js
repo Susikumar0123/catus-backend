@@ -831,6 +831,158 @@ if (
 });
 
 // ==========================================
+// ADMIN LOGIN + AUTHENTICATION
+// ==========================================
+
+function safeCompare(valueA, valueB) {
+    const a = Buffer.from(String(valueA || ''));
+    const b = Buffer.from(String(valueB || ''));
+
+    if (a.length !== b.length) {
+        return false;
+    }
+
+    return crypto.timingSafeEqual(a, b);
+}
+
+function createAdminToken() {
+
+    const payload = Buffer.from(
+        JSON.stringify({
+            role: 'admin',
+            exp: Date.now() + (12 * 60 * 60 * 1000)
+        })
+    ).toString('base64url');
+
+    const signature = crypto
+        .createHmac(
+            'sha256',
+            process.env.ADMIN_TOKEN_SECRET
+        )
+        .update(payload)
+        .digest('base64url');
+
+    return `${payload}.${signature}`;
+}
+
+function verifyAdminToken(token) {
+
+    try {
+
+        const [payload, signature] =
+            String(token || '').split('.');
+
+        if (!payload || !signature) {
+            return false;
+        }
+
+        const expectedSignature = crypto
+            .createHmac(
+                'sha256',
+                process.env.ADMIN_TOKEN_SECRET
+            )
+            .update(payload)
+            .digest('base64url');
+
+        if (!safeCompare(signature, expectedSignature)) {
+            return false;
+        }
+
+        const decoded = JSON.parse(
+            Buffer.from(payload, 'base64url').toString('utf8')
+        );
+
+        return (
+            decoded.role === 'admin' &&
+            Number(decoded.exp) > Date.now()
+        );
+
+    } catch (error) {
+        return false;
+    }
+}
+
+app.post('/api/admin/login', (req, res) => {
+
+    const username =
+        String(req.body.username || '').trim();
+
+    const password =
+        String(req.body.password || '');
+
+    if (
+        !process.env.ADMIN_USERNAME ||
+        !process.env.ADMIN_PASSWORD ||
+        !process.env.ADMIN_TOKEN_SECRET
+    ) {
+        return res.status(500).json({
+            success: false,
+            message: 'Admin authentication is not configured.'
+        });
+    }
+
+    const validUsername =
+        safeCompare(
+            username,
+            process.env.ADMIN_USERNAME
+        );
+
+    const validPassword =
+        safeCompare(
+            password,
+            process.env.ADMIN_PASSWORD
+        );
+
+    if (!validUsername || !validPassword) {
+
+        return res.status(401).json({
+            success: false,
+            message: 'Invalid admin credentials.'
+        });
+    }
+
+    const token = createAdminToken();
+
+    return res.json({
+        success: true,
+        token
+    });
+});
+
+function requireAdminAuth(req, res, next) {
+
+    if (!process.env.ADMIN_TOKEN_SECRET) {
+        return res.status(500).json({
+            success: false,
+            message: 'Admin authentication is not configured.'
+        });
+    }
+
+    const authHeader =
+        String(req.headers.authorization || '');
+
+    const token =
+        authHeader.startsWith('Bearer ')
+            ? authHeader.slice(7)
+            : '';
+
+    if (!verifyAdminToken(token)) {
+
+        return res.status(401).json({
+            success: false,
+            message: 'Unauthorized admin access.'
+        });
+    }
+
+    next();
+}
+
+// Protect every /api/admin/* route below this line
+app.use('/api/admin', requireAdminAuth);
+
+
+
+// ==========================================
 // GET ALL CUSTOMERS FOR ADMIN MASTER
 // ==========================================
 app.get('/api/admin/customers', (req, res) => {
