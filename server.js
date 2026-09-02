@@ -73,11 +73,9 @@ const SUPABASE_SECRET_KEY =
             req.file.buffer,
             {
                 headers: {
+    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
     apikey: SUPABASE_SECRET_KEY,
-    'Content-Type': req.file.mimetype,
-    ...(SUPABASE_SECRET_KEY.startsWith('eyJ')
-        ? { Authorization: `Bearer ${SUPABASE_SECRET_KEY}` }
-        : {})
+    'Content-Type': req.file.mimetype
 },
                 maxBodyLength: Infinity
             }
