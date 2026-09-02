@@ -1027,6 +1027,22 @@ app.post('/api/admin/update-status', (req, res) => {
         String(status || '').trim().toLowerCase();
 
     let query = '';
+    const allowedStatuses = [
+    'pending',
+    'assigned',
+    'on the way',
+    'in service',
+    'completed',
+    're-service requested',
+    'trash'
+];
+
+if (!allowedStatuses.includes(cleanStatus)) {
+    return res.status(400).json({
+        success: false,
+        message: 'Invalid order status.'
+    });
+}
 
     if (cleanStatus === 'assigned') {
 
