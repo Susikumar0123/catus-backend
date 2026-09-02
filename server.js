@@ -1104,6 +1104,34 @@ function requireAdminAuth(req, res, next) {
 // Protect every /api/admin/* route below this line
 app.use('/api/admin', requireAdminAuth);
 
+// ==========================================
+// ADMIN - GET ALL TECHNICIANS
+// ==========================================
+app.get('/api/admin/technicians', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.technicians
+        ORDER BY created_at DESC, id DESC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Admin Technicians Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to load technicians.'
+            });
+        }
+
+        return res.json({
+            success: true,
+            technicians: results || []
+        });
+    });
+});
 
 
 // ==========================================
