@@ -265,9 +265,7 @@ if (mode === 'register') {
                                 });
                             }
 
-                            console.log(
-                                `[REG OTP RESEND] ${cleanPhone} => ${generatedOtp}`
-                            );
+                            
 
                             return res.json({
                                 success: true,
@@ -339,9 +337,7 @@ if (mode === 'register') {
                         });
                     }
 
-                    console.log(
-                        `[REG OTP] ${cleanPhone} => ${generatedOtp}`
-                    );
+                    
 
                     return res.json({
                         success: true,
@@ -400,9 +396,6 @@ if (mode === 'register') {
                     });
                 }
 
-                console.log(
-                    `[RESET OTP] ${cleanPhone} => ${generatedOtp}`
-                );
 
                 res.json({
                     success: true,
