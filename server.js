@@ -96,6 +96,134 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
 });
 
 // ==========================================
+// TECHNICIAN PARTNER REGISTRATION
+// ==========================================
+app.post('/api/technicians/register', (req, res) => {
+
+    const {
+        name,
+        phone,
+        alt_phone,
+        email,
+        experience_years,
+        work_type,
+        specialization,
+        district,
+        city,
+        pincode,
+        service_radius_km,
+        home_address,
+        shop_address,
+        notes
+    } = req.body;
+
+    const cleanName = String(name || '').trim();
+    const cleanPhone = String(phone || '').replace(/\D/g, '');
+    const cleanAltPhone = String(alt_phone || '').replace(/\D/g, '');
+    const cleanPincode = String(pincode || '').replace(/\D/g, '');
+    const cleanSpecialization = String(specialization || '').trim();
+
+    if (
+        !cleanName ||
+        !/^\d{10}$/.test(cleanPhone) ||
+        !cleanSpecialization ||
+        !String(work_type || '').trim() ||
+        !String(district || '').trim() ||
+        !String(city || '').trim() ||
+        !/^\d{6}$/.test(cleanPincode) ||
+        !String(home_address || '').trim()
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Please enter all required technician details correctly.'
+        });
+    }
+
+    if (cleanAltPhone && !/^\d{10}$/.test(cleanAltPhone)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Alternative mobile number must be 10 digits.'
+        });
+    }
+
+    const technicianId =
+        'TECH-' +
+        Date.now().toString().slice(-8) +
+        Math.floor(10 + Math.random() * 90);
+
+    const query = `
+        INSERT INTO public.technicians
+        (
+            technician_id,
+            name,
+            phone,
+            alt_phone,
+            email,
+            experience_years,
+            work_type,
+            specialization,
+            district,
+            city,
+            pincode,
+            service_radius_km,
+            home_address,
+            shop_address,
+            notes,
+            status
+        )
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        RETURNING technician_id, status
+    `;
+
+    db.query(
+        query,
+        [
+            technicianId,
+            cleanName,
+            cleanPhone,
+            cleanAltPhone || null,
+            String(email || '').trim() || null,
+            Math.max(0, Number(experience_years) || 0),
+            String(work_type || '').trim(),
+            cleanSpecialization,
+            String(district || '').trim(),
+            String(city || '').trim(),
+            cleanPincode,
+            Math.max(1, Number(service_radius_km) || 20),
+            String(home_address || '').trim(),
+            String(shop_address || '').trim() || null,
+            String(notes || '').trim() || null,
+            'Pending'
+        ],
+        (err, results) => {
+
+            if (err) {
+                console.error('Technician Registration Error:', err);
+
+                if (err.code === '23505') {
+                    return res.status(400).json({
+                        success: false,
+                        message: 'This mobile number is already registered as a technician.'
+                    });
+                }
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Technician registration failed.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Technician registration submitted successfully!',
+                technician_id: results[0].technician_id,
+                status: results[0].status
+            });
+        }
+    );
+});
+
+// ==========================================
 // 1. REGISTER API ROUTE (Fixed)
 // ==========================================
 app.post('/api/register', (req, res) => {
