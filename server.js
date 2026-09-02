@@ -1133,6 +1133,78 @@ app.get('/api/admin/technicians', (req, res) => {
     });
 });
 
+// ==========================================
+// ADMIN - UPDATE TECHNICIAN STATUS
+// ==========================================
+app.post('/api/admin/update-technician-status', (req, res) => {
+
+    const {
+        technician_id,
+        status
+    } = req.body;
+
+    const cleanTechnicianId =
+        String(technician_id || '').trim();
+
+    const cleanStatus =
+        String(status || '').trim();
+
+    const allowedStatuses = [
+        'Pending',
+        'Active',
+        'Inactive'
+    ];
+
+    if (
+        !cleanTechnicianId ||
+        !allowedStatuses.includes(cleanStatus)
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid technician status request.'
+        });
+    }
+
+    const query = `
+        UPDATE public.technicians
+        SET status = ?,
+            updated_at = NOW()
+        WHERE technician_id = ?
+        RETURNING technician_id, name, status
+    `;
+
+    db.query(
+        query,
+        [cleanStatus, cleanTechnicianId],
+        (err, results) => {
+
+            if (err) {
+                console.error(
+                    'Technician Status Update Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to update technician status.'
+                });
+            }
+
+            if (!results || results.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Technician not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Technician status updated successfully.',
+                technician: results[0]
+            });
+        }
+    );
+});
 
 // ==========================================
 // GET ALL CUSTOMERS FOR ADMIN MASTER
