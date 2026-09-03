@@ -2159,11 +2159,9 @@ app.get('/api/services', (req, res) => {
 
 app.get('/api/home-services', (req, res) => {
     const query = `
-        SELECT * FROM (
-            SELECT *, 
-            ROW_NUMBER() OVER(PARTITION BY category ORDER BY id DESC) as rn 
-            FROM services
-        ) t WHERE t.rn <= 4
+        SELECT *
+        FROM services
+        ORDER BY category ASC, id DESC
     `;
     
     db.query(query, (err, results) => {
