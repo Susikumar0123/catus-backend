@@ -2457,6 +2457,182 @@ app.post('/api/admin/edit-banner', (req, res) => {
 });
 
 // ==========================================
+// HOMEPAGE PROMO BANNERS
+// ==========================================
+
+// Public - Index page
+app.get('/api/promo-banners', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.promo_banners
+        WHERE is_active = TRUE
+        ORDER BY slot_no ASC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Promo Banners Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            banners: results || []
+        });
+    });
+});
+
+
+// Admin - Get both promo slots
+app.get('/api/admin/promo-banners', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.promo_banners
+        ORDER BY slot_no ASC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Admin Promo Fetch Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        res.json({
+            success: true,
+            banners: results || []
+        });
+    });
+});
+
+
+// Admin - Save / Update promo banner
+app.post('/api/admin/update-promo-banner', (req, res) => {
+
+    const {
+        slot_no,
+        image_url,
+        title,
+        tag,
+        button_text,
+        service_id,
+        is_active
+    } = req.body;
+
+    const slot = Number(slot_no);
+
+    if (slot !== 1 && slot !== 2) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid promo banner slot.'
+        });
+    }
+
+    const oldQuery = `
+        SELECT image_url
+        FROM public.promo_banners
+        WHERE slot_no = ?
+        LIMIT 1
+    `;
+
+    db.query(oldQuery, [slot], (findErr, oldRows) => {
+
+        if (findErr) {
+            return res.status(500).json({
+                success: false,
+                error: findErr.message
+            });
+        }
+
+        const oldImageUrl =
+            oldRows && oldRows[0]
+                ? oldRows[0].image_url
+                : '';
+
+        const query = `
+            INSERT INTO public.promo_banners
+            (
+                slot_no,
+                image_url,
+                title,
+                tag,
+                button_text,
+                service_id,
+                is_active,
+                updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, NOW())
+
+            ON CONFLICT (slot_no)
+            DO UPDATE SET
+                image_url = EXCLUDED.image_url,
+                title = EXCLUDED.title,
+                tag = EXCLUDED.tag,
+                button_text = EXCLUDED.button_text,
+                service_id = EXCLUDED.service_id,
+                is_active = EXCLUDED.is_active,
+                updated_at = NOW()
+
+            RETURNING *
+        `;
+
+        db.query(
+            query,
+            [
+                slot,
+                String(image_url || '').trim(),
+                String(title || '').trim(),
+                String(tag || '').trim(),
+                String(button_text || 'Book now').trim(),
+                String(service_id || '').trim(),
+                is_active === false ? false : true
+            ],
+            async (err, results) => {
+
+                if (err) {
+                    console.error(
+                        'Promo Banner Update Error:',
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        error: err.message
+                    });
+                }
+
+                const newImageUrl =
+                    String(image_url || '').trim();
+
+                if (
+                    oldImageUrl &&
+                    oldImageUrl !== newImageUrl
+                ) {
+                    await deleteSupabaseImage(oldImageUrl);
+                }
+
+                res.json({
+                    success: true,
+                    message: 'Promo banner updated successfully!',
+                    banner: results?.[0] || null
+                });
+            }
+        );
+    });
+});
+
+// ==========================================
 // REVIEWS API ROUTES
 // ==========================================
 app.get('/api/reviews/:service_id', (req, res) => {
