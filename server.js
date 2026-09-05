@@ -4490,6 +4490,34 @@ app.get('/api/test-service-ids', (req, res) => {
     });
 });
 
+// ==========================================
+// TEMPORARY LOCATION SERVICE SAMPLE CHECK
+// ==========================================
+app.get('/api/test-location-service-samples', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.location_services
+        ORDER BY location_id, service_id
+        LIMIT 30
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            rows: results || []
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
