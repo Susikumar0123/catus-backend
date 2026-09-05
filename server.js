@@ -1794,7 +1794,10 @@ if (
                 status,
                 booked_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())
+            VALUES (
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
         `;
 
         const values = [
@@ -2155,7 +2158,10 @@ if (!allowedStatuses.includes(cleanStatus)) {
         query = `
             UPDATE orders
             SET status = ?,
-                assigned_at = COALESCE(assigned_at, NOW())
+                assigned_at = COALESCE(
+    assigned_at,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
             WHERE order_id = ?
             RETURNING *
         `;
@@ -2165,7 +2171,10 @@ if (!allowedStatuses.includes(cleanStatus)) {
         query = `
             UPDATE orders
             SET status = ?,
-                on_the_way_at = COALESCE(on_the_way_at, NOW())
+                on_the_way_at = COALESCE(
+    on_the_way_at,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
             WHERE order_id = ?
             RETURNING *
         `;
@@ -2179,7 +2188,10 @@ if (!allowedStatuses.includes(cleanStatus)) {
         query = `
             UPDATE orders
             SET status = ?,
-                service_started_at = COALESCE(service_started_at, NOW())
+                service_started_at = COALESCE(
+    service_started_at,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
             WHERE order_id = ?
             RETURNING *
         `;
@@ -2189,7 +2201,10 @@ if (!allowedStatuses.includes(cleanStatus)) {
         query = `
             UPDATE orders
             SET status = ?,
-                completed_at = COALESCE(completed_at, NOW())
+                completed_at = COALESCE(
+    completed_at,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
             WHERE order_id = ?
             RETURNING *
         `;
@@ -3136,7 +3151,10 @@ app.post('/api/admin/assign-technician-manual', (req, res) => {
         technician_phone = ?,
         eta = ?,
         status = ?,
-        assigned_at = COALESCE(assigned_at, NOW())
+        assigned_at = COALESCE(
+    assigned_at,
+    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+)
     WHERE order_id = ?
 `;
     db.query(query, [technician_name, technician_phone, eta, 'Assigned', order_id], (err, result) => {
