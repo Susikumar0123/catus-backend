@@ -4555,6 +4555,34 @@ app.get('/api/test-custom-service-identifiers', (req, res) => {
     });
 });
 
+// ==========================================
+// TEMPORARY LOCATION STRUCTURE CHECK
+// ==========================================
+app.get('/api/test-location-structure', (req, res) => {
+
+    const query = `
+        SELECT *
+        FROM public.locations
+        ORDER BY id
+        LIMIT 10
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            rows: results || []
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
