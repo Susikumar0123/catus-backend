@@ -3701,23 +3701,28 @@ app.post('/api/reviews', (req, res) => {
 // SEO - DYNAMIC SITEMAP
 // ==========================================
 
+// ==========================================
+// SEO - DYNAMIC SITEMAP
+// ==========================================
 app.get('/api/sitemap.xml', (req, res) => {
 
     const query = `
         SELECT
-            l.slug AS location_slug,
-            l.district,
-            l.state,
-            s.service_id,
-            s.slug AS service_slug
-        FROM public.locations l
-        INNER JOIN public.location_services ls
-            ON ls.location_id = l.id
-        INNER JOIN public.services s
-            ON s.service_id = ls.service_id
-        WHERE l.is_active = TRUE
-          AND ls.is_available = TRUE
-        ORDER BY l.state, l.district, l.slug, s.service_id
+            id,
+            name,
+            slug,
+            district,
+            state
+        FROM public.locations
+        WHERE is_active = TRUE
+          AND slug IS NOT NULL
+          AND TRIM(slug) <> ''
+          AND district IS NOT NULL
+          AND TRIM(district) <> ''
+          AND state IS NOT NULL
+          AND TRIM(state) <> ''
+        ORDER BY id
+        LIMIT 5000
     `;
 
     db.query(query, [], (err, results) => {
@@ -3725,13 +3730,21 @@ app.get('/api/sitemap.xml', (req, res) => {
         if (err) {
             console.error('Sitemap generation error:', err);
 
-            return res.status(500)
+            return res
+                .status(500)
                 .type('text/plain')
-                .send('Sitemap generation failed');
+                .send('Unable to generate sitemap');
         }
 
-        const frontendBase =
-    'https://www.cerood.com';
+        const frontendBase = 'https://www.cerood.com';
+
+        const serviceIds = [
+            '1',   // AC
+            '12',  // Washing Machine
+            '20',  // Refrigerator
+            '28',  // TV
+            '39'   // RO
+        ];
 
         const slugify = (value) =>
             String(value || '')
@@ -3752,42 +3765,36 @@ app.get('/api/sitemap.xml', (req, res) => {
             `${frontendBase}/`
         ];
 
-        (results || []).forEach(row => {
+        (results || []).forEach(location => {
 
-            const stateSlug =
-                slugify(row.state);
-
-            const districtSlug =
-                slugify(row.district);
-
-            const locationSlug =
-                slugify(row.location_slug);
-
-            const serviceSlug =
-                slugify(row.service_slug);
+            const stateSlug = slugify(location.state);
+            const districtSlug = slugify(location.district);
+            const locationSlug = slugify(location.slug);
 
             if (
-                stateSlug &&
-                districtSlug &&
-                locationSlug &&
-                serviceSlug
+                !stateSlug ||
+                !districtSlug ||
+                !locationSlug
             ) {
-                urls.push(
-                    `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceSlug}`
-                );
+                return;
             }
+
+            serviceIds.forEach(serviceId => {
+                urls.push(
+                    `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceId}`
+                );
+            });
         });
 
-        const uniqueUrls =
-            [...new Set(urls)];
-
         const xml =
-`<?xml version="1.0" encoding="UTF-8"?>
-<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">
-${uniqueUrls.map(url => `  <url>
-    <loc>${escapeXml(url)}</loc>
-  </url>`).join('\n')}
-</urlset>`;
+            `<?xml version="1.0" encoding="UTF-8"?>\n` +
+            `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+            urls.map(url =>
+                `  <url>\n` +
+                `    <loc>${escapeXml(url)}</loc>\n` +
+                `  </url>`
+            ).join('\n') +
+            `\n</urlset>`;
 
         res
             .status(200)
