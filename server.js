@@ -440,10 +440,7 @@ app.post(
                 'MSG91 verified registration data:',
                 verificationData
             );
-            console.log(
-    'MSG91 FULL VERIFIED REGISTRATION DATA:',
-    JSON.stringify(verificationData, null, 2)
-);
+            
 
 
             const verifiedPhone =
@@ -740,10 +737,7 @@ app.post(
                 'MSG91 verified reset data:',
                 verificationData
             );
-            console.log(
-    'MSG91 FULL VERIFIED RESET DATA:',
-    JSON.stringify(verificationData, null, 2)
-);
+            
 
 
             const verifiedPhone =
