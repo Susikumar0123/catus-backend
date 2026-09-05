@@ -138,11 +138,7 @@ async function verifyMsg91AccessToken(accessToken) {
 // EXTRACT VERIFIED MOBILE NUMBER
 // ==========================================
 
-function extractVerifiedPhoneFromMsg91(data) {
-
-    if (!data) {
-        return '';
-    }
+function extractVerifiedPhoneFromMsg91(data, accessToken) {
 
     function normalizePhone(value) {
 
@@ -157,12 +153,10 @@ function extractVerifiedPhoneFromMsg91(data) {
             String(value)
                 .replace(/\D/g, '');
 
-        // Indian number without country code
         if (/^[6-9]\d{9}$/.test(digits)) {
             return digits;
         }
 
-        // Indian number with 91 country code
         if (/^91[6-9]\d{9}$/.test(digits)) {
             return digits.slice(-10);
         }
@@ -194,7 +188,8 @@ function extractVerifiedPhoneFromMsg91(data) {
                 'phone',
                 'phonenumber',
                 'identifier',
-                'msisdn'
+                'msisdn',
+                'useridentifier'
             ];
 
             if (phoneKeys.includes(normalizedKey)) {
@@ -207,20 +202,19 @@ function extractVerifiedPhoneFromMsg91(data) {
                 }
             }
 
-
             if (
                 value &&
                 typeof value === 'object'
             ) {
 
-                const nestedPhone =
+                const found =
                     deepSearch(
                         value,
                         depth + 1
                     );
 
-                if (nestedPhone) {
-                    return nestedPhone;
+                if (found) {
+                    return found;
                 }
             }
         }
@@ -229,9 +223,66 @@ function extractVerifiedPhoneFromMsg91(data) {
     }
 
 
-    return deepSearch(data);
-}
+    // 1. First try MSG91 verified response
+    const phoneFromResponse =
+        deepSearch(data);
 
+    if (phoneFromResponse) {
+        return phoneFromResponse;
+    }
+
+
+    // 2. MSG91 already verified this token.
+    // Decode verified JWT payload and search identifier/mobile.
+    try {
+
+        const cleanToken =
+            String(accessToken || '').trim();
+
+        const parts =
+            cleanToken.split('.');
+
+        if (parts.length !== 3) {
+            return '';
+        }
+
+        let payloadPart =
+            parts[1]
+                .replace(/-/g, '+')
+                .replace(/_/g, '/');
+
+        while (payloadPart.length % 4) {
+            payloadPart += '=';
+        }
+
+        const payloadText =
+            Buffer
+                .from(
+                    payloadPart,
+                    'base64'
+                )
+                .toString('utf8');
+
+        const payload =
+            JSON.parse(payloadText);
+
+        console.log(
+            'MSG91 verified JWT payload:',
+            payload
+        );
+
+        return deepSearch(payload);
+
+    } catch (error) {
+
+        console.error(
+            'MSG91 JWT payload decode error:',
+            error.message
+        );
+
+        return '';
+    }
+}
 
 // ==========================================
 // MSG91 COMPLETE REGISTRATION
@@ -350,9 +401,10 @@ app.post(
 
 
             const verifiedPhone =
-                extractVerifiedPhoneFromMsg91(
-                    verificationData
-                );
+    extractVerifiedPhoneFromMsg91(
+        verificationData,
+        accessToken
+    );
 
 
             // ==========================================
@@ -649,9 +701,10 @@ app.post(
 
 
             const verifiedPhone =
-                extractVerifiedPhoneFromMsg91(
-                    verificationData
-                );
+    extractVerifiedPhoneFromMsg91(
+        verificationData,
+        accessToken
+    );
 
 
             // ==========================================
