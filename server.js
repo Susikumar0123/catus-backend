@@ -3697,16 +3697,13 @@ app.post('/api/reviews', (req, res) => {
     );
 });
 
-// ==========================================
-// SEO - DYNAMIC SITEMAP
-// ==========================================
 
 // ==========================================
 // SEO - DYNAMIC SITEMAP
 // ==========================================
 app.get('/api/sitemap.xml', (req, res) => {
 
-    const query = `
+    const locationsQuery = `
         SELECT
             id,
             name,
@@ -3725,10 +3722,21 @@ app.get('/api/sitemap.xml', (req, res) => {
         LIMIT 5000
     `;
 
-    db.query(query, [], (err, results) => {
+    const servicesQuery = `
+        SELECT service_id
+        FROM public.services
+        WHERE service_id IS NOT NULL
+        ORDER BY service_id
+        LIMIT 9
+    `;
 
-        if (err) {
-            console.error('Sitemap generation error:', err);
+    db.query(locationsQuery, [], (locationErr, locations) => {
+
+        if (locationErr) {
+            console.error(
+                'Sitemap locations error:',
+                locationErr
+            );
 
             return res
                 .status(500)
@@ -3736,70 +3744,97 @@ app.get('/api/sitemap.xml', (req, res) => {
                 .send('Unable to generate sitemap');
         }
 
-        const frontendBase = 'https://www.cerood.com';
+        db.query(servicesQuery, [], (serviceErr, services) => {
 
-        const serviceIds = [
-            '1',   // AC
-            '12',  // Washing Machine
-            '20',  // Refrigerator
-            '28',  // TV
-            '39'   // RO
-        ];
+            if (serviceErr) {
+                console.error(
+                    'Sitemap services error:',
+                    serviceErr
+                );
 
-        const slugify = (value) =>
-            String(value || '')
-                .trim()
-                .toLowerCase()
-                .replace(/[^a-z0-9]+/g, '-')
-                .replace(/^-+|-+$/g, '');
-
-        const escapeXml = (value) =>
-            String(value || '')
-                .replace(/&/g, '&amp;')
-                .replace(/</g, '&lt;')
-                .replace(/>/g, '&gt;')
-                .replace(/"/g, '&quot;')
-                .replace(/'/g, '&apos;');
-
-        const urls = [
-            `${frontendBase}/`
-        ];
-
-        (results || []).forEach(location => {
-
-            const stateSlug = slugify(location.state);
-            const districtSlug = slugify(location.district);
-            const locationSlug = slugify(location.slug);
-
-            if (
-                !stateSlug ||
-                !districtSlug ||
-                !locationSlug
-            ) {
-                return;
+                return res
+                    .status(500)
+                    .type('text/plain')
+                    .send('Unable to generate sitemap');
             }
 
-            serviceIds.forEach(serviceId => {
-                urls.push(
-                    `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceId}`
-                );
+            const frontendBase =
+                'https://www.cerood.com';
+
+            const serviceIds =
+                (services || [])
+                    .map(service =>
+                        String(
+                            service.service_id || ''
+                        ).trim()
+                    )
+                    .filter(Boolean);
+
+            const slugify = (value) =>
+                String(value || '')
+                    .trim()
+                    .toLowerCase()
+                    .replace(/[^a-z0-9]+/g, '-')
+                    .replace(/^-+|-+$/g, '');
+
+            const escapeXml = (value) =>
+                String(value || '')
+                    .replace(/&/g, '&amp;')
+                    .replace(/</g, '&lt;')
+                    .replace(/>/g, '&gt;')
+                    .replace(/"/g, '&quot;')
+                    .replace(/'/g, '&apos;');
+
+            const urls = [
+                `${frontendBase}/`
+            ];
+
+            (locations || []).forEach(location => {
+
+                const stateSlug =
+                    slugify(location.state);
+
+                const districtSlug =
+                    slugify(location.district);
+
+                const locationSlug =
+                    slugify(location.slug);
+
+                if (
+                    !stateSlug ||
+                    !districtSlug ||
+                    !locationSlug
+                ) {
+                    return;
+                }
+
+                serviceIds.forEach(serviceId => {
+
+                    urls.push(
+                        `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceId}`
+                    );
+
+                });
             });
+
+            const xml =
+                `<?xml version="1.0" encoding="UTF-8"?>\n` +
+                `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+                urls.map(url =>
+                    `  <url>\n` +
+                    `    <loc>${escapeXml(url)}</loc>\n` +
+                    `  </url>`
+                ).join('\n') +
+                `\n</urlset>`;
+
+            return res
+                .status(200)
+                .set(
+                    'Content-Type',
+                    'application/xml; charset=utf-8'
+                )
+                .send(xml);
         });
-
-        const xml =
-            `<?xml version="1.0" encoding="UTF-8"?>\n` +
-            `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-            urls.map(url =>
-                `  <url>\n` +
-                `    <loc>${escapeXml(url)}</loc>\n` +
-                `  </url>`
-            ).join('\n') +
-            `\n</urlset>`;
-
-        res
-            .status(200)
-            .set('Content-Type', 'application/xml; charset=utf-8')
-            .send(xml);
     });
 });
 
