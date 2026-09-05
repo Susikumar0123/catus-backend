@@ -4518,6 +4518,43 @@ app.get('/api/test-location-service-samples', (req, res) => {
     });
 });
 
+// ==========================================
+// TEMPORARY CUSTOM SERVICE ID IDENTIFIER
+// ==========================================
+app.get('/api/test-custom-service-identifiers', (req, res) => {
+
+    const query = `
+        SELECT
+            service_id,
+            MIN(price) AS min_price,
+            MAX(price) AS max_price,
+            COUNT(*) AS total_locations,
+            COUNT(seo_title) AS seo_title_count,
+            COUNT(seo_description) AS seo_description_count,
+            COUNT(content) AS content_count,
+            MIN(seo_title) AS sample_seo_title,
+            MIN(seo_description) AS sample_seo_description
+        FROM public.location_services
+        GROUP BY service_id
+        ORDER BY service_id
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            services: results || []
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
