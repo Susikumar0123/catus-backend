@@ -4420,6 +4420,46 @@ app.get('/api/test-sitemap-data', (req, res) => {
     });
 });
 
+// ==========================================
+// TEMPORARY SITEMAP SERVICE MATCH CHECK
+// ==========================================
+app.get('/api/test-sitemap-service-match', (req, res) => {
+
+    const query = `
+        SELECT
+            ls.service_id,
+            COUNT(*) AS mapping_count,
+            s.service_name,
+            s.slug
+        FROM public.location_services ls
+        LEFT JOIN public.services s
+            ON s.service_id = ls.service_id
+        WHERE ls.is_available = TRUE
+        GROUP BY
+            ls.service_id,
+            s.service_name,
+            s.slug
+        ORDER BY mapping_count DESC
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Sitemap service match test error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            services: results
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
