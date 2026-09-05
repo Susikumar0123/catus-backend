@@ -19,6 +19,705 @@ app.get('/health', (req, res) => {
 });
 
 // ==========================================
+// MSG91 VERIFY ACCESS TOKEN
+// ==========================================
+app.post('/api/msg91/verify-access-token', async (req, res) => {
+
+    try {
+
+        const accessToken = String(
+            req.body.accessToken ||
+            req.body['access-token'] ||
+            ''
+        ).trim();
+
+        const authKey = String(
+            process.env.MSG91_AUTH_KEY || ''
+        ).trim();
+
+        if (!authKey) {
+            return res.status(500).json({
+                success: false,
+                message: 'MSG91 authentication is not configured.'
+            });
+        }
+
+        if (!accessToken) {
+            return res.status(400).json({
+                success: false,
+                message: 'MSG91 access token is required.'
+            });
+        }
+
+        const msg91Response = await axios.post(
+            'https://control.msg91.com/api/v5/widget/verifyAccessToken',
+            {
+                authkey: authKey,
+                'access-token': accessToken
+            },
+            {
+                headers: {
+                    'Content-Type': 'application/json'
+                },
+                timeout: 10000
+            }
+        );
+
+        return res.json({
+            success: true,
+            verified: true,
+            data: msg91Response.data
+        });
+
+    } catch (error) {
+
+        console.error(
+            'MSG91 Access Token Verification Error:',
+            error.response?.data || error.message
+        );
+
+        const status =
+            error.response?.status >= 400 &&
+            error.response?.status < 500
+                ? 401
+                : 502;
+
+        return res.status(status).json({
+            success: false,
+            verified: false,
+            message: 'MSG91 OTP verification failed.',
+            error: error.response?.data || error.message
+        });
+    }
+});
+// ==========================================
+// MSG91 SECURE OTP HELPERS
+// ==========================================
+
+async function verifyMsg91AccessToken(accessToken) {
+
+    const cleanAccessToken =
+        String(accessToken || '').trim();
+
+    const authKey =
+        String(
+            process.env.MSG91_AUTH_KEY || ''
+        ).trim();
+
+    if (!authKey) {
+        throw new Error(
+            'MSG91 authentication is not configured.'
+        );
+    }
+
+    if (!cleanAccessToken) {
+        throw new Error(
+            'MSG91 access token is required.'
+        );
+    }
+
+    const response = await axios.post(
+        'https://control.msg91.com/api/v5/widget/verifyAccessToken',
+        {
+            authkey: authKey,
+            'access-token': cleanAccessToken
+        },
+        {
+            headers: {
+                'Content-Type': 'application/json'
+            },
+            timeout: 10000
+        }
+    );
+
+    return response.data;
+}
+
+
+// ==========================================
+// EXTRACT VERIFIED MOBILE NUMBER
+// ==========================================
+
+function extractVerifiedPhoneFromMsg91(data) {
+
+    if (!data) {
+        return '';
+    }
+
+    const possibleValues = [
+        data.mobile,
+        data.phone,
+        data.identifier,
+        data.mobile_number,
+        data.phone_number,
+
+        data.data?.mobile,
+        data.data?.phone,
+        data.data?.identifier,
+        data.data?.mobile_number,
+        data.data?.phone_number,
+
+        data.user?.mobile,
+        data.user?.phone,
+        data.user?.identifier
+    ];
+
+    for (const value of possibleValues) {
+
+        if (!value) {
+            continue;
+        }
+
+        const digits =
+            String(value)
+                .replace(/\D/g, '');
+
+        if (/^\d{10}$/.test(digits)) {
+            return digits;
+        }
+
+        if (/^91\d{10}$/.test(digits)) {
+            return digits.slice(-10);
+        }
+    }
+
+    return '';
+}
+
+
+// ==========================================
+// MSG91 COMPLETE REGISTRATION
+// ==========================================
+
+app.post(
+    '/api/msg91/complete-registration',
+    async (req, res) => {
+
+        try {
+
+            const accessToken =
+                String(
+                    req.body.accessToken || ''
+                ).trim();
+
+            const phone =
+                String(
+                    req.body.phone || ''
+                )
+                    .replace(/\D/g, '')
+                    .slice(-10);
+
+            const name =
+                String(
+                    req.body.name || ''
+                ).trim();
+
+            const email =
+                String(
+                    req.body.email || ''
+                ).trim();
+
+            const pincode =
+                String(
+                    req.body.pincode || ''
+                )
+                    .replace(/\D/g, '');
+
+            const password =
+                String(
+                    req.body.password || ''
+                );
+
+
+            // ==========================================
+            // BASIC VALIDATION
+            // ==========================================
+
+            if (!accessToken) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'OTP verification token is missing.'
+                });
+            }
+
+            if (!/^\d{10}$/.test(phone)) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Invalid mobile number.'
+                });
+            }
+
+            if (!name) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Name is required.'
+                });
+            }
+
+            if (!/^\d{6}$/.test(pincode)) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Invalid pincode.'
+                });
+            }
+
+            if (
+                !password ||
+                password.length < 4
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Password must be at least 4 characters.'
+                });
+            }
+
+
+            // ==========================================
+            // VERIFY MSG91 TOKEN
+            // ==========================================
+
+            const verificationData =
+                await verifyMsg91AccessToken(
+                    accessToken
+                );
+
+            console.log(
+                'MSG91 verified registration data:',
+                verificationData
+            );
+
+
+            const verifiedPhone =
+                extractVerifiedPhoneFromMsg91(
+                    verificationData
+                );
+
+
+            // ==========================================
+            // PHONE MATCH SECURITY CHECK
+            // ==========================================
+
+            if (!verifiedPhone) {
+
+                return res.status(401).json({
+                    success: false,
+                    message:
+                        'Unable to confirm verified mobile number from MSG91.'
+                });
+            }
+
+            if (verifiedPhone !== phone) {
+
+                return res.status(401).json({
+                    success: false,
+                    message:
+                        'OTP verification does not match this mobile number.'
+                });
+            }
+
+
+            // ==========================================
+            // CHECK EXISTING USER
+            // ==========================================
+
+            const checkQuery = `
+                SELECT id
+                FROM public.users
+                WHERE phone = ?
+                LIMIT 1
+            `;
+
+            db.query(
+                checkQuery,
+                [phone],
+                async (checkErr, rows) => {
+
+                    if (checkErr) {
+
+                        console.error(
+                            'Registration check error:',
+                            checkErr
+                        );
+
+                        return res
+                            .status(500)
+                            .json({
+                                success: false,
+                                message:
+                                    'Unable to check user.'
+                            });
+                    }
+
+
+                    if (
+                        rows &&
+                        rows.length > 0
+                    ) {
+
+                        return res
+                            .status(400)
+                            .json({
+                                success: false,
+                                message:
+                                    'Mobile number already registered. Please login.'
+                            });
+                    }
+
+
+                    // ==========================================
+                    // HASH PASSWORD
+                    // ==========================================
+
+                    const hashedPassword =
+                        await bcrypt.hash(
+                            password,
+                            12
+                        );
+
+
+                    const randomCustId =
+                        Math.floor(
+                            10000 +
+                            Math.random() *
+                            90000
+                        );
+
+
+                    // ==========================================
+                    // CREATE USER
+                    // ==========================================
+
+                    const insertQuery = `
+                        INSERT INTO public.users
+                        (
+                            id,
+                            name,
+                            email,
+                            phone,
+                            pincode,
+                            address,
+                            password,
+                            otp_code,
+                            otp_expires_at
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?, ?, NULL, NULL)
+                        RETURNING *
+                    `;
+
+
+                    db.query(
+                        insertQuery,
+                        [
+                            randomCustId,
+                            name,
+                            email,
+                            phone,
+                            pincode,
+                            'No address saved',
+                            hashedPassword
+                        ],
+                        (
+                            insertErr,
+                            insertedRows
+                        ) => {
+
+                            if (insertErr) {
+
+                                console.error(
+                                    'MSG91 registration insert error:',
+                                    insertErr
+                                );
+
+                                if (
+                                    insertErr.code ===
+                                    '23505'
+                                ) {
+
+                                    return res
+                                        .status(400)
+                                        .json({
+                                            success: false,
+                                            message:
+                                                'Mobile number already registered.'
+                                        });
+                                }
+
+                                return res
+                                    .status(500)
+                                    .json({
+                                        success: false,
+                                        message:
+                                            'Account creation failed.'
+                                    });
+                            }
+
+
+                            const createdUser =
+                                insertedRows &&
+                                insertedRows[0]
+                                    ? insertedRows[0]
+                                    : {
+                                        id:
+                                            randomCustId,
+                                        name:
+                                            name,
+                                        email:
+                                            email,
+                                        phone:
+                                            phone,
+                                        pincode:
+                                            pincode,
+                                        address:
+                                            'No address saved'
+                                    };
+
+
+                            return res.json({
+                                success: true,
+                                message:
+                                    'Account created successfully!',
+                                user:
+                                    createdUser
+                            });
+                        }
+                    );
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                'MSG91 complete registration error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res
+                .status(401)
+                .json({
+                    success: false,
+                    message:
+                        'OTP verification failed. Please verify OTP again.'
+                });
+        }
+    }
+);
+
+
+// ==========================================
+// MSG91 RESET PASSWORD
+// ==========================================
+
+app.post(
+    '/api/msg91/reset-password',
+    async (req, res) => {
+
+        try {
+
+            const accessToken =
+                String(
+                    req.body.accessToken || ''
+                ).trim();
+
+            const phone =
+                String(
+                    req.body.phone || ''
+                )
+                    .replace(/\D/g, '')
+                    .slice(-10);
+
+            const password =
+                String(
+                    req.body.password || ''
+                );
+
+
+            // ==========================================
+            // BASIC VALIDATION
+            // ==========================================
+
+            if (!accessToken) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'OTP verification token is missing.'
+                });
+            }
+
+            if (!/^\d{10}$/.test(phone)) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Invalid mobile number.'
+                });
+            }
+
+            if (
+                !password ||
+                password.length < 4
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Password must be at least 4 characters.'
+                });
+            }
+
+
+            // ==========================================
+            // VERIFY MSG91 TOKEN
+            // ==========================================
+
+            const verificationData =
+                await verifyMsg91AccessToken(
+                    accessToken
+                );
+
+            console.log(
+                'MSG91 verified reset data:',
+                verificationData
+            );
+
+
+            const verifiedPhone =
+                extractVerifiedPhoneFromMsg91(
+                    verificationData
+                );
+
+
+            // ==========================================
+            // PHONE MATCH SECURITY CHECK
+            // ==========================================
+
+            if (!verifiedPhone) {
+
+                return res.status(401).json({
+                    success: false,
+                    message:
+                        'Unable to confirm verified mobile number from MSG91.'
+                });
+            }
+
+            if (verifiedPhone !== phone) {
+
+                return res.status(401).json({
+                    success: false,
+                    message:
+                        'OTP verification does not match this mobile number.'
+                });
+            }
+
+
+            // ==========================================
+            // HASH NEW PASSWORD
+            // ==========================================
+
+            const hashedPassword =
+                await bcrypt.hash(
+                    password,
+                    12
+                );
+
+
+            // ==========================================
+            // UPDATE PASSWORD
+            // ==========================================
+
+            const updateQuery = `
+                UPDATE public.users
+                SET password = ?,
+                    otp_code = NULL,
+                    otp_expires_at = NULL
+                WHERE phone = ?
+                RETURNING *
+            `;
+
+
+            db.query(
+                updateQuery,
+                [
+                    hashedPassword,
+                    phone
+                ],
+                (
+                    updateErr,
+                    updatedRows
+                ) => {
+
+                    if (updateErr) {
+
+                        console.error(
+                            'MSG91 password update error:',
+                            updateErr
+                        );
+
+                        return res
+                            .status(500)
+                            .json({
+                                success: false,
+                                message:
+                                    'Unable to update password.'
+                            });
+                    }
+
+
+                    if (
+                        !updatedRows ||
+                        updatedRows.length === 0
+                    ) {
+
+                        return res
+                            .status(404)
+                            .json({
+                                success: false,
+                                message:
+                                    'Mobile number is not registered.'
+                            });
+                    }
+
+
+                    return res.json({
+                        success: true,
+                        message:
+                            'Password updated successfully!',
+                        user:
+                            updatedRows[0]
+                    });
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                'MSG91 reset password error:',
+                error.response?.data ||
+                error.message
+            );
+
+            return res
+                .status(401)
+                .json({
+                    success: false,
+                    message:
+                        'OTP verification failed. Please verify OTP again.'
+                });
+        }
+    }
+);
+// ==========================================
 // SUPABASE STORAGE - IMAGE UPLOAD
 // ==========================================
 
