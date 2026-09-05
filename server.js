@@ -12,7 +12,33 @@ require('dotenv').config();
 const app = express();
 const PORT = process.env.PORT || 10000;
 
-app.use(cors());
+const allowedOrigins = [
+    'https://cerood.com',
+    'https://www.cerood.com',
+    'https://catus-frontend-nu.vercel.app',
+    'http://localhost:3000',
+    'http://127.0.0.1:5500'
+];
+
+app.use(cors({
+    origin: function (origin, callback) {
+
+        // Postman / server-to-server / same-origin requests
+        if (!origin) {
+            return callback(null, true);
+        }
+
+        if (allowedOrigins.includes(origin)) {
+            return callback(null, true);
+        }
+
+        return callback(
+            new Error('Not allowed by CORS')
+        );
+    },
+    credentials: true
+}));
+
 app.use(express.json());
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
@@ -3630,7 +3656,7 @@ app.post('/api/reviews', (req, res) => {
                 [
                     cleanServiceId,
                     cleanOrderId,
-                    order.customer_name || 'CATUS Customer',
+                    order.customer_name || 'Cerood Customer',
                     ratingValue,
                     cleanReview
                 ],
@@ -3705,7 +3731,7 @@ app.get('/api/sitemap.xml', (req, res) => {
         }
 
         const frontendBase =
-            'https://catus-frontend-nu.vercel.app';
+    'https://www.cerood.com';
 
         const slugify = (value) =>
             String(value || '')
@@ -3772,7 +3798,7 @@ ${uniqueUrls.map(url => `  <url>
 
 // Root URL check
 app.get('/', (req, res) => {
-    res.send('Catus Backend Server is running successfully!');
+    res.send('Cerood Backend Server is running successfully!');
 });
 
 app.post('/api/admin/add-service', (req, res) => {
@@ -4066,7 +4092,7 @@ app.get('/api/match-location', (req, res) => {
         if (!results || results.length === 0) {
             return res.status(404).json({
                 success: false,
-                message: 'Location not found in Catus service database.'
+                message: 'Location not found in Cerood service database.'
             });
         }
 
@@ -4090,7 +4116,7 @@ app.get('/api/match-location', (req, res) => {
         return res.status(409).json({
             success: false,
             ambiguous: true,
-            message: 'Multiple Catus locations matched.',
+            message: 'Multiple Cerood locations matched.',
             locations: results
         });
     });
