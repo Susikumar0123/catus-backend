@@ -4371,6 +4371,55 @@ app.get('/api/test-location-direct', (req, res) => {
         });
     });
 });
+
+// ==========================================
+// TEMPORARY SEO SITEMAP DATA CHECK
+// ==========================================
+app.get('/api/test-sitemap-data', (req, res) => {
+
+    const query = `
+        SELECT
+            (SELECT COUNT(*) FROM public.locations) AS locations_count,
+            (SELECT COUNT(*) FROM public.locations WHERE is_active = TRUE) AS active_locations_count,
+
+            (SELECT COUNT(*) FROM public.services) AS services_count,
+            (SELECT COUNT(*) FROM public.services WHERE slug IS NOT NULL AND TRIM(slug) <> '') AS services_with_slug_count,
+
+            (SELECT COUNT(*) FROM public.location_services) AS location_services_count,
+            (SELECT COUNT(*) FROM public.location_services WHERE is_available = TRUE) AS available_location_services_count,
+
+            (
+                SELECT COUNT(*)
+                FROM public.locations l
+                INNER JOIN public.location_services ls
+                    ON ls.location_id = l.id
+                INNER JOIN public.services s
+                    ON s.service_id = ls.service_id
+                WHERE l.is_active = TRUE
+                  AND ls.is_available = TRUE
+                  AND s.slug IS NOT NULL
+                  AND TRIM(s.slug) <> ''
+            ) AS sitemap_ready_rows
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error('Sitemap data test error:', err);
+
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            counts: results[0]
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
