@@ -163,7 +163,27 @@ function extractVerifiedPhoneFromMsg91(data, accessToken) {
 
         return '';
     }
+    
+    // MSG91 Verify Access Token API
+// verified mobile number-ai message field-la return pannudhu
+if (
+    data &&
+    String(data.type || '').toLowerCase() === 'success'
+) {
 
+    const phoneFromMessage =
+        normalizePhone(data.message);
+
+    if (phoneFromMessage) {
+
+        console.log(
+            'MSG91 verified phone from message:',
+            phoneFromMessage
+        );
+
+        return phoneFromMessage;
+    }
+}
 
     function deepSearch(obj, depth = 0) {
 
