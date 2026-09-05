@@ -144,44 +144,92 @@ function extractVerifiedPhoneFromMsg91(data) {
         return '';
     }
 
-    const possibleValues = [
-        data.mobile,
-        data.phone,
-        data.identifier,
-        data.mobile_number,
-        data.phone_number,
+    function normalizePhone(value) {
 
-        data.data?.mobile,
-        data.data?.phone,
-        data.data?.identifier,
-        data.data?.mobile_number,
-        data.data?.phone_number,
-
-        data.user?.mobile,
-        data.user?.phone,
-        data.user?.identifier
-    ];
-
-    for (const value of possibleValues) {
-
-        if (!value) {
-            continue;
+        if (
+            value === undefined ||
+            value === null
+        ) {
+            return '';
         }
 
         const digits =
             String(value)
                 .replace(/\D/g, '');
 
-        if (/^\d{10}$/.test(digits)) {
+        // Indian number without country code
+        if (/^[6-9]\d{9}$/.test(digits)) {
             return digits;
         }
 
-        if (/^91\d{10}$/.test(digits)) {
+        // Indian number with 91 country code
+        if (/^91[6-9]\d{9}$/.test(digits)) {
             return digits.slice(-10);
         }
+
+        return '';
     }
 
-    return '';
+
+    function deepSearch(obj, depth = 0) {
+
+        if (
+            !obj ||
+            typeof obj !== 'object' ||
+            depth > 8
+        ) {
+            return '';
+        }
+
+        for (const [key, value] of Object.entries(obj)) {
+
+            const normalizedKey =
+                String(key)
+                    .replace(/[-_\s]/g, '')
+                    .toLowerCase();
+
+            const phoneKeys = [
+                'mobile',
+                'mobilenumber',
+                'phone',
+                'phonenumber',
+                'identifier',
+                'msisdn'
+            ];
+
+            if (phoneKeys.includes(normalizedKey)) {
+
+                const phone =
+                    normalizePhone(value);
+
+                if (phone) {
+                    return phone;
+                }
+            }
+
+
+            if (
+                value &&
+                typeof value === 'object'
+            ) {
+
+                const nestedPhone =
+                    deepSearch(
+                        value,
+                        depth + 1
+                    );
+
+                if (nestedPhone) {
+                    return nestedPhone;
+                }
+            }
+        }
+
+        return '';
+    }
+
+
+    return deepSearch(data);
 }
 
 
@@ -295,6 +343,10 @@ app.post(
                 'MSG91 verified registration data:',
                 verificationData
             );
+            console.log(
+    'MSG91 FULL VERIFIED REGISTRATION DATA:',
+    JSON.stringify(verificationData, null, 2)
+);
 
 
             const verifiedPhone =
@@ -590,6 +642,10 @@ app.post(
                 'MSG91 verified reset data:',
                 verificationData
             );
+            console.log(
+    'MSG91 FULL VERIFIED RESET DATA:',
+    JSON.stringify(verificationData, null, 2)
+);
 
 
             const verifiedPhone =
