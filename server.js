@@ -4460,6 +4460,36 @@ app.get('/api/test-sitemap-service-match', (req, res) => {
     });
 });
 
+// ==========================================
+// TEMPORARY SERVICES ID CHECK
+// ==========================================
+app.get('/api/test-service-ids', (req, res) => {
+
+    const query = `
+        SELECT
+            service_id,
+            service_name,
+            slug
+        FROM public.services
+        ORDER BY service_id
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            return res.status(500).json({
+                success: false,
+                error: err.message
+            });
+        }
+
+        return res.json({
+            success: true,
+            services: results || []
+        });
+    });
+});
+
 // Explicitly bind to '0.0.0.0' to prevent Render port scan timeout
 // ==========================================
 
