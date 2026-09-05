@@ -1796,7 +1796,7 @@ if (
             )
             VALUES (
     ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
         `;
 
@@ -2160,7 +2160,7 @@ if (!allowedStatuses.includes(cleanStatus)) {
             SET status = ?,
                 assigned_at = COALESCE(
     assigned_at,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
             WHERE order_id = ?
             RETURNING *
@@ -2173,7 +2173,7 @@ if (!allowedStatuses.includes(cleanStatus)) {
             SET status = ?,
                 on_the_way_at = COALESCE(
     on_the_way_at,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
             WHERE order_id = ?
             RETURNING *
@@ -2190,7 +2190,7 @@ if (!allowedStatuses.includes(cleanStatus)) {
             SET status = ?,
                 service_started_at = COALESCE(
     service_started_at,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
             WHERE order_id = ?
             RETURNING *
@@ -2203,7 +2203,7 @@ if (!allowedStatuses.includes(cleanStatus)) {
             SET status = ?,
                 completed_at = COALESCE(
     completed_at,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
             WHERE order_id = ?
             RETURNING *
@@ -3153,7 +3153,7 @@ app.post('/api/admin/assign-technician-manual', (req, res) => {
         status = ?,
         assigned_at = COALESCE(
     assigned_at,
-    (CURRENT_TIMESTAMP AT TIME ZONE 'Asia/Kolkata')
+    CURRENT_TIMESTAMP
 )
     WHERE order_id = ?
 `;
