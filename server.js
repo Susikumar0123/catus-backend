@@ -4133,6 +4133,10 @@ app.get('/api/match-location', (req, res) => {
 // LOCATION + SERVICE SEO LANDING PAGE API
 // ==========================================
 
+// ==========================================
+// LOCATION + SERVICE SEO LANDING PAGE API
+// ==========================================
+
 app.get('/api/location-page/:state/:district/:location/:service', (req, res) => {
 
     const stateSlug = String(req.params.state || '')
@@ -4147,14 +4151,19 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
         .trim()
         .toLowerCase();
 
-    const serviceSlug = String(req.params.service || '')
-        .trim()
-        .toLowerCase();
+    const serviceId = String(req.params.service || '')
+        .trim();
 
-    if (!stateSlug || !districtSlug || !locationSlug || !serviceSlug) {
+    if (
+        !stateSlug ||
+        !districtSlug ||
+        !locationSlug ||
+        !serviceId
+    ) {
         return res.status(400).json({
             success: false,
-            message: 'State, district, location and service are required.'
+            message:
+                'State, district, location and service are required.'
         });
     }
 
@@ -4180,19 +4189,15 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
             s.discount_text,
             s.product_note,
 
-            ls.price AS location_price,
-            ls.is_available,
-            ls.seo_title,
-            ls.seo_description,
-            ls.content
+            NULL AS location_price,
+            TRUE AS is_available,
+            NULL AS seo_title,
+            NULL AS seo_description,
+            NULL AS content
 
-        FROM locations l
+        FROM public.locations l
 
-        INNER JOIN location_services ls
-            ON ls.location_id = l.id
-
-        INNER JOIN services s
-            ON s.service_id = ls.service_id
+        CROSS JOIN public.services s
 
         WHERE
             LOWER(
@@ -4215,10 +4220,9 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
 
             AND LOWER(l.slug) = ?
 
-            AND LOWER(s.slug) = ?
+            AND CAST(s.service_id AS TEXT) = ?
 
             AND l.is_active = TRUE
-            AND ls.is_available = TRUE
 
         LIMIT 1
     `;
@@ -4229,7 +4233,7 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
             stateSlug,
             districtSlug,
             locationSlug,
-            serviceSlug
+            serviceId
         ],
         (err, results) => {
 
@@ -4250,7 +4254,7 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
                 return res.status(404).json({
                     success: false,
                     message:
-                        'This service is not available in this location.'
+                        'Location or service not found.'
                 });
             }
 
