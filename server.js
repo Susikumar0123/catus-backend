@@ -4350,6 +4350,68 @@ app.post('/api/reviews', (req, res) => {
     );
 });
 
+// ==========================================
+// SEO - OLD NUMERIC SERVICE URL -> SLUG 301
+// ==========================================
+
+app.get(
+    '/api/seo-redirect/:state/:district/:location/:serviceId',
+    (req, res) => {
+
+        const serviceId =
+            String(req.params.serviceId || '').trim();
+
+        if (!/^\d+$/.test(serviceId)) {
+            return res.status(404).send('Service not found');
+        }
+
+        const query = `
+            SELECT slug
+            FROM public.services
+            WHERE service_id = ?
+              AND slug IS NOT NULL
+              AND TRIM(slug) <> ''
+            LIMIT 1
+        `;
+
+        db.query(query, [serviceId], (err, rows) => {
+
+            if (err) {
+                console.error(
+                    'SEO Redirect Service Lookup Error:',
+                    err.message
+                );
+
+                return res.status(500).send(
+                    'Unable to redirect service'
+                );
+            }
+
+            if (!rows || rows.length === 0) {
+                return res.status(404).send(
+                    'Service not found'
+                );
+            }
+
+            const slug =
+                String(rows[0].slug).trim();
+
+            const state =
+                encodeURIComponent(req.params.state);
+
+            const district =
+                encodeURIComponent(req.params.district);
+
+            const location =
+                encodeURIComponent(req.params.location);
+
+            const newUrl =
+                `https://www.cerood.com/${state}/${district}/${location}/${encodeURIComponent(slug)}`;
+
+            return res.redirect(301, newUrl);
+        });
+    }
+);
 
 // ==========================================
 // SEO - SCALABLE DYNAMIC SITEMAPS
