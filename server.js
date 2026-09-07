@@ -1728,7 +1728,7 @@ app.post('/api/orders/bulk', (req, res) => {
     db.query(
         priceQuery,
         productIds,
-        (priceErr, services) => {
+        async (priceErr, services) => {
 
             if (priceErr) {
                 console.error(
@@ -1789,20 +1789,39 @@ app.post('/api/orders/bulk', (req, res) => {
                     };
                 });
 
-            const visitationFee = 49;
-            const platformFee = 15;
+            let checkoutSettings;
 
-            const taxes =
-                Math.round(
-                    (subtotal + visitationFee) *
-                    0.05
-                );
+try {
+    checkoutSettings = await getCheckoutSettings();
+} catch (settingsErr) {
 
-            const finalAmount =
-                subtotal +
-                visitationFee +
-                platformFee +
-                taxes;
+    console.error(
+        'Bulk Order Checkout Settings Error:',
+        settingsErr
+    );
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to load checkout settings.'
+    });
+}
+
+const convenienceFee =
+    checkoutSettings.convenienceFee;
+
+const gstPercent =
+    checkoutSettings.gstPercent;
+
+const taxes =
+    Math.round(
+        (subtotal + convenienceFee) *
+        (gstPercent / 100)
+    );
+
+const finalAmount =
+    subtotal +
+    convenienceFee +
+    taxes;
 
             // ------------------------------------------
             // 4. VERIFY RAZORPAY ONCE
@@ -2019,7 +2038,7 @@ app.post('/api/orders/bulk', (req, res) => {
 // ==========================================
 // 4. CREATE ORDER API ROUTE (Checkout)
 // ==========================================
-app.post('/api/orders', (req, res) => {
+app.post('/api/orders', async (req, res) => {
 
     const {
         order_id,
@@ -2069,7 +2088,7 @@ app.post('/api/orders', (req, res) => {
         WHERE service_id IN (${placeholders})
     `;
 
-    db.query(priceQuery, productIds, (priceErr, services) => {
+    db.query(priceQuery, productIds, async (priceErr, services) => {
 
         if (priceErr) {
             console.error('Order Price Error:', priceErr);
@@ -2101,13 +2120,39 @@ app.post('/api/orders', (req, res) => {
                 * item.quantity;
         });
 
-        const visitationFee = 49;
-        const platformFee = 15;
-        const taxes =
-            Math.round((subtotal + visitationFee) * 0.05);
+        let checkoutSettings;
 
-        const finalAmount =
-            subtotal + visitationFee + platformFee + taxes;
+try {
+    checkoutSettings = await getCheckoutSettings();
+} catch (settingsErr) {
+
+    console.error(
+        'Order Checkout Settings Error:',
+        settingsErr
+    );
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to load checkout settings.'
+    });
+}
+
+const convenienceFee =
+    checkoutSettings.convenienceFee;
+
+const gstPercent =
+    checkoutSettings.gstPercent;
+
+const taxes =
+    Math.round(
+        (subtotal + convenienceFee) *
+        (gstPercent / 100)
+    );
+
+const finalAmount =
+    subtotal +
+    convenienceFee +
+    taxes;
 
         const combinedProductIds =
             cleanItems.map(item => item.product_id).join(', ');
@@ -2364,6 +2409,128 @@ function requireAdminAuth(req, res, next) {
 
 // Protect every /api/admin/* route below this line
 app.use('/api/admin', requireAdminAuth);
+
+// ==========================================
+// ADMIN - CHECKOUT SETTINGS
+// ==========================================
+
+// GET CHECKOUT SETTINGS
+app.get('/api/admin/checkout-settings', (req, res) => {
+
+    const query = `
+        SELECT
+            convenience_fee,
+            convenience_fee_enabled,
+            gst_percent,
+            gst_enabled
+        FROM public.checkout_settings
+        WHERE id = 1
+        LIMIT 1
+    `;
+
+    db.query(query, (err, rows) => {
+
+        if (err) {
+            console.error('Admin Checkout Settings GET Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to load checkout settings.'
+            });
+        }
+
+        const settings = rows && rows[0] ? rows[0] : {};
+
+        return res.json({
+            success: true,
+            settings: {
+                convenience_fee:
+                    Number(settings.convenience_fee) || 0,
+
+                convenience_fee_enabled:
+                    settings.convenience_fee_enabled === true,
+
+                gst_percent:
+                    Number(settings.gst_percent) || 0,
+
+                gst_enabled:
+                    settings.gst_enabled === true
+            }
+        });
+    });
+});
+
+
+// UPDATE CHECKOUT SETTINGS
+app.put('/api/admin/checkout-settings', (req, res) => {
+
+    const convenienceFee =
+        Math.max(
+            0,
+            Number(req.body.convenience_fee) || 0
+        );
+
+    const gstPercent =
+    Math.min(
+        100,
+        Math.max(
+            0,
+            Number(req.body.gst_percent) || 0
+        )
+    );
+
+    const convenienceFeeEnabled =
+        req.body.convenience_fee_enabled === true;
+
+    const gstEnabled =
+        req.body.gst_enabled === true;
+
+
+    const query = `
+        UPDATE public.checkout_settings
+        SET
+            convenience_fee = ?,
+            convenience_fee_enabled = ?,
+            gst_percent = ?,
+            gst_enabled = ?,
+            updated_at = CURRENT_TIMESTAMP
+        WHERE id = 1
+        RETURNING *
+    `;
+
+    db.query(
+        query,
+        [
+            convenienceFee,
+            convenienceFeeEnabled,
+            gstPercent,
+            gstEnabled
+        ],
+        (err, rows) => {
+
+            if (err) {
+                console.error(
+                    'Admin Checkout Settings UPDATE Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        'Unable to save checkout settings.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message:
+                    'Checkout settings saved successfully!',
+                settings:
+                    rows && rows[0] ? rows[0] : null
+            });
+        }
+    );
+});
 
 // ==========================================
 // ADMIN - GET ALL TECHNICIANS
@@ -2665,6 +2832,62 @@ const razorpayInstance = new Razorpay({
 });
 
 // ==========================================
+// CHECKOUT FEE SETTINGS
+// ==========================================
+async function getCheckoutSettings() {
+
+    return new Promise((resolve, reject) => {
+
+        const query = `
+            SELECT
+                convenience_fee,
+                convenience_fee_enabled,
+                gst_percent,
+                gst_enabled
+            FROM public.checkout_settings
+            WHERE id = 1
+            LIMIT 1
+        `;
+
+        db.query(query, (err, rows) => {
+
+            if (err) {
+                console.error(
+                    'Checkout Settings Error:',
+                    err
+                );
+
+                return reject(err);
+            }
+
+            const settings =
+                rows && rows[0]
+                    ? rows[0]
+                    : {};
+
+            const convenienceFee =
+                settings.convenience_fee_enabled === true
+                    ? Number(settings.convenience_fee) || 0
+                    : 0;
+
+            const gstPercent =
+                settings.gst_enabled === true
+                    ? Number(settings.gst_percent) || 0
+                    : 0;
+
+            resolve({
+                convenienceFee,
+                gstPercent,
+                convenienceFeeEnabled:
+                    settings.convenience_fee_enabled === true,
+                gstEnabled:
+                    settings.gst_enabled === true
+            });
+        });
+    });
+}
+
+// ==========================================
 // 9. RAZORPAY PAYMENT ORDER CREATION API
 // ==========================================
 app.post('/api/create-razorpay-order', async (req, res) => {
@@ -2736,12 +2959,39 @@ app.post('/api/create-razorpay-order', async (req, res) => {
                 priceMap[item.product_id] * item.quantity;
         });
 
-        const visitationFee = 49;
-const platformFee = 15;
-const taxes = Math.round((subtotal + visitationFee) * 0.05);
+        let checkoutSettings;
+
+try {
+    checkoutSettings = await getCheckoutSettings();
+} catch (settingsErr) {
+
+    console.error(
+        'Razorpay Checkout Settings Error:',
+        settingsErr
+    );
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to load checkout settings.'
+    });
+}
+
+const convenienceFee =
+    checkoutSettings.convenienceFee;
+
+const gstPercent =
+    checkoutSettings.gstPercent;
+
+const taxes =
+    Math.round(
+        (subtotal + convenienceFee) *
+        (gstPercent / 100)
+    );
 
 const finalAmount =
-    subtotal + visitationFee + platformFee + taxes;
+    subtotal +
+    convenienceFee +
+    taxes;
 
         if (!Number.isFinite(finalAmount) || finalAmount <= 0) {
             return res.status(400).json({
@@ -2782,7 +3032,7 @@ const finalAmount =
     });
 });
 
-app.post('/api/calculate-order-total', (req, res) => {
+app.post('/api/calculate-order-total', async (req, res) => {
 
     const { items } = req.body;
 
@@ -2819,7 +3069,7 @@ app.post('/api/calculate-order-total', (req, res) => {
         WHERE service_id IN (${placeholders})
     `;
 
-    db.query(query, productIds, (err, services) => {
+    db.query(query, productIds, async (err, services) => {
 
         if (err) {
             console.error('Order Total Error:', err);
@@ -2851,23 +3101,56 @@ app.post('/api/calculate-order-total', (req, res) => {
                 priceMap[item.product_id] * item.quantity;
         });
 
-        const visitationFee = 49;
-        const platformFee = 15;
-        const taxes = Math.round((subtotal + visitationFee) * 0.05);
+        let checkoutSettings;
 
-        const finalAmount =
-            subtotal + visitationFee + platformFee + taxes;
+try {
+    checkoutSettings = await getCheckoutSettings();
+} catch (settingsErr) {
 
+    console.error(
+        'Calculate Total Checkout Settings Error:',
+        settingsErr
+    );
+
+    return res.status(500).json({
+        success: false,
+        message: 'Unable to load checkout settings.'
+    });
+}
+
+const convenienceFee =
+    checkoutSettings.convenienceFee;
+
+const gstPercent =
+    checkoutSettings.gstPercent;
+
+const taxes =
+    Math.round(
+        (subtotal + convenienceFee) *
+        (gstPercent / 100)
+    );
+
+const finalAmount =
+    subtotal +
+    convenienceFee +
+    taxes;
+
+        
         return res.json({
-            success: true,
-            subtotal,
-            visitationFee,
-            platformFee,
-            taxes,
-            finalAmount
-        });
+    success: true,
+    subtotal,
+    convenienceFee,
+    convenienceFeeEnabled:
+        checkoutSettings.convenienceFeeEnabled,
+    gstPercent,
+    gstEnabled:
+        checkoutSettings.gstEnabled,
+    taxes,
+    finalAmount
+});
     });
 });
+
 
 // ==========================================
 // RAZORPAY PAYMENT SIGNATURE VERIFICATION
