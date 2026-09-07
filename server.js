@@ -1934,28 +1934,30 @@ const finalAmount =
             // 6. INSERT EACH SERVICE AS SEPARATE ORDER
             // ------------------------------------------
             const insertQuery = `
-                INSERT INTO orders
-                (
-                    order_id,
-                    customer_id,
-                    product_id,
-                    service_name,
-                    customer_name,
-                    phone,
-                    whatsapp,
-                    address,
-                    district,
-                    pincode,
-                    amount,
-                    order_date,
-                    status,
-                    booked_at
-                )
-                VALUES (
-                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-                    CURRENT_TIMESTAMP
-                )
-            `;
+    INSERT INTO orders
+    (
+        order_id,
+        customer_id,
+        product_id,
+        service_name,
+        customer_name,
+        phone,
+        whatsapp,
+        address,
+        district,
+        pincode,
+        amount,
+        order_date,
+        status,
+        payment_status,
+        payment_method,
+        booked_at
+    )
+    VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        CURRENT_TIMESTAMP
+    )
+`;
 
             let insertedOrders = [];
             let insertIndex = 0;
@@ -1992,8 +1994,10 @@ const finalAmount =
                     district,
                     pincode,
                     order.amount,
-                    order_date,
-                    safeStatus
+order_date,
+'Pending',
+safeStatus === 'Paid' ? 'Paid' : 'Pending',
+safeStatus === 'Paid' ? 'Online' : 'Pay Later'
                 ];
 
                 db.query(
@@ -2198,44 +2202,48 @@ if (
 }
 
         const query = `
-            INSERT INTO orders
-            (
-                order_id,
-                customer_id,
-                product_id,
-                service_name,
-                customer_name,
-                phone,
-                whatsapp,
-                address,
-                district,
-                pincode,
-                amount,
-                order_date,
-                status,
-                booked_at
-            )
-            VALUES (
-    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-    CURRENT_TIMESTAMP
-)
-        `;
+    INSERT INTO orders
+    (
+        order_id,
+        customer_id,
+        product_id,
+        service_name,
+        customer_name,
+        phone,
+        whatsapp,
+        address,
+        district,
+        pincode,
+        amount,
+        order_date,
+        status,
+        payment_status,
+        payment_method,
+        booked_at
+    )
+    VALUES (
+        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+        CURRENT_TIMESTAMP
+    )
+`;
 
         const values = [
-            order_id,
-            customer_id,
-            combinedProductIds,
-            combinedServiceName,
-            customer_name,
-            phone,
-            whatsapp || '',
-            address,
-            district,
-            pincode,
-            finalAmount,
-            order_date,
-            safeStatus
-        ];
+    order_id,
+    customer_id,
+    combinedProductIds,
+    combinedServiceName,
+    customer_name,
+    phone,
+    whatsapp || '',
+    address,
+    district,
+    pincode,
+    finalAmount,
+    order_date,
+    'Pending',
+    safeStatus === 'Paid' ? 'Paid' : 'Pending',
+    safeStatus === 'Paid' ? 'Online' : 'Pay Later'
+];
 
         db.query(query, values, (err) => {
 
