@@ -4416,10 +4416,13 @@ app.get('/api/sitemap/:page', (req, res) => {
     `;
 
     const servicesQuery = `
-    SELECT service_id
-    FROM public.services
-    WHERE service_id IN ('1', '12', '20', '28', '39')
-    ORDER BY service_id
+    SELECT service_id, slug
+FROM public.services
+WHERE service_id IN ('1', '12', '20', '28', '39')
+  AND slug IS NOT NULL
+  AND TRIM(slug) <> ''
+ORDER BY service_id
+    
 `;
 
     db.query(
@@ -4514,15 +4517,22 @@ app.get('/api/sitemap/:page', (req, res) => {
                                 '&apos;'
                             );
 
-                    const serviceIds =
-                        services
-                            .map(service =>
-                                String(
-                                    service.service_id ||
-                                    ''
-                                ).trim()
-                            )
-                            .filter(Boolean);
+                    const sitemapServices =
+    services
+        .map(service => ({
+            serviceId: String(
+                service.service_id || ''
+            ).trim(),
+
+            slug: String(
+                service.slug || ''
+            ).trim()
+        }))
+        .filter(
+            service =>
+                service.serviceId &&
+                service.slug
+        );
 
                     const urls = [];
 
@@ -4559,15 +4569,14 @@ app.get('/api/sitemap/:page', (req, res) => {
                                 return;
                             }
 
-                            serviceIds
-                                .forEach(
-                                    serviceId => {
+                            sitemapServices
+    .forEach(service => {
 
-                                    urls.push(
-                                        `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${serviceId}`
-                                    );
+        urls.push(
+            `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${service.slug}`
+        );
 
-                                });
+    });
                         });
 
                     const xml =
@@ -4920,8 +4929,89 @@ app.get('/api/match-location', (req, res) => {
 });
 
 // ==========================================
-// LOCATION + SERVICE SEO LANDING PAGE API
+// SEO OLD NUMERIC URL -> SLUG 301 REDIRECT
 // ==========================================
+app.get(
+    '/api/seo-redirect/:state/:district/:location/:serviceId',
+    (req, res) => {
+
+        const stateSlug = String(req.params.state || '')
+            .trim()
+            .toLowerCase();
+
+        const districtSlug = String(req.params.district || '')
+            .trim()
+            .toLowerCase();
+
+        const locationSlug = String(req.params.location || '')
+            .trim()
+            .toLowerCase();
+
+        const serviceId = String(req.params.serviceId || '')
+            .trim();
+
+        if (
+            !stateSlug ||
+            !districtSlug ||
+            !locationSlug ||
+            !serviceId
+        ) {
+            return res.status(400).send('Invalid URL');
+        }
+
+        const query = `
+            SELECT slug
+            FROM public.services
+            WHERE CAST(service_id AS TEXT) = ?
+              AND slug IS NOT NULL
+              AND TRIM(slug) <> ''
+            LIMIT 1
+        `;
+
+        db.query(
+            query,
+            [serviceId],
+            (err, results) => {
+
+                if (err) {
+                    console.error(
+                        'SEO Redirect Error:',
+                        err
+                    );
+
+                    return res
+                        .status(500)
+                        .send('Redirect lookup failed');
+                }
+
+                if (
+                    !results ||
+                    results.length === 0
+                ) {
+                    return res
+                        .status(404)
+                        .send('Service not found');
+                }
+
+                const serviceSlug =
+                    String(results[0].slug || '')
+                        .trim();
+
+                const redirectUrl =
+                    `https://www.cerood.com/` +
+                    `${stateSlug}/` +
+                    `${districtSlug}/` +
+                    `${locationSlug}/` +
+                    `${serviceSlug}`;
+
+                return res.redirect(
+                    301,
+                    redirectUrl
+                );
+            }
+        );
+    }
+);
 
 // ==========================================
 // LOCATION + SERVICE SEO LANDING PAGE API
@@ -4941,14 +5031,15 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
         .trim()
         .toLowerCase();
 
-    const serviceId = String(req.params.service || '')
-        .trim();
+    const serviceIdentifier = String(req.params.service || '')
+    .trim()
+    .toLowerCase();
 
     if (
         !stateSlug ||
         !districtSlug ||
         !locationSlug ||
-        !serviceId
+        !serviceIdentifier
     ) {
         return res.status(400).json({
             success: false,
@@ -5010,7 +5101,10 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
 
             AND LOWER(l.slug) = ?
 
-            AND CAST(s.service_id AS TEXT) = ?
+            AND (
+    LOWER(TRIM(s.slug)) = ?
+    OR CAST(s.service_id AS TEXT) = ?
+)
 
             AND l.is_active = TRUE
 
@@ -5020,11 +5114,12 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
     db.query(
         query,
         [
-            stateSlug,
-            districtSlug,
-            locationSlug,
-            serviceId
-        ],
+    stateSlug,
+    districtSlug,
+    locationSlug,
+    serviceIdentifier,
+    serviceIdentifier
+],
         (err, results) => {
 
             if (err) {
