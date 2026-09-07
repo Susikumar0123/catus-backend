@@ -5254,6 +5254,46 @@ app.get(
 );
 
 // ==========================================
+// SEO LOCATION HUB API
+// ==========================================
+
+app.get('/api/seo-locations', (req, res) => {
+
+    const query = `
+        SELECT
+            location_name,
+            location_slug,
+            district,
+            state
+        FROM public.seo_locations
+        WHERE is_active = TRUE
+          AND location_slug IS NOT NULL
+          AND TRIM(location_slug) <> ''
+        ORDER BY state, district, location_name
+    `;
+
+    db.query(query, [], (err, results) => {
+
+        if (err) {
+            console.error(
+                'SEO Locations API Error:',
+                err
+            );
+
+            return res.status(500).json({
+                success: false,
+                locations: []
+            });
+        }
+
+        return res.json({
+            success: true,
+            locations: results || []
+        });
+    });
+});
+
+// ==========================================
 // LOCATION + SERVICE SEO LANDING PAGE API
 // ==========================================
 
