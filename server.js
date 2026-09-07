@@ -4606,6 +4606,15 @@ app.get('/', (req, res) => {
     res.send('Cerood Backend Server is running successfully!');
 });
 
+function createServiceSlug(serviceName) {
+    return String(serviceName || '')
+        .trim()
+        .toLowerCase()
+        .replace(/&/g, ' and ')
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
 app.post('/api/admin/add-service', (req, res) => {
 
     const { 
@@ -4627,11 +4636,21 @@ app.post('/api/admin/add-service', (req, res) => {
         product_note 
     } = req.body;
 
+    const slug = createServiceSlug(service_name);
+
+if (!slug) {
+    return res.status(400).json({
+        success: false,
+        error: 'Unable to create service slug.'
+    });
+}
+
     const query = `
         INSERT INTO services
         (
             service_id,
             service_name,
+            slug,
             category,
             group_id,
             price,
@@ -4647,12 +4666,13 @@ app.post('/api/admin/add-service', (req, res) => {
             enable_select_options,
             product_note
         )
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     `;
 
     db.query(query, [
         service_id,
         service_name,
+        slug,
         category || 'General',
         group_id || null,
         price || 0,
