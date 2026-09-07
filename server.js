@@ -4418,8 +4418,7 @@ app.get('/api/sitemap/:page', (req, res) => {
     const servicesQuery = `
     SELECT service_id, slug
 FROM public.services
-WHERE service_id IN ('1', '12', '20', '28', '39')
-  AND slug IS NOT NULL
+WHERE slug IS NOT NULL
   AND TRIM(slug) <> ''
 ORDER BY service_id
     
