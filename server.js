@@ -3731,31 +3731,42 @@ app.post('/api/admin/update-service', (req, res) => {
             ? oldRows[0]
             : {};
 
-        const query = `
-            UPDATE services
-            SET
-                service_id = ?,
-                service_name = ?,
-                category = ?,
-                group_id = ?,
-                price = ?,
-                mrp = ?,
-                is_hot_deal = ?,
-                select_options = ?,
-                why_choose_us = ?,
-                discount_text = ?,
-                image_url = ?,
-                image_url_2 = ?,
-                image_url_3 = ?,
-                image_url_4 = ?,
-                enable_select_options = ?,
-                product_note = ?
-            WHERE service_id = ?
-        `;
+        const newSlug = createServiceSlug(service_name);
+
+if (!newSlug) {
+    return res.status(400).json({
+        success: false,
+        error: 'Unable to create service slug.'
+    });
+}
+
+const query = `
+    UPDATE services
+    SET
+        service_id = ?,
+        service_name = ?,
+        slug = ?,
+        category = ?,
+        group_id = ?,
+        price = ?,
+        mrp = ?,
+        is_hot_deal = ?,
+        select_options = ?,
+        why_choose_us = ?,
+        discount_text = ?,
+        image_url = ?,
+        image_url_2 = ?,
+        image_url_3 = ?,
+        image_url_4 = ?,
+        enable_select_options = ?,
+        product_note = ?
+    WHERE service_id = ?
+`;
 
         db.query(query, [
             service_id,
             service_name,
+            newSlug,
             category,
             group_id || null,
             price,
