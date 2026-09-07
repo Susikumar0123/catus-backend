@@ -4440,17 +4440,16 @@ app.get('/api/sitemap.xml', (req, res) => {
     const frontendBase = 'https://www.cerood.com';
 
     const locationCountQuery = `
-        SELECT COUNT(*)::int AS total
-        FROM public.locations
-        WHERE is_active = TRUE
-          AND seo_enabled = TRUE
-          AND slug IS NOT NULL
-          AND TRIM(slug) <> ''
-          AND district IS NOT NULL
-          AND TRIM(district) <> ''
-          AND state IS NOT NULL
-          AND TRIM(state) <> ''
-    `;
+    SELECT COUNT(*)::int AS total
+    FROM public.seo_locations
+    WHERE is_active = TRUE
+      AND location_slug IS NOT NULL
+      AND TRIM(location_slug) <> ''
+      AND district IS NOT NULL
+      AND TRIM(district) <> ''
+      AND state IS NOT NULL
+      AND TRIM(state) <> ''
+`;
 
     const serviceCountQuery = `
         SELECT COUNT(*)::int AS total
@@ -4657,17 +4656,16 @@ app.get('/api/sitemap/:page', (req, res) => {
                 locationsPerSitemap;
 
             const locationCountQuery = `
-                SELECT COUNT(*)::int AS total
-                FROM public.locations
-                WHERE is_active = TRUE
-                  AND seo_enabled = TRUE
-                  AND slug IS NOT NULL
-                  AND TRIM(slug) <> ''
-                  AND district IS NOT NULL
-                  AND TRIM(district) <> ''
-                  AND state IS NOT NULL
-                  AND TRIM(state) <> ''
-            `;
+    SELECT COUNT(*)::int AS total
+    FROM public.seo_locations
+    WHERE is_active = TRUE
+      AND location_slug IS NOT NULL
+      AND TRIM(location_slug) <> ''
+      AND district IS NOT NULL
+      AND TRIM(district) <> ''
+      AND state IS NOT NULL
+      AND TRIM(state) <> ''
+`;
 
             db.query(
                 locationCountQuery,
@@ -4710,25 +4708,24 @@ app.get('/api/sitemap/:page', (req, res) => {
                     }
 
                     const locationsQuery = `
-                        SELECT
-                            id,
-                            name,
-                            slug,
-                            district,
-                            state
-                        FROM public.locations
-                        WHERE is_active = TRUE
-                          AND seo_enabled = TRUE
-                          AND slug IS NOT NULL
-                          AND TRIM(slug) <> ''
-                          AND district IS NOT NULL
-                          AND TRIM(district) <> ''
-                          AND state IS NOT NULL
-                          AND TRIM(state) <> ''
-                        ORDER BY id
-                        LIMIT ${locationsPerSitemap}
-                        OFFSET ${offset}
-                    `;
+    SELECT
+        id,
+        location_name AS name,
+        location_slug AS slug,
+        district,
+        state
+    FROM public.seo_locations
+    WHERE is_active = TRUE
+      AND location_slug IS NOT NULL
+      AND TRIM(location_slug) <> ''
+      AND district IS NOT NULL
+      AND TRIM(district) <> ''
+      AND state IS NOT NULL
+      AND TRIM(state) <> ''
+    ORDER BY id
+    LIMIT ${locationsPerSitemap}
+    OFFSET ${offset}
+`;
 
                     db.query(
                         locationsQuery,
