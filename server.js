@@ -4452,6 +4452,7 @@ app.get('/api/sitemap.xml', (req, res) => {
         SELECT COUNT(*)::int AS total
         FROM public.locations
         WHERE is_active = TRUE
+          AND seo_enabled = TRUE
           AND slug IS NOT NULL
           AND TRIM(slug) <> ''
           AND district IS NOT NULL
@@ -4668,6 +4669,7 @@ app.get('/api/sitemap/:page', (req, res) => {
                 SELECT COUNT(*)::int AS total
                 FROM public.locations
                 WHERE is_active = TRUE
+                  AND seo_enabled = TRUE
                   AND slug IS NOT NULL
                   AND TRIM(slug) <> ''
                   AND district IS NOT NULL
@@ -4725,6 +4727,7 @@ app.get('/api/sitemap/:page', (req, res) => {
                             state
                         FROM public.locations
                         WHERE is_active = TRUE
+                          AND seo_enabled = TRUE
                           AND slug IS NOT NULL
                           AND TRIM(slug) <> ''
                           AND district IS NOT NULL
