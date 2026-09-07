@@ -5290,14 +5290,14 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
 
     const query = `
         SELECT
-            l.id AS location_id,
-            l.name AS location_name,
-            l.slug AS location_slug,
-            l.district,
-            l.state,
-            l.pincode,
+    l.id AS location_id,
+    l.location_name AS location_name,
+    l.location_slug AS location_slug,
+    l.district,
+    l.state,
+    NULL AS pincode,
 
-            s.service_id,
+    s.service_id,
             s.service_name,
             s.category,
             s.price AS service_price,
@@ -5316,7 +5316,7 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
             NULL AS seo_description,
             NULL AS content
 
-        FROM public.locations l
+        FROM public.seo_locations l
 
         CROSS JOIN public.services s
 
@@ -5339,7 +5339,7 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
                 )
             ) = ?
 
-            AND LOWER(l.slug) = ?
+            AND LOWER(TRIM(l.location_slug)) = ?
 
             AND (
     LOWER(TRIM(s.slug)) = ?
