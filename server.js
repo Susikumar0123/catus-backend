@@ -4341,68 +4341,42 @@ app.post('/api/reviews', (req, res) => {
 
 
 // ==========================================
-// SEO - SCALABLE SITEMAP INDEX
+// SEO - SCALABLE DYNAMIC SITEMAPS
 // ==========================================
 
-const SITEMAP_LOCATION_LIMIT = 2500;
+// Google limit = 50,000 URLs.
+// Safety-ku 45,000 URLs per child sitemap.
+const SITEMAP_MAX_URLS = 45000;
 
+function sitemapSlugify(value) {
+    return String(value || '')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9]+/g, '-')
+        .replace(/^-+|-+$/g, '');
+}
+
+function sitemapEscapeXml(value) {
+    return String(value || '')
+        .replace(/&/g, '&amp;')
+        .replace(/</g, '&lt;')
+        .replace(/>/g, '&gt;')
+        .replace(/"/g, '&quot;')
+        .replace(/'/g, '&apos;');
+}
+
+
+// ==========================================
+// MAIN SITEMAP INDEX
+// /api/sitemap.xml
+// ==========================================
 
 app.get('/api/sitemap.xml', (req, res) => {
 
     const frontendBase = 'https://www.cerood.com';
 
-    // We currently publish only one controlled SEO sitemap.
-    const sitemapUrls = [
-        `${frontendBase}/sitemap-1.xml`
-    ];
-
-    const xml =
-        `<?xml version="1.0" encoding="UTF-8"?>\n` +
-        `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-        sitemapUrls.map(url =>
-            `  <sitemap>\n` +
-            `    <loc>${url}</loc>\n` +
-            `  </sitemap>`
-        ).join('\n') +
-        `\n</sitemapindex>`;
-
-    return res
-        .status(200)
-        .set(
-            'Content-Type',
-            'application/xml; charset=utf-8'
-        )
-        .send(xml);
-});
-
-// ==========================================
-// 2. CHILD SITEMAP
-// ==========================================
-
-app.get('/api/sitemap/:page', (req, res) => {
-
-    const page =
-        parseInt(req.params.page, 10);
-
-    if (
-    !Number.isInteger(page) ||
-    page !== 1
-) {
-
-        return res
-            .status(400)
-            .type('text/plain')
-            .send('Invalid sitemap page');
-    }
-
-
-    const locationsQuery = `
-        SELECT
-            id,
-            name,
-            slug,
-            district,
-            state
+    const locationCountQuery = `
+        SELECT COUNT(*)::int AS total
         FROM public.locations
         WHERE is_active = TRUE
           AND slug IS NOT NULL
@@ -4411,182 +4385,108 @@ app.get('/api/sitemap/:page', (req, res) => {
           AND TRIM(district) <> ''
           AND state IS NOT NULL
           AND TRIM(state) <> ''
-        ORDER BY id
-        LIMIT ${SITEMAP_LOCATION_LIMIT}
     `;
 
-    const servicesQuery = `
-    SELECT service_id, slug
-FROM public.services
-WHERE slug IS NOT NULL
-  AND TRIM(slug) <> ''
-ORDER BY service_id
-    
-`;
+    const serviceCountQuery = `
+        SELECT COUNT(*)::int AS total
+        FROM public.services
+        WHERE slug IS NOT NULL
+          AND TRIM(slug) <> ''
+    `;
 
     db.query(
-        locationsQuery,
+        locationCountQuery,
         [],
-        (locationErr, locations) => {
+        (locationErr, locationRows) => {
 
             if (locationErr) {
 
                 console.error(
-                    'Child sitemap locations error:',
+                    'Sitemap location count error:',
                     locationErr
                 );
 
                 return res
                     .status(500)
                     .type('text/plain')
-                    .send(
-                        'Unable to generate sitemap'
-                    );
+                    .send('Unable to generate sitemap index');
             }
 
             db.query(
-                servicesQuery,
+                serviceCountQuery,
                 [],
-                (serviceErr, services) => {
+                (serviceErr, serviceRows) => {
 
                     if (serviceErr) {
 
                         console.error(
-                            'Child sitemap services error:',
+                            'Sitemap service count error:',
                             serviceErr
                         );
 
                         return res
                             .status(500)
                             .type('text/plain')
-                            .send(
-                                'Unable to generate sitemap'
-                            );
+                            .send('Unable to generate sitemap index');
                     }
 
-                    if (
-                        !services ||
-                        services.length === 0
-                    ) {
+                    const totalLocations =
+                        Number(locationRows?.[0]?.total || 0);
+
+                    const totalServices =
+                        Number(serviceRows?.[0]?.total || 0);
+
+                    if (totalServices <= 0) {
 
                         return res
                             .status(404)
                             .type('text/plain')
-                            .send(
-                                'Sitemap page not found'
-                            );
+                            .send('No sitemap services found');
                     }
 
-                    const frontendBase =
-                        'https://www.cerood.com';
-
-                    const slugify = (value) =>
-                        String(value || '')
-                            .trim()
-                            .toLowerCase()
-                            .replace(
-                                /[^a-z0-9]+/g,
-                                '-'
+                    // First child sitemap-la homepage-um irukkum.
+                    // Every page safe-ah same location limit use pannuvom.
+                    const locationsPerSitemap =
+                        Math.max(
+                            1,
+                            Math.floor(
+                                (SITEMAP_MAX_URLS - 1) /
+                                totalServices
                             )
-                            .replace(
-                                /^-+|-+$/g,
-                                ''
-                            );
+                        );
 
-                    const escapeXml = (value) =>
-                        String(value || '')
-                            .replace(
-                                /&/g,
-                                '&amp;'
+                    const totalPages =
+                        Math.max(
+                            1,
+                            Math.ceil(
+                                totalLocations /
+                                locationsPerSitemap
                             )
-                            .replace(
-                                /</g,
-                                '&lt;'
-                            )
-                            .replace(
-                                />/g,
-                                '&gt;'
-                            )
-                            .replace(
-                                /"/g,
-                                '&quot;'
-                            )
-                            .replace(
-                                /'/g,
-                                '&apos;'
-                            );
+                        );
 
-                    const sitemapServices =
-    services
-        .map(service => ({
-            serviceId: String(
-                service.service_id || ''
-            ).trim(),
+                    const sitemapUrls = [];
 
-            slug: String(
-                service.slug || ''
-            ).trim()
-        }))
-        .filter(
-            service =>
-                service.serviceId &&
-                service.slug
-        );
-
-                    const urls = [];
-
-                    // Homepage only in first sitemap
-                    if (page === 1) {
-                        urls.push(
-                            `${frontendBase}/`
+                    for (
+                        let page = 1;
+                        page <= totalPages;
+                        page++
+                    ) {
+                        sitemapUrls.push(
+                            `${frontendBase}/sitemap-${page}.xml`
                         );
                     }
 
-                    (locations || [])
-                        .forEach(location => {
-
-                            const stateSlug =
-                                slugify(
-                                    location.state
-                                );
-
-                            const districtSlug =
-                                slugify(
-                                    location.district
-                                );
-
-                            const locationSlug =
-                                slugify(
-                                    location.slug
-                                );
-
-                            if (
-                                !stateSlug ||
-                                !districtSlug ||
-                                !locationSlug
-                            ) {
-                                return;
-                            }
-
-                            sitemapServices
-    .forEach(service => {
-
-        urls.push(
-            `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${service.slug}`
-        );
-
-    });
-                        });
-
                     const xml =
                         `<?xml version="1.0" encoding="UTF-8"?>\n` +
-                        `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-                        urls.map(url =>
-                            `  <url>\n` +
-                            `    <loc>${escapeXml(url)}</loc>\n` +
-                            `  </url>`
-                        ).join('\n') +
-                        `\n</urlset>`;
+                        `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+                        sitemapUrls
+                            .map(url =>
+                                `  <sitemap>\n` +
+                                `    <loc>${sitemapEscapeXml(url)}</loc>\n` +
+                                `  </sitemap>`
+                            )
+                            .join('\n') +
+                        `\n</sitemapindex>`;
 
                     return res
                         .status(200)
@@ -4600,6 +4500,263 @@ ORDER BY service_id
         }
     );
 });
+
+
+// ==========================================
+// CHILD SITEMAPS
+// /api/sitemap/1
+// /api/sitemap/2
+// /api/sitemap/3 ...
+// ==========================================
+
+app.get('/api/sitemap/:page', (req, res) => {
+
+    const page =
+        parseInt(req.params.page, 10);
+
+    if (
+        !Number.isInteger(page) ||
+        page < 1
+    ) {
+
+        return res
+            .status(400)
+            .type('text/plain')
+            .send('Invalid sitemap page');
+    }
+
+    const serviceQuery = `
+        SELECT service_id, slug
+        FROM public.services
+        WHERE slug IS NOT NULL
+          AND TRIM(slug) <> ''
+        ORDER BY service_id
+    `;
+
+    db.query(
+        serviceQuery,
+        [],
+        (serviceErr, services) => {
+
+            if (serviceErr) {
+
+                console.error(
+                    'Sitemap services error:',
+                    serviceErr
+                );
+
+                return res
+                    .status(500)
+                    .type('text/plain')
+                    .send('Unable to generate sitemap');
+            }
+
+            const sitemapServices =
+                (services || [])
+                    .map(service => ({
+                        serviceId:
+                            String(
+                                service.service_id || ''
+                            ).trim(),
+
+                        slug:
+                            String(
+                                service.slug || ''
+                            ).trim()
+                    }))
+                    .filter(
+                        service =>
+                            service.serviceId &&
+                            service.slug
+                    );
+
+            if (sitemapServices.length === 0) {
+
+                return res
+                    .status(404)
+                    .type('text/plain')
+                    .send('No sitemap services found');
+            }
+
+            const locationsPerSitemap =
+                Math.max(
+                    1,
+                    Math.floor(
+                        (SITEMAP_MAX_URLS - 1) /
+                        sitemapServices.length
+                    )
+                );
+
+            const offset =
+                (page - 1) *
+                locationsPerSitemap;
+
+            const locationCountQuery = `
+                SELECT COUNT(*)::int AS total
+                FROM public.locations
+                WHERE is_active = TRUE
+                  AND slug IS NOT NULL
+                  AND TRIM(slug) <> ''
+                  AND district IS NOT NULL
+                  AND TRIM(district) <> ''
+                  AND state IS NOT NULL
+                  AND TRIM(state) <> ''
+            `;
+
+            db.query(
+                locationCountQuery,
+                [],
+                (countErr, countRows) => {
+
+                    if (countErr) {
+
+                        console.error(
+                            'Sitemap location count error:',
+                            countErr
+                        );
+
+                        return res
+                            .status(500)
+                            .type('text/plain')
+                            .send('Unable to generate sitemap');
+                    }
+
+                    const totalLocations =
+                        Number(
+                            countRows?.[0]?.total || 0
+                        );
+
+                    const totalPages =
+                        Math.max(
+                            1,
+                            Math.ceil(
+                                totalLocations /
+                                locationsPerSitemap
+                            )
+                        );
+
+                    if (page > totalPages) {
+
+                        return res
+                            .status(404)
+                            .type('text/plain')
+                            .send('Sitemap page not found');
+                    }
+
+                    const locationsQuery = `
+                        SELECT
+                            id,
+                            name,
+                            slug,
+                            district,
+                            state
+                        FROM public.locations
+                        WHERE is_active = TRUE
+                          AND slug IS NOT NULL
+                          AND TRIM(slug) <> ''
+                          AND district IS NOT NULL
+                          AND TRIM(district) <> ''
+                          AND state IS NOT NULL
+                          AND TRIM(state) <> ''
+                        ORDER BY id
+                        LIMIT ${locationsPerSitemap}
+                        OFFSET ${offset}
+                    `;
+
+                    db.query(
+                        locationsQuery,
+                        [],
+                        (locationErr, locations) => {
+
+                            if (locationErr) {
+
+                                console.error(
+                                    'Child sitemap locations error:',
+                                    locationErr
+                                );
+
+                                return res
+                                    .status(500)
+                                    .type('text/plain')
+                                    .send(
+                                        'Unable to generate sitemap'
+                                    );
+                            }
+
+                            const frontendBase =
+                                'https://www.cerood.com';
+
+                            const urls = [];
+
+                            // Homepage only sitemap-1
+                            if (page === 1) {
+                                urls.push(
+                                    `${frontendBase}/`
+                                );
+                            }
+
+                            (locations || [])
+                                .forEach(location => {
+
+                                    const stateSlug =
+                                        sitemapSlugify(
+                                            location.state
+                                        );
+
+                                    const districtSlug =
+                                        sitemapSlugify(
+                                            location.district
+                                        );
+
+                                    const locationSlug =
+                                        sitemapSlugify(
+                                            location.slug
+                                        );
+
+                                    if (
+                                        !stateSlug ||
+                                        !districtSlug ||
+                                        !locationSlug
+                                    ) {
+                                        return;
+                                    }
+
+                                    sitemapServices
+                                        .forEach(service => {
+
+                                            urls.push(
+                                                `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${service.slug}`
+                                            );
+                                        });
+                                });
+
+                            const xml =
+                                `<?xml version="1.0" encoding="UTF-8"?>\n` +
+                                `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+                                urls
+                                    .map(url =>
+                                        `  <url>\n` +
+                                        `    <loc>${sitemapEscapeXml(url)}</loc>\n` +
+                                        `  </url>`
+                                    )
+                                    .join('\n') +
+                                `\n</urlset>`;
+
+                            return res
+                                .status(200)
+                                .set(
+                                    'Content-Type',
+                                    'application/xml; charset=utf-8'
+                                )
+                                .send(xml);
+                        }
+                    );
+                }
+            );
+        }
+    );
+});
+
 
 // Root URL check
 app.get('/', (req, res) => {
