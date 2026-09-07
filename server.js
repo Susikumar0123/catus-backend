@@ -1661,6 +1661,362 @@ app.get('/api/orders/:phone', (req, res) => {
 });
 
 // ==========================================
+// BULK CREATE SEPARATE SERVICE ORDERS
+// ONE CHECKOUT -> MULTIPLE INDEPENDENT ORDERS
+// ==========================================
+app.post('/api/orders/bulk', (req, res) => {
+
+    const {
+        customer_id,
+        customer_name,
+        phone,
+        whatsapp,
+        address,
+        district,
+        pincode,
+        order_date,
+        status,
+        payment_verification,
+        items
+    } = req.body;
+
+    // ------------------------------------------
+    // 1. VALIDATE ITEMS
+    // ------------------------------------------
+    if (!Array.isArray(items) || items.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid service items are required.'
+        });
+    }
+
+    const cleanItems = items
+        .map(item => ({
+            product_id: String(item.product_id || '').trim(),
+            quantity: Math.max(
+                1,
+                parseInt(item.quantity, 10) || 1
+            )
+        }))
+        .filter(item => item.product_id);
+
+    if (cleanItems.length === 0) {
+        return res.status(400).json({
+            success: false,
+            message: 'Invalid service items.'
+        });
+    }
+
+    // ------------------------------------------
+    // 2. FETCH REAL SERVICE PRICES
+    // ------------------------------------------
+    const productIds = [
+        ...new Set(
+            cleanItems.map(item => item.product_id)
+        )
+    ];
+
+    const placeholders =
+        productIds.map(() => '?').join(',');
+
+    const priceQuery = `
+        SELECT service_id, service_name, price
+        FROM public.services
+        WHERE service_id IN (${placeholders})
+    `;
+
+    db.query(
+        priceQuery,
+        productIds,
+        (priceErr, services) => {
+
+            if (priceErr) {
+                console.error(
+                    'Bulk Order Price Error:',
+                    priceErr
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        'Unable to calculate order amount.'
+                });
+            }
+
+            if (
+                !services ||
+                services.length !== productIds.length
+            ) {
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'One or more services are invalid.'
+                });
+            }
+
+            const serviceMap = {};
+
+            services.forEach(service => {
+                serviceMap[
+                    String(service.service_id)
+                ] = service;
+            });
+
+            // ------------------------------------------
+            // 3. CALCULATE CHECKOUT TOTAL ONCE
+            // ------------------------------------------
+            let subtotal = 0;
+
+            const preparedItems =
+                cleanItems.map(item => {
+
+                    const service =
+                        serviceMap[item.product_id];
+
+                    const serviceSubtotal =
+                        (Number(service.price) || 0) *
+                        item.quantity;
+
+                    subtotal += serviceSubtotal;
+
+                    return {
+                        product_id: item.product_id,
+                        quantity: item.quantity,
+                        service_name:
+                            service.service_name,
+                        service_subtotal:
+                            serviceSubtotal
+                    };
+                });
+
+            const visitationFee = 49;
+            const platformFee = 15;
+
+            const taxes =
+                Math.round(
+                    (subtotal + visitationFee) *
+                    0.05
+                );
+
+            const finalAmount =
+                subtotal +
+                visitationFee +
+                platformFee +
+                taxes;
+
+            // ------------------------------------------
+            // 4. VERIFY RAZORPAY ONCE
+            // ------------------------------------------
+            let safeStatus = 'Pending';
+
+            if (
+                status === 'Paid' &&
+                payment_verification &&
+                payment_verification.razorpay_order_id &&
+                payment_verification.razorpay_payment_id &&
+                payment_verification.razorpay_signature
+            ) {
+
+                const verificationBody =
+                    payment_verification
+                        .razorpay_order_id +
+                    '|' +
+                    payment_verification
+                        .razorpay_payment_id;
+
+                const expectedSignature =
+                    crypto
+                        .createHmac(
+                            'sha256',
+                            process.env
+                                .RAZORPAY_KEY_SECRET
+                        )
+                        .update(
+                            verificationBody
+                        )
+                        .digest('hex');
+
+                if (
+                    expectedSignature ===
+                    payment_verification
+                        .razorpay_signature
+                ) {
+                    safeStatus = 'Paid';
+                } else {
+                    return res
+                        .status(400)
+                        .json({
+                            success: false,
+                            message:
+                                'Invalid Razorpay payment verification.'
+                        });
+                }
+            }
+
+            // ------------------------------------------
+            // 5. SPLIT SHARED FEES ACROSS ORDERS
+            // ------------------------------------------
+            let allocatedSoFar = 0;
+
+            const orderRows =
+                preparedItems.map(
+                    (item, index) => {
+
+                        let orderAmount;
+
+                        if (
+                            index ===
+                            preparedItems.length - 1
+                        ) {
+                            orderAmount =
+                                finalAmount -
+                                allocatedSoFar;
+                        } else {
+
+                            const ratio =
+                                subtotal > 0
+                                    ? item.service_subtotal /
+                                      subtotal
+                                    : 1 /
+                                      preparedItems.length;
+
+                            orderAmount =
+                                Math.round(
+                                    finalAmount *
+                                    ratio
+                                );
+
+                            allocatedSoFar +=
+                                orderAmount;
+                        }
+
+                        const orderId =
+                            Math.floor(
+                                100000000 +
+                                Math.random() *
+                                900000000
+                            );
+
+                        return {
+                            order_id: orderId,
+                            product_id:
+                                item.product_id,
+                            service_name:
+                                item.service_name,
+                            quantity:
+                                item.quantity,
+                            amount:
+                                orderAmount
+                        };
+                    }
+                );
+
+            // ------------------------------------------
+            // 6. INSERT EACH SERVICE AS SEPARATE ORDER
+            // ------------------------------------------
+            const insertQuery = `
+                INSERT INTO orders
+                (
+                    order_id,
+                    customer_id,
+                    product_id,
+                    service_name,
+                    customer_name,
+                    phone,
+                    whatsapp,
+                    address,
+                    district,
+                    pincode,
+                    amount,
+                    order_date,
+                    status,
+                    booked_at
+                )
+                VALUES (
+                    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+                    CURRENT_TIMESTAMP
+                )
+            `;
+
+            let insertedOrders = [];
+            let insertIndex = 0;
+
+            function insertNextOrder() {
+
+                if (
+                    insertIndex >=
+                    orderRows.length
+                ) {
+                    return res.json({
+                        success: true,
+                        message:
+                            'Separate service orders created successfully!',
+                        total_amount:
+                            finalAmount,
+                        orders:
+                            insertedOrders
+                    });
+                }
+
+                const order =
+                    orderRows[insertIndex];
+
+                const values = [
+                    order.order_id,
+                    customer_id,
+                    order.product_id,
+                    order.service_name,
+                    customer_name,
+                    phone,
+                    whatsapp || '',
+                    address,
+                    district,
+                    pincode,
+                    order.amount,
+                    order_date,
+                    safeStatus
+                ];
+
+                db.query(
+                    insertQuery,
+                    values,
+                    (insertErr) => {
+
+                        if (insertErr) {
+
+                            console.error(
+                                'Bulk Insert Order Error:',
+                                insertErr.message
+                            );
+
+                            return res
+                                .status(500)
+                                .json({
+                                    success: false,
+                                    message:
+                                        'Unable to create all service orders.',
+                                    error:
+                                        insertErr.message
+                                });
+                        }
+
+                        insertedOrders.push(
+                            order
+                        );
+
+                        insertIndex++;
+
+                        insertNextOrder();
+                    }
+                );
+            }
+
+            insertNextOrder();
+        }
+    );
+});
+
+// ==========================================
 // 4. CREATE ORDER API ROUTE (Checkout)
 // ==========================================
 app.post('/api/orders', (req, res) => {
@@ -2408,10 +2764,11 @@ const finalAmount =
                 await razorpayInstance.orders.create(options);
 
             return res.json({
-                success: true,
-                id: order.id,
-                amount: order.amount
-            });
+    success: true,
+    id: order.id,
+    amount: order.amount,
+    key_id: process.env.RAZORPAY_KEY_ID
+});
 
         } catch (error) {
 
