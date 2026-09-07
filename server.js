@@ -3731,21 +3731,13 @@ app.post('/api/admin/update-service', (req, res) => {
             ? oldRows[0]
             : {};
 
-        const newSlug = createServiceSlug(service_name);
-
-if (!newSlug) {
-    return res.status(400).json({
-        success: false,
-        error: 'Unable to create service slug.'
-    });
-}
+        
 
 const query = `
     UPDATE services
     SET
         service_id = ?,
         service_name = ?,
-        slug = ?,
         category = ?,
         group_id = ?,
         price = ?,
@@ -3766,7 +3758,6 @@ const query = `
         db.query(query, [
             service_id,
             service_name,
-            newSlug,
             category,
             group_id || null,
             price,
