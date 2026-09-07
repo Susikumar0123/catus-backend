@@ -4053,85 +4053,36 @@ app.post('/api/reviews', (req, res) => {
 // SEO - SCALABLE SITEMAP INDEX
 // ==========================================
 
-const SITEMAP_LOCATION_LIMIT = 5000;
-const SITEMAP_SERVICES_PER_FILE = 9;
+const SITEMAP_LOCATION_LIMIT = 2500;
 
-
-// ==========================================
-// 1. SITEMAP INDEX
-// ==========================================
 
 app.get('/api/sitemap.xml', (req, res) => {
 
-    const serviceCountQuery = `
-        SELECT COUNT(*)::int AS total
-        FROM public.services
-        WHERE service_id IS NOT NULL
-    `;
+    const frontendBase = 'https://www.cerood.com';
 
-    db.query(serviceCountQuery, [], (err, results) => {
+    // We currently publish only one controlled SEO sitemap.
+    const sitemapUrls = [
+        `${frontendBase}/sitemap-1.xml`
+    ];
 
-        if (err) {
+    const xml =
+        `<?xml version="1.0" encoding="UTF-8"?>\n` +
+        `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
+        sitemapUrls.map(url =>
+            `  <sitemap>\n` +
+            `    <loc>${url}</loc>\n` +
+            `  </sitemap>`
+        ).join('\n') +
+        `\n</sitemapindex>`;
 
-            console.error(
-                'Sitemap index generation error:',
-                err
-            );
-
-            return res
-                .status(500)
-                .type('text/plain')
-                .send('Unable to generate sitemap index');
-        }
-
-        const totalServices =
-            Number(results?.[0]?.total || 0);
-
-        const totalSitemaps =
-            Math.max(
-                1,
-                Math.ceil(
-                    totalServices /
-                    SITEMAP_SERVICES_PER_FILE
-                )
-            );
-
-        const frontendBase =
-            'https://www.cerood.com';
-
-        const sitemapUrls = [];
-
-        for (
-            let page = 1;
-            page <= totalSitemaps;
-            page++
-        ) {
-
-            sitemapUrls.push(
-                `${frontendBase}/sitemap-${page}.xml`
-            );
-        }
-
-        const xml =
-            `<?xml version="1.0" encoding="UTF-8"?>\n` +
-            `<sitemapindex xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-            sitemapUrls.map(url =>
-                `  <sitemap>\n` +
-                `    <loc>${url}</loc>\n` +
-                `  </sitemap>`
-            ).join('\n') +
-            `\n</sitemapindex>`;
-
-        return res
-            .status(200)
-            .set(
-                'Content-Type',
-                'application/xml; charset=utf-8'
-            )
-            .send(xml);
-    });
+    return res
+        .status(200)
+        .set(
+            'Content-Type',
+            'application/xml; charset=utf-8'
+        )
+        .send(xml);
 });
-
 
 // ==========================================
 // 2. CHILD SITEMAP
@@ -4143,9 +4094,9 @@ app.get('/api/sitemap/:page', (req, res) => {
         parseInt(req.params.page, 10);
 
     if (
-        !Number.isInteger(page) ||
-        page < 1
-    ) {
+    !Number.isInteger(page) ||
+    page !== 1
+) {
 
         return res
             .status(400)
@@ -4153,9 +4104,6 @@ app.get('/api/sitemap/:page', (req, res) => {
             .send('Invalid sitemap page');
     }
 
-    const serviceOffset =
-        (page - 1) *
-        SITEMAP_SERVICES_PER_FILE;
 
     const locationsQuery = `
         SELECT
@@ -4177,13 +4125,11 @@ app.get('/api/sitemap/:page', (req, res) => {
     `;
 
     const servicesQuery = `
-        SELECT service_id
-        FROM public.services
-        WHERE service_id IS NOT NULL
-        ORDER BY service_id
-        LIMIT ${SITEMAP_SERVICES_PER_FILE}
-        OFFSET ${serviceOffset}
-    `;
+    SELECT service_id
+    FROM public.services
+    WHERE service_id IN ('1', '12', '20', '28', '39')
+    ORDER BY service_id
+`;
 
     db.query(
         locationsQuery,
