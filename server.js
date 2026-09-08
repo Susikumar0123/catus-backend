@@ -5,6 +5,7 @@ const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const multer = require('multer');
 const path = require('path');
+const sharp = require('sharp');
 const db = require('./db');
 const axios = require('axios');
 require('dotenv').config();
@@ -909,33 +910,128 @@ const SUPABASE_SECRET_KEY =
         }
 
         const extension =
-            path.extname(req.file.originalname).toLowerCase() || '.jpg';
+    path.extname(req.file.originalname).toLowerCase() || '.jpg';
 
-        const fileName =
-            `home-icons/${Date.now()}-${Math.random()
-                .toString(36)
-                .substring(2, 8)}${extension}`;
+const requestedFolder =
+    String(req.body.folder || 'home-icons')
+        .trim()
+        .toLowerCase()
+        .replace(/[^a-z0-9-_]/g, '-')
+        .replace(/-+/g, '-')
+        .replace(/^-|-$/g, '');
 
-        await axios.post(
-            `${SUPABASE_URL}/storage/v1/object/catus-images/${fileName}`,
+const safeFolder =
+    requestedFolder || 'home-icons';
+
+const generateResponsive =
+    String(req.body.generateResponsive || '').toLowerCase() === 'true';
+
+const originalBaseName =
+    path.basename(
+        req.file.originalname,
+        path.extname(req.file.originalname)
+    )
+    .toLowerCase()
+    .replace(/[^a-z0-9-_]/g, '-')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '') || 'image';
+
+const uploadToSupabase = async (
+    storagePath,
+    buffer,
+    contentType
+) => {
+
+    await axios.post(
+        `${SUPABASE_URL}/storage/v1/object/catus-images/${storagePath}`,
+        buffer,
+        {
+            headers: {
+                Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
+                apikey: SUPABASE_SECRET_KEY,
+                'Content-Type': contentType
+            },
+            maxBodyLength: Infinity
+        }
+    );
+
+    return `${SUPABASE_URL}/storage/v1/object/public/catus-images/${storagePath}`;
+};
+
+
+const uniqueName =
+    `${Date.now()}-${originalBaseName}`;
+
+
+// ==========================================
+// NORMAL IMAGE UPLOAD
+// ==========================================
+
+if (!generateResponsive) {
+
+    const fileName =
+        `${safeFolder}/${uniqueName}${extension}`;
+
+    const imageUrl =
+        await uploadToSupabase(
+            fileName,
             req.file.buffer,
-            {
-                headers: {
-    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
-    apikey: SUPABASE_SECRET_KEY,
-    'Content-Type': req.file.mimetype
-},
-                maxBodyLength: Infinity
-            }
+            req.file.mimetype
         );
 
-        const imageUrl =
-            `${SUPABASE_URL}/storage/v1/object/public/catus-images/${fileName}`;
+    return res.json({
+        success: true,
+        imageUrl
+    });
+}
 
-        return res.json({
-            success: true,
-            imageUrl: imageUrl
-        });
+
+// ==========================================
+// PRODUCT RESPONSIVE IMAGE UPLOAD
+// 240 / 480 / 800 WEBP
+// ==========================================
+
+const sizes = [240, 480, 800];
+
+const responsiveUrls = {};
+
+for (const size of sizes) {
+
+    const optimizedBuffer =
+        await sharp(req.file.buffer)
+            .rotate()
+            .resize(size, size, {
+                fit: 'cover',
+                position: 'centre'
+            })
+            .webp({
+                quality: 88,
+                effort: 5
+            })
+            .toBuffer();
+
+    const responsiveFileName =
+        `${safeFolder}/${uniqueName}-${size}.webp`;
+
+    responsiveUrls[size] =
+        await uploadToSupabase(
+            responsiveFileName,
+            optimizedBuffer,
+            'image/webp'
+        );
+}
+
+
+return res.json({
+    success: true,
+
+    // Existing admin code-ku compatible
+    imageUrl: responsiveUrls[800],
+
+    imageUrl240: responsiveUrls[240],
+    imageUrl480: responsiveUrls[480],
+    imageUrl800: responsiveUrls[800]
+});
 
     } catch (error) {
 
@@ -968,6 +1064,10 @@ async function deleteSupabaseImage(imageUrl) {
             process.env.SUPABASE_SERVICE_KEY ||
             '';
 
+        if (!SUPABASE_URL || !SUPABASE_SECRET_KEY) {
+            return;
+        }
+
         const publicPrefix =
             `${SUPABASE_URL}/storage/v1/object/public/catus-images/`;
 
@@ -975,24 +1075,64 @@ async function deleteSupabaseImage(imageUrl) {
             return;
         }
 
-        const filePath = imageUrl.substring(publicPrefix.length);
+        const filePath =
+            imageUrl.substring(publicPrefix.length);
 
-        await axios.delete(
-            `${SUPABASE_URL}/storage/v1/object/catus-images/${filePath}`,
-            {
-                headers: {
-                    Authorization: `Bearer ${SUPABASE_SECRET_KEY}`,
-                    apikey: SUPABASE_SECRET_KEY
-                }
+        let filesToDelete = [filePath];
+
+        // Responsive product image:
+        // DB stores -800.webp
+        // Delete 240 / 480 / 800 together
+        if (/-800\.webp$/i.test(filePath)) {
+
+            const basePath =
+                filePath.replace(/-800\.webp$/i, '');
+
+            filesToDelete = [
+                `${basePath}-240.webp`,
+                `${basePath}-480.webp`,
+                `${basePath}-800.webp`
+            ];
+        }
+
+        for (const pathToDelete of filesToDelete) {
+
+            try {
+
+                await axios.delete(
+                    `${SUPABASE_URL}/storage/v1/object/catus-images/${pathToDelete}`,
+                    {
+                        headers: {
+                            Authorization:
+                                `Bearer ${SUPABASE_SECRET_KEY}`,
+                            apikey:
+                                SUPABASE_SECRET_KEY
+                        }
+                    }
+                );
+
+                console.log(
+                    'Old Supabase image deleted:',
+                    pathToDelete
+                );
+
+            } catch (deleteError) {
+
+                console.error(
+                    'Supabase image variant delete failed:',
+                    pathToDelete,
+                    deleteError.response?.data ||
+                    deleteError.message
+                );
             }
-        );
-
-        console.log('Old Supabase image deleted:', filePath);
+        }
 
     } catch (error) {
+
         console.error(
             'Old Supabase image delete failed:',
-            error.response?.data || error.message
+            error.response?.data ||
+            error.message
         );
     }
 }
