@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const bcrypt = require('bcryptjs');
+const jwt = require('jsonwebtoken');
 const crypto = require('crypto');
 const Razorpay = require('razorpay');
 const multer = require('multer');
@@ -878,6 +879,39 @@ const upload = multer({
     }
 });
 
+// ==========================================
+// TECHNICIAN WORK PROOF MEDIA UPLOAD
+// ==========================================
+const technicianMediaUpload = multer({
+    storage: multer.memoryStorage(),
+
+    limits: {
+        fileSize: 30 * 1024 * 1024 // 30 MB max per file
+    },
+
+    fileFilter: (req, file, cb) => {
+
+        const allowedMimeTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+            'video/mp4',
+            'video/webm'
+        ];
+
+        if (!allowedMimeTypes.includes(file.mimetype)) {
+
+            return cb(
+                new Error(
+                    'Only JPG, PNG, WebP, MP4 and WebM files are allowed.'
+                )
+            );
+        }
+
+        cb(null, true);
+    }
+});
+
 app.post('/api/upload-image', upload.single('image'), async (req, res) => {
     try {
 
@@ -1136,6 +1170,465 @@ async function deleteSupabaseImage(imageUrl) {
         );
     }
 }
+
+// ==========================================
+// TECHNICIAN SET / RESET PASSWORD WITH OTP
+// ==========================================
+app.post('/api/technicians/set-password', async (req, res) => {
+
+    try {
+
+        const accessToken =
+            String(req.body.accessToken || '').trim();
+
+        const phone =
+            String(req.body.phone || '')
+                .replace(/\D/g, '')
+                .slice(-10);
+
+        const password =
+            String(req.body.password || '');
+
+        if (!accessToken) {
+            return res.status(400).json({
+                success: false,
+                message: 'OTP verification token is missing.'
+            });
+        }
+
+        if (!/^[6-9]\d{9}$/.test(phone)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Enter a valid mobile number.'
+            });
+        }
+
+        if (password.length < 6) {
+            return res.status(400).json({
+                success: false,
+                message: 'Password must be at least 6 characters.'
+            });
+        }
+
+        // ==========================================
+        // VERIFY MSG91 OTP ACCESS TOKEN
+        // ==========================================
+
+        const verificationData =
+            await verifyMsg91AccessToken(accessToken);
+
+        const verifiedPhone =
+            extractVerifiedPhoneFromMsg91(
+                verificationData,
+                accessToken
+            );
+
+        if (!verifiedPhone) {
+            return res.status(401).json({
+                success: false,
+                message: 'Unable to verify mobile number.'
+            });
+        }
+
+        if (verifiedPhone !== phone) {
+            return res.status(401).json({
+                success: false,
+                message:
+                    'OTP verification does not match this mobile number.'
+            });
+        }
+
+        // ==========================================
+        // CHECK TECHNICIAN
+        // ==========================================
+
+        const checkQuery = `
+            SELECT
+                technician_id,
+                name,
+                phone,
+                status
+            FROM public.technicians
+            WHERE phone = ?
+            LIMIT 1
+        `;
+
+        db.query(
+            checkQuery,
+            [phone],
+            async (checkErr, rows) => {
+
+                if (checkErr) {
+
+                    console.error(
+                        'Technician Password Check Error:',
+                        checkErr
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to verify technician account.'
+                    });
+                }
+
+                if (!rows || rows.length === 0) {
+                    return res.status(404).json({
+                        success: false,
+                        message:
+                            'Technician account not found.'
+                    });
+                }
+
+                const technician = rows[0];
+
+                if (technician.status !== 'Active') {
+
+                    return res.status(403).json({
+                        success: false,
+                        message:
+                            technician.status === 'Pending'
+                                ? 'Your technician account is waiting for Cerood approval.'
+                                : 'Your technician account is not active.'
+                    });
+                }
+
+                try {
+
+                    const hashedPassword =
+                        await bcrypt.hash(
+                            password,
+                            12
+                        );
+
+                    const updateQuery = `
+                        UPDATE public.technicians
+                        SET
+                            password = ?,
+                            updated_at = CURRENT_TIMESTAMP
+                        WHERE technician_id = ?
+                        RETURNING
+                            technician_id,
+                            name,
+                            phone,
+                            status
+                    `;
+
+                    db.query(
+                        updateQuery,
+                        [
+                            hashedPassword,
+                            technician.technician_id
+                        ],
+                        (updateErr, updatedRows) => {
+
+                            if (updateErr) {
+
+                                console.error(
+                                    'Technician Password Update Error:',
+                                    updateErr
+                                );
+
+                                return res.status(500).json({
+                                    success: false,
+                                    message:
+                                        'Unable to save technician password.'
+                                });
+                            }
+
+                            return res.json({
+                                success: true,
+                                message:
+                                    'Technician password created successfully.',
+                                technician:
+                                    updatedRows && updatedRows[0]
+                                        ? updatedRows[0]
+                                        : {
+                                            technician_id:
+                                                technician.technician_id,
+                                            name:
+                                                technician.name,
+                                            phone,
+                                            status:
+                                                technician.status
+                                        }
+                            });
+                        }
+                    );
+
+                } catch (hashError) {
+
+                    console.error(
+                        'Technician Password Hash Error:',
+                        hashError
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to create technician password.'
+                    });
+                }
+            }
+        );
+
+    } catch (error) {
+
+        console.error(
+            'Technician Set Password Error:',
+            error.response?.data ||
+            error.message
+        );
+
+        return res.status(401).json({
+            success: false,
+            message:
+                'OTP verification failed. Please verify OTP again.'
+        });
+    }
+});
+
+// ==========================================
+// TECHNICIAN JWT AUTH MIDDLEWARE
+// ==========================================
+function authenticateTechnician(req, res, next) {
+
+    const authHeader =
+        String(req.headers.authorization || '').trim();
+
+    if (
+        !authHeader ||
+        !authHeader.startsWith('Bearer ')
+    ) {
+        return res.status(401).json({
+            success: false,
+            message: 'Technician login required.'
+        });
+    }
+
+    const token =
+        authHeader.substring(7).trim();
+
+    if (!token) {
+        return res.status(401).json({
+            success: false,
+            message: 'Technician authentication token is missing.'
+        });
+    }
+
+    const technicianJwtSecret =
+        String(
+            process.env.TECHNICIAN_JWT_SECRET || ''
+        ).trim();
+
+    if (!technicianJwtSecret) {
+        console.error(
+            'TECHNICIAN_JWT_SECRET is not configured.'
+        );
+
+        return res.status(500).json({
+            success: false,
+            message: 'Technician authentication is not configured.'
+        });
+    }
+
+    try {
+
+        const decoded =
+            jwt.verify(
+                token,
+                technicianJwtSecret
+            );
+
+        if (
+            !decoded ||
+            decoded.role !== 'technician' ||
+            !decoded.technician_id
+        ) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid technician authentication token.'
+            });
+        }
+
+        req.technician = {
+            technician_id:
+                String(decoded.technician_id),
+            phone:
+                String(decoded.phone || ''),
+            role:
+                decoded.role
+        };
+
+        next();
+
+    } catch (error) {
+
+        return res.status(401).json({
+            success: false,
+            message:
+                error.name === 'TokenExpiredError'
+                    ? 'Technician session expired. Please login again.'
+                    : 'Invalid technician authentication token.'
+        });
+    }
+}
+
+// ==========================================
+// TECHNICIAN PARTNER LOGIN
+// ==========================================
+app.post('/api/technicians/login', (req, res) => {
+
+    const phone = String(req.body.phone || '')
+        .replace(/\D/g, '')
+        .slice(-10);
+
+    const password = String(req.body.password || '');
+
+    if (!/^[6-9]\d{9}$/.test(phone) || !password) {
+        return res.status(400).json({
+            success: false,
+            message: 'Enter a valid mobile number and password.'
+        });
+    }
+
+    const query = `
+        SELECT
+            technician_id,
+            name,
+            phone,
+            password,
+            status,
+            specialization,
+            district,
+            city,
+            profile_photo_url
+        FROM public.technicians
+        WHERE phone = ?
+        LIMIT 1
+    `;
+
+    db.query(query, [phone], async (err, rows) => {
+
+        if (err) {
+            console.error('Technician Login Error:', err);
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to login right now.'
+            });
+        }
+
+        if (!rows || rows.length === 0) {
+            return res.status(401).json({
+                success: false,
+                message: 'Invalid mobile number or password.'
+            });
+        }
+
+        const technician = rows[0];
+
+        if (technician.status !== 'Active') {
+            return res.status(403).json({
+                success: false,
+                message:
+                    technician.status === 'Pending'
+                        ? 'Your technician account is waiting for Cerood approval.'
+                        : 'Your technician account is not active.'
+            });
+        }
+
+        if (!technician.password) {
+            return res.status(403).json({
+                success: false,
+                code: 'PASSWORD_NOT_SET',
+                message: 'Create your technician password before login.'
+            });
+        }
+
+        try {
+
+            const passwordMatch =
+                await bcrypt.compare(
+                    password,
+                    technician.password
+                );
+
+            if (!passwordMatch) {
+                return res.status(401).json({
+                    success: false,
+                    message: 'Invalid mobile number or password.'
+                });
+            }
+
+            db.query(
+                `
+                    UPDATE public.technicians
+                    SET last_login_at = CURRENT_TIMESTAMP
+                    WHERE technician_id = ?
+                `,
+                [technician.technician_id],
+                (updateErr) => {
+                    if (updateErr) {
+                        console.error(
+                            'Technician Last Login Update Error:',
+                            updateErr
+                        );
+                    }
+                }
+            );
+
+            delete technician.password;
+
+const technicianJwtSecret =
+    String(
+        process.env.TECHNICIAN_JWT_SECRET || ''
+    ).trim();
+
+if (!technicianJwtSecret) {
+    console.error(
+        'TECHNICIAN_JWT_SECRET is not configured.'
+    );
+
+    return res.status(500).json({
+        success: false,
+        message: 'Technician authentication is not configured.'
+    });
+}
+
+const token = jwt.sign(
+    {
+        technician_id: technician.technician_id,
+        phone: technician.phone,
+        role: 'technician'
+    },
+    technicianJwtSecret,
+    {
+        expiresIn: '7d'
+    }
+);
+
+return res.json({
+    success: true,
+    message: 'Login successful.',
+    token,
+    technician
+});
+
+        } catch (error) {
+
+            console.error(
+                'Technician Password Compare Error:',
+                error
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to login right now.'
+            });
+        }
+    });
+});
 
 // ==========================================
 // TECHNICIAN PARTNER REGISTRATION
@@ -3945,6 +4438,1080 @@ const query = `
     });
 });
 
+// ==========================================
+// TECHNICIAN - MY ASSIGNED ORDERS
+// JWT PROTECTED
+// ==========================================
+app.get(
+    '/api/technicians/orders',
+    authenticateTechnician,
+    (req, res) => {
+
+        const technicianId =
+            String(
+                req.technician.technician_id || ''
+            ).trim();
+
+        // Verify technician still exists + Active
+        const technicianQuery = `
+            SELECT
+                technician_id,
+                name,
+                phone,
+                status
+            FROM public.technicians
+            WHERE technician_id = ?
+            LIMIT 1
+        `;
+
+        db.query(
+            technicianQuery,
+            [technicianId],
+            (techErr, technicians) => {
+
+                if (techErr) {
+                    console.error(
+                        'Technician Orders - Technician Check Error:',
+                        techErr
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message: 'Unable to verify technician.'
+                    });
+                }
+
+                if (
+                    !technicians ||
+                    technicians.length === 0
+                ) {
+                    return res.status(404).json({
+                        success: false,
+                        message: 'Technician account not found.'
+                    });
+                }
+
+                const technician = technicians[0];
+
+                if (technician.status !== 'Active') {
+                    return res.status(403).json({
+                        success: false,
+                        message:
+                            'Technician account is not active.'
+                    });
+                }
+
+                const ordersQuery = `
+                    SELECT *
+                    FROM public.orders
+                    WHERE technician_id = ?
+                      AND COALESCE(is_deleted, 0) = 0
+                    ORDER BY id DESC
+                `;
+
+                db.query(
+                    ordersQuery,
+                    [technicianId],
+                    (ordersErr, orders) => {
+
+                        if (ordersErr) {
+                            console.error(
+                                'Technician Assigned Orders Error:',
+                                ordersErr
+                            );
+
+                            return res.status(500).json({
+                                success: false,
+                                message:
+                                    'Unable to load assigned orders.'
+                            });
+                        }
+
+                        return res.json({
+                            success: true,
+
+                            technician: {
+                                technician_id:
+                                    technician.technician_id,
+                                name:
+                                    technician.name
+                            },
+
+                            total:
+                                orders
+                                    ? orders.length
+                                    : 0,
+
+                            orders:
+                                orders || []
+                        });
+                    }
+                );
+            }
+        );
+    }
+);
+
+// ==========================================
+// TECHNICIAN - SINGLE ASSIGNED ORDER
+// JWT PROTECTED
+// ==========================================
+app.get(
+    '/api/technicians/orders/:orderId',
+    authenticateTechnician,
+    (req, res) => {
+
+        const technicianId =
+            String(
+                req.technician.technician_id || ''
+            ).trim();
+
+        const orderId =
+            String(
+                req.params.orderId || ''
+            ).trim();
+
+
+        if (!orderId) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Order ID is required.'
+            });
+        }
+
+
+        // First confirm technician is still Active
+        const technicianQuery = `
+            SELECT
+                technician_id,
+                status
+            FROM public.technicians
+            WHERE technician_id = ?
+            LIMIT 1
+        `;
+
+
+        db.query(
+            technicianQuery,
+            [technicianId],
+            (techErr, technicians) => {
+
+                if (techErr) {
+
+                    console.error(
+                        'Technician Order Check Error:',
+                        techErr
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to verify technician.'
+                    });
+                }
+
+
+                if (
+                    !technicians ||
+                    technicians.length === 0
+                ) {
+
+                    return res.status(404).json({
+                        success: false,
+                        message:
+                            'Technician account not found.'
+                    });
+                }
+
+
+                if (
+                    technicians[0].status !== 'Active'
+                ) {
+
+                    return res.status(403).json({
+                        success: false,
+                        message:
+                            'Technician account is not active.'
+                    });
+                }
+
+
+                // IMPORTANT:
+                // Order must belong to logged-in technician
+                const orderQuery = `
+                    SELECT *
+                    FROM public.orders
+                    WHERE order_id = ?
+                      AND technician_id = ?
+                      AND COALESCE(is_deleted, 0) = 0
+                    LIMIT 1
+                `;
+
+
+                db.query(
+                    orderQuery,
+                    [
+                        orderId,
+                        technicianId
+                    ],
+                    (orderErr, orders) => {
+
+                        if (orderErr) {
+
+                            console.error(
+                                'Technician Single Order Error:',
+                                orderErr
+                            );
+
+                            return res.status(500).json({
+                                success: false,
+                                message:
+                                    'Unable to load order.'
+                            });
+                        }
+
+
+                        if (
+                            !orders ||
+                            orders.length === 0
+                        ) {
+
+                            return res.status(404).json({
+                                success: false,
+                                message:
+                                    'Order not found or not assigned to you.'
+                            });
+                        }
+
+
+                        return res.json({
+                            success: true,
+                            order: orders[0]
+                        });
+                    }
+                );
+            }
+        );
+    }
+);
+
+// ==========================================
+// TECHNICIAN - UPLOAD WORK PROOF
+// JWT PROTECTED
+// ==========================================
+app.post(
+    '/api/technicians/orders/:orderId/work-proof',
+
+    authenticateTechnician,
+
+    technicianMediaUpload.fields([
+        {
+            name: 'before_photo',
+            maxCount: 1
+        },
+        {
+            name: 'after_photo',
+            maxCount: 1
+        },
+        {
+            name: 'work_video',
+            maxCount: 1
+        }
+    ]),
+
+    async (req, res) => {
+
+        try {
+
+            const technicianId =
+                String(
+                    req.technician.technician_id || ''
+                ).trim();
+
+            const orderId =
+                String(
+                    req.params.orderId || ''
+                ).trim();
+
+
+            if (!orderId) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: 'Order ID is required.'
+                });
+            }
+
+
+            const beforePhoto =
+                req.files?.before_photo?.[0] || null;
+
+            const afterPhoto =
+                req.files?.after_photo?.[0] || null;
+
+            const workVideo =
+                req.files?.work_video?.[0] || null;
+
+            const technicianNote =
+                String(
+                    req.body.technician_note || ''
+                ).trim();
+
+
+            if (
+                !beforePhoto &&
+                !afterPhoto &&
+                !workVideo &&
+                !technicianNote
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Upload at least one work proof or enter a note.'
+                });
+            }
+
+
+            // ==========================================
+            // FIELD TYPE SECURITY
+            // ==========================================
+
+            if (
+                beforePhoto &&
+                !beforePhoto.mimetype.startsWith('image/')
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Before photo must be an image.'
+                });
+            }
+
+
+            if (
+                afterPhoto &&
+                !afterPhoto.mimetype.startsWith('image/')
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'After photo must be an image.'
+                });
+            }
+
+
+            if (
+                workVideo &&
+                ![
+                    'video/mp4',
+                    'video/webm'
+                ].includes(workVideo.mimetype)
+            ) {
+
+                return res.status(400).json({
+                    success: false,
+                    message:
+                        'Work video must be MP4 or WebM.'
+                });
+            }
+
+
+            // ==========================================
+            // VERIFY ACTIVE TECHNICIAN + ORDER OWNERSHIP
+            // ==========================================
+
+            const verifyQuery = `
+                SELECT
+                    o.order_id,
+                    o.technician_id,
+                    t.status AS technician_status
+                FROM public.orders o
+
+                JOIN public.technicians t
+                    ON t.technician_id = o.technician_id
+
+                WHERE o.order_id = ?
+                  AND o.technician_id = ?
+                  AND COALESCE(o.is_deleted, 0) = 0
+
+                LIMIT 1
+            `;
+
+
+            db.query(
+                verifyQuery,
+                [
+                    orderId,
+                    technicianId
+                ],
+                async (verifyErr, rows) => {
+
+                    if (verifyErr) {
+
+                        console.error(
+                            'Work Proof Order Verify Error:',
+                            verifyErr
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            message:
+                                'Unable to verify service order.'
+                        });
+                    }
+
+
+                    if (
+                        !rows ||
+                        rows.length === 0
+                    ) {
+
+                        return res.status(404).json({
+                            success: false,
+                            message:
+                                'Order not found or not assigned to you.'
+                        });
+                    }
+
+
+                    if (
+                        rows[0].technician_status !==
+                        'Active'
+                    ) {
+
+                        return res.status(403).json({
+                            success: false,
+                            message:
+                                'Technician account is not active.'
+                        });
+                    }
+
+
+                    // ==========================================
+                    // SUPABASE CONFIG
+                    // ==========================================
+
+                    const SUPABASE_URL =
+                        String(
+                            process.env.SUPABASE_URL ||
+                            process.env.PROJECT_URL ||
+                            ''
+                        ).replace(
+                            /\/rest\/v1\/?$/,
+                            ''
+                        );
+
+
+                    const SUPABASE_SECRET_KEY =
+                        process.env.SUPABASE_SECRET_KEY ||
+                        process.env.SUPABASE_SERVICE_ROLE_KEY ||
+                        process.env.SUPABASE_SERVICE_KEY ||
+                        '';
+
+
+                    if (
+                        !SUPABASE_URL ||
+                        !SUPABASE_SECRET_KEY
+                    ) {
+
+                        return res.status(500).json({
+                            success: false,
+                            message:
+                                'Storage configuration is missing.'
+                        });
+                    }
+
+
+                    // ==========================================
+                    // SAFE STORAGE PATH
+                    // ==========================================
+
+                    const safeTechnicianId =
+                        technicianId.replace(
+                            /[^a-zA-Z0-9-_]/g,
+                            '-'
+                        );
+
+                    const safeOrderId =
+                        orderId.replace(
+                            /[^a-zA-Z0-9-_]/g,
+                            '-'
+                        );
+
+
+                    const baseFolder =
+                        `technician-work/${safeTechnicianId}/${safeOrderId}`;
+
+
+                    async function uploadBuffer(
+                        storagePath,
+                        buffer,
+                        contentType
+                    ) {
+
+                        await axios.post(
+                            `${SUPABASE_URL}/storage/v1/object/catus-images/${storagePath}`,
+                            buffer,
+                            {
+                                headers: {
+                                    Authorization:
+                                        `Bearer ${SUPABASE_SECRET_KEY}`,
+
+                                    apikey:
+                                        SUPABASE_SECRET_KEY,
+
+                                    'Content-Type':
+                                        contentType
+                                },
+
+                                maxBodyLength:
+                                    Infinity
+                            }
+                        );
+
+
+                        return (
+                            `${SUPABASE_URL}` +
+                            `/storage/v1/object/public/` +
+                            `catus-images/${storagePath}`
+                        );
+                    }
+
+
+                    let beforePhotoUrl = null;
+                    let afterPhotoUrl = null;
+                    let workVideoUrl = null;
+
+
+                    // ==========================================
+                    // BEFORE PHOTO -> WEBP
+                    // ==========================================
+
+                    if (beforePhoto) {
+
+                        const optimizedBefore =
+                            await sharp(
+                                beforePhoto.buffer
+                            )
+                                .rotate()
+                                .resize({
+                                    width: 1600,
+                                    height: 1600,
+                                    fit: 'inside',
+                                    withoutEnlargement: true
+                                })
+                                .webp({
+                                    quality: 82
+                                })
+                                .toBuffer();
+
+
+                        beforePhotoUrl =
+                            await uploadBuffer(
+                                `${baseFolder}/${Date.now()}-before.webp`,
+                                optimizedBefore,
+                                'image/webp'
+                            );
+                    }
+
+
+                    // ==========================================
+                    // AFTER PHOTO -> WEBP
+                    // ==========================================
+
+                    if (afterPhoto) {
+
+                        const optimizedAfter =
+                            await sharp(
+                                afterPhoto.buffer
+                            )
+                                .rotate()
+                                .resize({
+                                    width: 1600,
+                                    height: 1600,
+                                    fit: 'inside',
+                                    withoutEnlargement: true
+                                })
+                                .webp({
+                                    quality: 82
+                                })
+                                .toBuffer();
+
+
+                        afterPhotoUrl =
+                            await uploadBuffer(
+                                `${baseFolder}/${Date.now()}-after.webp`,
+                                optimizedAfter,
+                                'image/webp'
+                            );
+                    }
+
+
+                    // ==========================================
+                    // VIDEO
+                    // ==========================================
+
+                    if (workVideo) {
+
+                        const videoExtension =
+                            workVideo.mimetype ===
+                            'video/webm'
+                                ? 'webm'
+                                : 'mp4';
+
+
+                        workVideoUrl =
+                            await uploadBuffer(
+                                `${baseFolder}/${Date.now()}-work.${videoExtension}`,
+                                workVideo.buffer,
+                                workVideo.mimetype
+                            );
+                    }
+
+
+                    // ==========================================
+                    // SAVE / UPDATE WORK PROOF
+                    // ==========================================
+
+                    const saveQuery = `
+                        INSERT INTO public.technician_work_proofs
+                        (
+                            order_id,
+                            technician_id,
+                            before_photo_url,
+                            after_photo_url,
+                            work_video_url,
+                            technician_note,
+                            status,
+                            created_at,
+                            updated_at
+                        )
+
+                        VALUES (
+                            ?, ?, ?, ?, ?, ?, 'Submitted',
+                            CURRENT_TIMESTAMP,
+                            CURRENT_TIMESTAMP
+                        )
+
+                        ON CONFLICT (order_id)
+
+                        DO UPDATE SET
+
+                            technician_id =
+                                EXCLUDED.technician_id,
+
+                            before_photo_url =
+                                COALESCE(
+                                    EXCLUDED.before_photo_url,
+                                    technician_work_proofs.before_photo_url
+                                ),
+
+                            after_photo_url =
+                                COALESCE(
+                                    EXCLUDED.after_photo_url,
+                                    technician_work_proofs.after_photo_url
+                                ),
+
+                            work_video_url =
+                                COALESCE(
+                                    EXCLUDED.work_video_url,
+                                    technician_work_proofs.work_video_url
+                                ),
+
+                            technician_note =
+                                CASE
+                                    WHEN EXCLUDED.technician_note IS NOT NULL
+                                         AND EXCLUDED.technician_note <> ''
+                                    THEN EXCLUDED.technician_note
+                                    ELSE technician_work_proofs.technician_note
+                                END,
+
+                            status = 'Submitted',
+
+                            updated_at =
+                                CURRENT_TIMESTAMP
+
+                        RETURNING *
+                    `;
+
+
+                    db.query(
+                        saveQuery,
+                        [
+                            orderId,
+                            technicianId,
+                            beforePhotoUrl,
+                            afterPhotoUrl,
+                            workVideoUrl,
+                            technicianNote || null
+                        ],
+                        (saveErr, savedRows) => {
+
+                            if (saveErr) {
+
+                                console.error(
+                                    'Work Proof Save Error:',
+                                    saveErr
+                                );
+
+                                return res.status(500).json({
+                                    success: false,
+                                    message:
+                                        'Unable to save work proof.'
+                                });
+                            }
+
+
+                            return res.json({
+                                success: true,
+                                message:
+                                    'Work proof submitted successfully.',
+                                work_proof:
+                                    savedRows?.[0] || null
+                            });
+                        }
+                    );
+                }
+            );
+
+        } catch (error) {
+
+            console.error(
+                'Technician Work Proof Upload Error:',
+                error.response?.data ||
+                error.message
+            );
+
+
+            return res.status(500).json({
+                success: false,
+                message:
+                    'Work proof upload failed.'
+            });
+        }
+    }
+);
+
+// ==========================================
+// TECHNICIAN - GET WORK PROOF
+// JWT PROTECTED
+// ==========================================
+app.get(
+    '/api/technicians/orders/:orderId/work-proof',
+    authenticateTechnician,
+    (req, res) => {
+
+        const technicianId =
+            String(
+                req.technician.technician_id || ''
+            ).trim();
+
+        const orderId =
+            String(
+                req.params.orderId || ''
+            ).trim();
+
+
+        if (!orderId) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Order ID is required.'
+            });
+        }
+
+
+        // ==========================================
+        // VERIFY ORDER BELONGS TO TECHNICIAN
+        // ==========================================
+
+        const orderCheckQuery = `
+            SELECT
+                order_id,
+                technician_id
+            FROM public.orders
+            WHERE order_id = ?
+              AND technician_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+            LIMIT 1
+        `;
+
+
+        db.query(
+            orderCheckQuery,
+            [
+                orderId,
+                technicianId
+            ],
+            (orderErr, orderRows) => {
+
+                if (orderErr) {
+
+                    console.error(
+                        'Work Proof Order Check Error:',
+                        orderErr
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to verify service order.'
+                    });
+                }
+
+
+                if (
+                    !orderRows ||
+                    orderRows.length === 0
+                ) {
+
+                    return res.status(404).json({
+                        success: false,
+                        message:
+                            'Order not found or not assigned to you.'
+                    });
+                }
+
+
+                // ==========================================
+                // GET WORK PROOF
+                // ==========================================
+
+                const proofQuery = `
+                    SELECT
+                        id,
+                        order_id,
+                        technician_id,
+                        before_photo_url,
+                        after_photo_url,
+                        work_video_url,
+                        technician_note,
+                        status,
+                        created_at,
+                        updated_at
+                    FROM public.technician_work_proofs
+                    WHERE order_id = ?
+                      AND technician_id = ?
+                    LIMIT 1
+                `;
+
+
+                db.query(
+                    proofQuery,
+                    [
+                        orderId,
+                        technicianId
+                    ],
+                    (proofErr, proofRows) => {
+
+                        if (proofErr) {
+
+                            console.error(
+                                'Get Work Proof Error:',
+                                proofErr
+                            );
+
+                            return res.status(500).json({
+                                success: false,
+                                message:
+                                    'Unable to load work proof.'
+                            });
+                        }
+
+
+                        return res.json({
+                            success: true,
+                            work_proof:
+                                proofRows &&
+                                proofRows.length > 0
+                                    ? proofRows[0]
+                                    : null
+                        });
+                    }
+                );
+            }
+        );
+    }
+);
+
+// ==========================================
+// ADMIN - TECHNICIAN WORK PROOFS
+// ==========================================
+app.get(
+    '/api/admin/technician-work-proofs',
+    requireAdminAuth,
+    (req, res) => {
+
+        const query = `
+            SELECT
+                wp.id,
+                wp.order_id,
+                wp.technician_id,
+                wp.before_photo_url,
+                wp.after_photo_url,
+                wp.work_video_url,
+                wp.technician_note,
+                wp.status,
+                wp.created_at,
+                wp.updated_at,
+
+                t.name AS technician_name,
+                t.phone AS technician_phone,
+
+                o.status AS order_status
+
+            FROM public.technician_work_proofs wp
+
+            LEFT JOIN public.technicians t
+                ON t.technician_id = wp.technician_id
+
+            LEFT JOIN public.orders o
+                ON o.order_id = wp.order_id
+
+            ORDER BY
+                CASE
+                    WHEN wp.status = 'Submitted' THEN 1
+                    WHEN wp.status = 'Rejected' THEN 2
+                    WHEN wp.status = 'Approved' THEN 3
+                    ELSE 4
+                END,
+                wp.updated_at DESC
+        `;
+
+
+        db.query(
+            query,
+            [],
+            (error, rows) => {
+
+                if (error) {
+
+                    console.error(
+                        'Admin Work Proofs Error:',
+                        error
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to load technician work proofs.'
+                    });
+                }
+
+
+                return res.json({
+                    success: true,
+                    total:
+                        rows
+                            ? rows.length
+                            : 0,
+                    work_proofs:
+                        rows || []
+                });
+            }
+        );
+    }
+);
+
+// ==========================================
+// ADMIN - UPDATE TECHNICIAN WORK PROOF STATUS
+// APPROVE / REJECT
+// ==========================================
+app.patch(
+    '/api/admin/technician-work-proofs/:proofId/status',
+    requireAdminAuth,
+    (req, res) => {
+
+        const proofId =
+            String(req.params.proofId || '').trim();
+
+        const status =
+            String(req.body.status || '').trim();
+
+        if (!proofId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Work proof ID is required.'
+            });
+        }
+
+        if (
+            status !== 'Approved' &&
+            status !== 'Rejected'
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Status must be Approved or Rejected.'
+            });
+        }
+
+        const query = `
+            UPDATE public.technician_work_proofs
+            SET
+                status = ?,
+                updated_at = CURRENT_TIMESTAMP
+            WHERE id = ?
+            RETURNING
+                id,
+                order_id,
+                technician_id,
+                before_photo_url,
+                after_photo_url,
+                work_video_url,
+                technician_note,
+                status,
+                created_at,
+                updated_at
+        `;
+
+        db.query(
+            query,
+            [
+                status,
+                proofId
+            ],
+            (error, rows) => {
+
+                if (error) {
+                    console.error(
+                        'Admin Work Proof Status Update Error:',
+                        error
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to update work proof status.'
+                    });
+                }
+
+                if (
+                    !rows ||
+                    rows.length === 0
+                ) {
+                    return res.status(404).json({
+                        success: false,
+                        message: 'Work proof not found.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    message:
+                        status === 'Approved'
+                            ? 'Work proof approved successfully.'
+                            : 'Work proof rejected successfully.',
+                    work_proof: rows[0]
+                });
+            }
+        );
+    }
+);
+
 app.get('/api/admin/orders', (req, res) => {
     const query = 'SELECT * FROM orders ORDER BY id DESC';
     db.query(query, (err, results) => {
@@ -3954,23 +5521,94 @@ app.get('/api/admin/orders', (req, res) => {
 });
 
 app.post('/api/admin/assign-technician-manual', (req, res) => {
-    const { order_id, technician_name, technician_phone, eta } = req.body;
+
+    const {
+        order_id,
+        technician_id,
+        technician_name,
+        technician_phone,
+        eta
+    } = req.body;
+
+
+    if (
+        !order_id ||
+        !technician_id ||
+        !technician_name ||
+        !technician_phone
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Technician assignment details are incomplete.'
+        });
+    }
+
+
     const query = `
-    UPDATE orders
-    SET technician_name = ?,
-        technician_phone = ?,
-        eta = ?,
-        status = ?,
-        assigned_at = COALESCE(
-    assigned_at,
-    CURRENT_TIMESTAMP
-)
-    WHERE order_id = ?
-`;
-    db.query(query, [technician_name, technician_phone, eta, 'Assigned', order_id], (err, result) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, message: 'Technician assigned successfully!' });
-    });
+        UPDATE public.orders
+        SET
+            technician_id = ?,
+            technician_name = ?,
+            technician_phone = ?,
+            eta = ?,
+            status = ?,
+            assigned_at = COALESCE(
+                assigned_at,
+                CURRENT_TIMESTAMP
+            )
+        WHERE order_id = ?
+        RETURNING
+            order_id,
+            technician_id,
+            technician_name,
+            technician_phone,
+            status
+    `;
+
+
+    db.query(
+        query,
+        [
+            technician_id,
+            technician_name,
+            technician_phone,
+            eta || null,
+            'Assigned',
+            order_id
+        ],
+        (err, rows) => {
+
+            if (err) {
+
+                console.error(
+                    'Manual Technician Assignment Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to assign technician.',
+                    error: err.message
+                });
+            }
+
+
+            if (!rows || rows.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: 'Order not found.'
+                });
+            }
+
+
+            return res.json({
+                success: true,
+                message: 'Technician assigned successfully!',
+                assignment: rows[0]
+            });
+        }
+    );
 });
 
 // ==========================================
