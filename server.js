@@ -5611,6 +5611,87 @@ app.get(
 );
 
 // ==========================================
+// PUBLIC - APPROVED WORK PROOFS BY SERVICE
+// ==========================================
+app.get(
+    '/api/public/work-proofs/service/:serviceId',
+    (req, res) => {
+
+        const serviceId =
+            String(
+                req.params.serviceId || ''
+            ).trim();
+
+        if (!serviceId) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Service ID is required.'
+            });
+        }
+
+        const query = `
+            SELECT
+                wp.id,
+                wp.before_photo_url,
+                wp.after_photo_url,
+                wp.work_video_url,
+                wp.technician_note,
+                wp.updated_at,
+
+                o.order_id,
+                o.product_id,
+                o.district,
+
+                t.name AS technician_name
+
+            FROM public.technician_work_proofs wp
+
+            INNER JOIN public.orders o
+                ON o.order_id = wp.order_id
+
+            LEFT JOIN public.technicians t
+                ON t.technician_id = wp.technician_id
+
+            WHERE CAST(o.product_id AS TEXT) = ?
+              AND wp.status = 'Approved'
+              AND COALESCE(o.status, '') = 'Completed'
+
+            ORDER BY wp.updated_at DESC
+
+            LIMIT 12
+        `;
+
+        db.query(
+            query,
+            [serviceId],
+            (error, rows) => {
+
+                if (error) {
+
+                    console.error(
+                        'Public Work Proofs Error:',
+                        error
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to load work proofs.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    total: rows ? rows.length : 0,
+                    work_proofs: rows || []
+                });
+            }
+        );
+    }
+);
+
+// ==========================================
 // ADMIN - UPDATE TECHNICIAN WORK PROOF STATUS
 // APPROVE / REJECT
 // ==========================================
