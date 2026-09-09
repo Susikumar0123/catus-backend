@@ -4502,12 +4502,16 @@ app.get(
                 }
 
                 const ordersQuery = `
-                    SELECT *
-                    FROM public.orders
-                    WHERE technician_id = ?
-                      AND COALESCE(is_deleted, 0) = 0
-                    ORDER BY id DESC
-                `;
+    SELECT *
+    FROM public.orders
+    WHERE technician_id = ?
+      AND COALESCE(status, '') NOT IN (
+          'Completed',
+          'Cancelled',
+          'Trash'
+      )
+    ORDER BY id DESC
+`;
 
                 db.query(
                     ordersQuery,
@@ -4639,14 +4643,14 @@ app.get(
 
                 // IMPORTANT:
                 // Order must belong to logged-in technician
-                const orderQuery = `
-                    SELECT *
-                    FROM public.orders
-                    WHERE order_id = ?
-                      AND technician_id = ?
-                      AND COALESCE(is_deleted, 0) = 0
-                    LIMIT 1
-                `;
+               const orderQuery = `
+    SELECT *
+    FROM public.orders
+    WHERE order_id = ?
+      AND technician_id = ?
+      AND COALESCE(status, '') <> 'Trash'
+    LIMIT 1
+`;
 
 
                 db.query(
@@ -4826,17 +4830,21 @@ app.post(
 
             const verifyQuery = `
                 SELECT
-                    o.order_id,
-                    o.technician_id,
-                    t.status AS technician_status
+    o.order_id,
+    o.technician_id,
+    o.status AS order_status,
+    t.status AS technician_status,
+    wp.status AS work_proof_status
                 FROM public.orders o
 
                 JOIN public.technicians t
                     ON t.technician_id = o.technician_id
+                    LEFT JOIN public.technician_work_proofs wp
+    ON wp.order_id = o.order_id
 
                 WHERE o.order_id = ?
-                  AND o.technician_id = ?
-                  AND COALESCE(o.is_deleted, 0) = 0
+  AND o.technician_id = ?
+  AND COALESCE(o.status, '') <> 'Trash'
 
                 LIMIT 1
             `;
@@ -4878,17 +4886,49 @@ app.post(
                     }
 
 
-                    if (
-                        rows[0].technician_status !==
-                        'Active'
-                    ) {
+                   if (
+    rows[0].technician_status !==
+    'Active'
+) {
+    return res.status(403).json({
+        success: false,
+        message:
+            'Technician account is not active.'
+    });
+}
 
-                        return res.status(403).json({
-                            success: false,
-                            message:
-                                'Technician account is not active.'
-                        });
-                    }
+const existingProofStatus =
+    String(
+        rows[0].work_proof_status || ''
+    ).trim();
+
+const orderStatus =
+    String(
+        rows[0].order_status || ''
+    ).trim();
+
+if (
+    existingProofStatus === 'Submitted'
+) {
+    return res.status(409).json({
+        success: false,
+        code: 'WORK_PROOF_PENDING',
+        message:
+            'Work proof already submitted. Please wait for admin approval.'
+    });
+}
+
+if (
+    existingProofStatus === 'Approved' ||
+    orderStatus === 'Completed'
+) {
+    return res.status(409).json({
+        success: false,
+        code: 'WORK_PROOF_APPROVED',
+        message:
+            'This work proof is already approved and the order is completed.'
+    });
+}
 
 
                     // ==========================================
@@ -5230,15 +5270,15 @@ app.get(
         // ==========================================
 
         const orderCheckQuery = `
-            SELECT
-                order_id,
-                technician_id
-            FROM public.orders
-            WHERE order_id = ?
-              AND technician_id = ?
-              AND COALESCE(is_deleted, 0) = 0
-            LIMIT 1
-        `;
+    SELECT
+        order_id,
+        technician_id
+    FROM public.orders
+    WHERE order_id = ?
+      AND technician_id = ?
+      AND COALESCE(status, '') <> 'Trash'
+    LIMIT 1
+`;
 
 
         db.query(
@@ -5450,33 +5490,80 @@ app.patch(
         }
 
         const query = `
-            UPDATE public.technician_work_proofs
-            SET
-                status = ?,
-                updated_at = CURRENT_TIMESTAMP
-            WHERE id = ?
-            RETURNING
-                id,
-                order_id,
-                technician_id,
-                before_photo_url,
-                after_photo_url,
-                work_video_url,
-                technician_note,
-                status,
-                created_at,
-                updated_at
+            WITH updated_proof AS (
+
+                UPDATE public.technician_work_proofs
+
+                SET
+                    status = ?,
+                    updated_at = CURRENT_TIMESTAMP
+
+                WHERE id = ?
+
+                RETURNING
+                    id,
+                    order_id,
+                    technician_id,
+                    before_photo_url,
+                    after_photo_url,
+                    work_video_url,
+                    technician_note,
+                    status,
+                    created_at,
+                    updated_at
+            ),
+
+            updated_order AS (
+
+                UPDATE public.orders o
+
+                SET
+                    status =
+                        CASE
+                            WHEN ? = 'Approved'
+                                THEN 'Completed'
+
+                            WHEN ? = 'Rejected'
+                                THEN 'Assigned'
+
+                            ELSE o.status
+                        END
+
+                WHERE o.order_id = (
+                    SELECT order_id
+                    FROM updated_proof
+                    LIMIT 1
+                )
+
+                RETURNING
+                    order_id,
+                    status
+            )
+
+            SELECT
+                up.*,
+
+                (
+                    SELECT uo.status
+                    FROM updated_order uo
+                    LIMIT 1
+                ) AS order_status
+
+            FROM updated_proof up
         `;
 
         db.query(
             query,
             [
                 status,
-                proofId
+                proofId,
+                status,
+                status
             ],
             (error, rows) => {
 
                 if (error) {
+
                     console.error(
                         'Admin Work Proof Status Update Error:',
                         error
@@ -5501,10 +5588,12 @@ app.patch(
 
                 return res.json({
                     success: true,
+
                     message:
                         status === 'Approved'
-                            ? 'Work proof approved successfully.'
-                            : 'Work proof rejected successfully.',
+                            ? 'Work proof approved and order completed successfully.'
+                            : 'Work proof rejected. Technician can resubmit proof.',
+
                     work_proof: rows[0]
                 });
             }
