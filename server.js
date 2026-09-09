@@ -5602,6 +5602,135 @@ app.patch(
 );
 
 // ==========================================
+// CUSTOMER REVIEW - ORDER DETAILS
+// ==========================================
+
+app.get('/api/customer-reviews/order/:orderId', (req, res) => {
+
+    const orderId =
+        String(req.params.orderId || '').trim();
+
+    if (!orderId) {
+        return res.status(400).json({
+            success: false,
+            message: 'Order ID is required.'
+        });
+    }
+
+    const query = `
+        SELECT
+            o.order_id,
+            o.product_id,
+            o.service_name,
+            o.customer_name,
+            o.phone,
+            o.address,
+            o.district,
+            o.pincode,
+            o.order_date,
+            o.status,
+            o.technician_id,
+            o.technician_name,
+
+            s.image_url AS product_image,
+            s.category AS service_category
+
+        FROM public.orders o
+
+        LEFT JOIN public.services s
+            ON CAST(s.service_id AS TEXT) =
+               CAST(o.product_id AS TEXT)
+
+        WHERE o.order_id = ?
+
+        LIMIT 1
+    `;
+
+    db.query(
+        query,
+        [orderId],
+        (err, rows) => {
+
+            if (err) {
+
+                console.error(
+                    'Customer Review Order Details Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to load service order.'
+                });
+            }
+
+            if (!rows || rows.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message: 'Service order not found.'
+                });
+            }
+
+            const order = rows[0];
+
+            return res.json({
+                success: true,
+
+                review_allowed:
+                    String(order.status || '')
+                        .trim()
+                        .toLowerCase() === 'completed',
+
+                order: {
+                    order_id:
+                        order.order_id,
+
+                    product_id:
+                        order.product_id,
+
+                    product_name:
+                        order.service_name,
+
+                    product_image:
+                        order.product_image || '',
+
+                    service_category:
+                        order.service_category || '',
+
+                    customer_name:
+                        order.customer_name,
+
+                    customer_phone:
+                        order.phone,
+
+                    address:
+                        order.address,
+
+                    district:
+                        order.district,
+
+                    pincode:
+                        order.pincode,
+
+                    order_date:
+                        order.order_date,
+
+                    status:
+                        order.status,
+
+                    technician_id:
+                        order.technician_id || null,
+
+                    technician_name:
+                        order.technician_name || null
+                }
+            });
+        }
+    );
+});
+
+// ==========================================
 // CUSTOMER REVIEW - SUBMIT
 // ==========================================
 
