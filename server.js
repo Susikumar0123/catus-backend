@@ -5495,9 +5495,22 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
 
             NULL AS location_price,
             TRUE AS is_available,
-            NULL AS seo_title,
-            NULL AS seo_description,
-            NULL AS content
+            (
+    s.service_name ||
+    ' Near Me | Doorstep Repair & Service'
+) AS seo_title,
+
+(
+    'Book ' ||
+    LOWER(s.service_name) ||
+    ' in ' ||
+    l.location_name ||
+    ', ' ||
+    l.district ||
+    '. Doorstep appliance service by Cerood with easy online booking and local service support.'
+) AS seo_description,
+
+NULL AS content
 
         FROM public.seo_locations l
 
