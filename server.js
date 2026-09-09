@@ -5379,6 +5379,157 @@ app.get(
 );
 
 // ==========================================
+// ADMIN - CUSTOMER REVIEWS
+// ==========================================
+app.get('/api/admin/customer-reviews', (req, res) => {
+
+    const query = `
+        SELECT
+            pr.id,
+            pr.order_id,
+            pr.service_id,
+            pr.customer_name,
+            pr.rating,
+            pr.review_text,
+            pr.created_at,
+
+            o.phone AS customer_phone,
+            o.status AS order_status,
+            o.technician_id,
+
+            s.service_name,
+
+            t.name AS technician_name,
+            t.phone AS technician_phone
+
+        FROM public.product_reviews pr
+
+        LEFT JOIN public.orders o
+            ON o.order_id = pr.order_id
+
+        LEFT JOIN public.services s
+            ON CAST(s.service_id AS TEXT) =
+               CAST(pr.service_id AS TEXT)
+
+        LEFT JOIN public.technicians t
+            ON t.technician_id = o.technician_id
+
+        ORDER BY pr.id DESC
+    `;
+
+    db.query(query, [], (err, rows) => {
+
+        if (err) {
+
+            console.error(
+                'Admin Customer Reviews Error:',
+                err
+            );
+
+            return res.status(500).json({
+                success: false,
+                message: 'Unable to load customer reviews.'
+            });
+        }
+
+        return res.json({
+            success: true,
+            total: rows ? rows.length : 0,
+            reviews: rows || []
+        });
+    });
+});
+
+// ==========================================
+// ADMIN - UPDATE CUSTOMER REVIEW MODERATION
+// VISIBLE / HIDDEN
+// ==========================================
+app.patch('/api/admin/customer-reviews/:reviewId/moderation', (req, res) => {
+
+    const reviewId =
+        String(req.params.reviewId || '').trim();
+
+    const moderationStatus =
+        String(req.body.moderation_status || '').trim();
+
+    const moderationReason =
+        String(req.body.moderation_reason || '').trim();
+
+    if (!reviewId) {
+        return res.status(400).json({
+            success: false,
+            message: 'Review ID is required.'
+        });
+    }
+
+    if (
+        moderationStatus !== 'Visible' &&
+        moderationStatus !== 'Hidden'
+    ) {
+        return res.status(400).json({
+            success: false,
+            message:
+                'Moderation status must be Visible or Hidden.'
+        });
+    }
+
+    const reason =
+        moderationStatus === 'Hidden'
+            ? moderationReason
+            : '';
+
+    const query = `
+        UPDATE public.product_reviews
+        SET
+            moderation_status = ?,
+            moderation_reason = ?
+        WHERE id = ?
+        RETURNING *
+    `;
+
+    db.query(
+        query,
+        [
+            moderationStatus,
+            reason,
+            reviewId
+        ],
+        (err, rows) => {
+
+            if (err) {
+
+                console.error(
+                    'Admin Review Moderation Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        'Unable to update review moderation.'
+                });
+            }
+
+            if (!rows || rows.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Review not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message:
+                    moderationStatus === 'Hidden'
+                        ? 'Review hidden successfully.'
+                        : 'Review restored successfully.',
+                review: rows[0]
+            });
+        }
+    );
+});
+
+// ==========================================
 // ADMIN - TECHNICIAN WORK PROOFS
 // ==========================================
 app.get(
@@ -6422,8 +6573,13 @@ app.get('/api/reviews/:service_id', (req, res) => {
 
     const serviceId = req.params.service_id;
 
-    const query =
-        'SELECT * FROM product_reviews WHERE service_id = ? ORDER BY id DESC';
+    const query = `
+    SELECT *
+    FROM public.product_reviews
+    WHERE service_id = ?
+      AND COALESCE(moderation_status, 'Visible') = 'Visible'
+    ORDER BY id DESC
+`;
 
     db.query(query, [serviceId], (err, results) => {
 
