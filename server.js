@@ -6350,6 +6350,74 @@ app.post('/api/admin/update-promo-banner', (req, res) => {
 // ==========================================
 // REVIEWS API ROUTES
 // ==========================================
+
+// ==========================================
+// CHECK WHETHER ORDER ALREADY HAS REVIEW
+// ==========================================
+
+app.get('/api/reviews/order-status/:orderId', (req, res) => {
+
+    const orderId =
+        String(req.params.orderId || '').trim();
+
+    if (!orderId) {
+
+        return res.status(400).json({
+            success: false,
+            message: 'Order ID is required.'
+        });
+    }
+
+    const query = `
+        SELECT
+            id,
+            service_id,
+            order_id,
+            customer_name,
+            rating,
+            review_text
+        FROM public.product_reviews
+        WHERE order_id = ?
+        LIMIT 1
+    `;
+
+    db.query(
+        query,
+        [orderId],
+        (err, rows) => {
+
+            if (err) {
+
+                console.error(
+                    'Review Status Check Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        'Unable to check review status.'
+                });
+            }
+
+            const review =
+                rows && rows.length > 0
+                    ? rows[0]
+                    : null;
+
+            return res.json({
+                success: true,
+
+                reviewed:
+                    Boolean(review),
+
+                review:
+                    review
+            });
+        }
+    );
+});
+
 app.get('/api/reviews/:service_id', (req, res) => {
 
     const serviceId = req.params.service_id;
