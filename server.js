@@ -5601,6 +5601,211 @@ app.patch(
     }
 );
 
+// ==========================================
+// CUSTOMER REVIEW - SUBMIT
+// ==========================================
+
+app.post('/api/customer-reviews/submit', (req, res) => {
+
+    const orderId =
+        String(req.body.order_id || '').trim();
+
+    const customerPhone =
+        String(req.body.customer_phone || '')
+            .replace(/\D/g, '')
+            .slice(-10);
+
+    const rating =
+        Number(req.body.rating);
+
+    const reviewText =
+        String(req.body.review_text || '')
+            .trim()
+            .slice(0, 1000);
+
+
+    // ==========================================
+    // BASIC VALIDATION
+    // ==========================================
+
+    if (!orderId) {
+        return res.status(400).json({
+            success: false,
+            message: 'Order ID is required.'
+        });
+    }
+
+    if (!/^[6-9]\d{9}$/.test(customerPhone)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid customer mobile number is required.'
+        });
+    }
+
+    if (
+        !Number.isInteger(rating) ||
+        rating < 1 ||
+        rating > 5
+    ) {
+        return res.status(400).json({
+            success: false,
+            message: 'Rating must be between 1 and 5.'
+        });
+    }
+
+
+    // ==========================================
+    // VERIFY COMPLETED ORDER + CUSTOMER
+    // ==========================================
+
+    const orderQuery = `
+        SELECT *
+        FROM public.orders
+        WHERE order_id = ?
+          AND status = 'Completed'
+        LIMIT 1
+    `;
+
+    db.query(
+        orderQuery,
+        [orderId],
+        (orderError, orderRows) => {
+
+            if (orderError) {
+
+                console.error(
+                    'Customer Review Order Check Error:',
+                    orderError
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to verify service order.'
+                });
+            }
+
+
+            if (!orderRows || orderRows.length === 0) {
+
+                return res.status(404).json({
+                    success: false,
+                    message:
+                        'Completed service order not found.'
+                });
+            }
+
+
+            const order = orderRows[0];
+
+            const orderPhone =
+                String(
+                    order.phone ||
+                    order.customer_phone ||
+                    order.mobile ||
+                    ''
+                )
+                    .replace(/\D/g, '')
+                    .slice(-10);
+
+
+            if (
+                !orderPhone ||
+                orderPhone !== customerPhone
+            ) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        'Mobile number does not match this order.'
+                });
+            }
+
+
+            // ==========================================
+            // SAVE REVIEW
+            // ==========================================
+
+            const insertQuery = `
+                INSERT INTO public.customer_reviews
+                (
+                    order_id,
+                    technician_id,
+                    customer_name,
+                    customer_phone,
+                    rating,
+                    review_text,
+                    status,
+                    created_at,
+                    updated_at
+                )
+                VALUES (?, ?, ?, ?, ?, ?, 'Pending',
+                        CURRENT_TIMESTAMP,
+                        CURRENT_TIMESTAMP)
+
+                ON CONFLICT (order_id)
+                DO NOTHING
+
+                RETURNING *
+            `;
+
+
+            db.query(
+                insertQuery,
+                [
+                    orderId,
+                    order.technician_id || null,
+
+                    order.customer_name ||
+                    order.name ||
+                    'Cerood Customer',
+
+                    customerPhone,
+                    rating,
+                    reviewText
+                ],
+                (reviewError, reviewRows) => {
+
+                    if (reviewError) {
+
+                        console.error(
+                            'Customer Review Submit Error:',
+                            reviewError
+                        );
+
+                        return res.status(500).json({
+                            success: false,
+                            message:
+                                'Unable to submit review.'
+                        });
+                    }
+
+
+                    if (
+                        !reviewRows ||
+                        reviewRows.length === 0
+                    ) {
+
+                        return res.status(409).json({
+                            success: false,
+                            code: 'REVIEW_ALREADY_SUBMITTED',
+                            message:
+                                'A review has already been submitted for this order.'
+                        });
+                    }
+
+
+                    return res.json({
+                        success: true,
+                        message:
+                            'Thank you! Your review has been submitted.',
+                        review: reviewRows[0]
+                    });
+                }
+            );
+        }
+    );
+});
+
 app.get('/api/admin/orders', (req, res) => {
     const query = 'SELECT * FROM orders ORDER BY id DESC';
     db.query(query, (err, results) => {
