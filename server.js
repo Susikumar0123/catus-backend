@@ -5392,6 +5392,8 @@ app.get('/api/admin/customer-reviews', (req, res) => {
             pr.rating,
             pr.review_text,
             pr.created_at,
+            pr.moderation_status,
+            pr.moderation_reason,
 
             o.phone AS customer_phone,
             o.status AS order_status,
