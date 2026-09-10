@@ -6311,7 +6311,7 @@ app.post('/api/admin/add-banner', (req, res) => {
     const { title, subtitle, image_url, product_id, bg_color, text_color, button_text } = req.body;
     const query = 'INSERT INTO hero_banners (title, subtitle, image_url, product_id, bg_color, text_color, button_text) VALUES (?, ?, ?, ?, ?, ?, ?)';
     
-    db.query(query, [title, subtitle, image_url, product_id, bg_color || '#f4f3f1', text_color || '#111', button_text || 'Book now'], (err, result) => {
+    db.query(query, [title, subtitle, image_url, product_id, bg_color || '#f4f3f1', text_color || '#111', button_text || 'Get Service'], (err, result) => {
         if (err) return res.status(500).json({ success: false, error: err.message });
         res.json({ success: true, message: 'New banner added successfully!' });
     });
@@ -6571,7 +6571,7 @@ app.post('/api/admin/update-promo-banner', (req, res) => {
                 String(image_url || '').trim(),
                 String(title || '').trim(),
                 String(tag || '').trim(),
-                String(button_text || 'Book now').trim(),
+                String(button_text || 'Get Service').trim(),
                 String(service_id || '').trim(),
                 is_active === false ? false : true
             ],
