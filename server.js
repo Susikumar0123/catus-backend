@@ -4585,6 +4585,199 @@ app.get(
 );
 
 // ==========================================
+// TECHNICIAN - ACCEPT ASSIGNED ORDER
+// JWT PROTECTED
+// ==========================================
+app.post(
+    '/api/technicians/orders/:orderId/accept',
+    authenticateTechnician,
+    (req, res) => {
+
+        const technicianId =
+            String(
+                req.technician.technician_id || ''
+            ).trim();
+
+        const orderId =
+            String(
+                req.params.orderId || ''
+            ).trim();
+
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Order ID is required.'
+            });
+        }
+
+        const query = `
+            UPDATE public.orders
+            SET
+                technician_response = 'Accepted',
+                technician_response_reason = NULL,
+                technician_responded_at = NOW(),
+                status = 'Assigned'
+            WHERE order_id = ?
+              AND technician_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND COALESCE(technician_response, 'Pending') = 'Pending'
+            RETURNING *
+        `;
+
+        db.query(
+            query,
+            [
+                orderId,
+                technicianId
+            ],
+            (err, rows) => {
+
+                if (err) {
+                    console.error(
+                        'Technician Accept Order Error:',
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to accept this order.'
+                    });
+                }
+
+                if (
+                    !rows ||
+                    rows.length === 0
+                ) {
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            'Order not found, already responded, or not assigned to you.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    message:
+                        'Job accepted successfully.',
+                    order: rows[0]
+                });
+            }
+        );
+    }
+);
+
+
+// ==========================================
+// TECHNICIAN - REJECT ASSIGNED ORDER
+// JWT PROTECTED
+// ==========================================
+app.post(
+    '/api/technicians/orders/:orderId/reject',
+    authenticateTechnician,
+    (req, res) => {
+
+        const technicianId =
+            String(
+                req.technician.technician_id || ''
+            ).trim();
+
+        const orderId =
+            String(
+                req.params.orderId || ''
+            ).trim();
+
+        const reason =
+            String(
+                req.body.reason || ''
+            ).trim();
+
+        const allowedReasons = [
+            'Too far',
+            'Not available',
+            'No spare/tools',
+            'Schedule conflict',
+            'Other'
+        ];
+
+        if (!orderId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Order ID is required.'
+            });
+        }
+
+        if (
+            !reason ||
+            !allowedReasons.includes(reason)
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Please select a valid rejection reason.'
+            });
+        }
+
+        const query = `
+            UPDATE public.orders
+            SET
+                technician_response = 'Rejected',
+                technician_response_reason = ?,
+                technician_responded_at = NOW(),
+                technician_id = NULL,
+                status = 'Pending'
+            WHERE order_id = ?
+              AND technician_id = ?
+              AND COALESCE(is_deleted, 0) = 0
+              AND COALESCE(technician_response, 'Pending') = 'Pending'
+            RETURNING *
+        `;
+
+        db.query(
+            query,
+            [
+                reason,
+                orderId,
+                technicianId
+            ],
+            (err, rows) => {
+
+                if (err) {
+                    console.error(
+                        'Technician Reject Order Error:',
+                        err
+                    );
+
+                    return res.status(500).json({
+                        success: false,
+                        message:
+                            'Unable to reject this order.'
+                    });
+                }
+
+                if (
+                    !rows ||
+                    rows.length === 0
+                ) {
+                    return res.status(400).json({
+                        success: false,
+                        message:
+                            'Order not found, already responded, or not assigned to you.'
+                    });
+                }
+
+                return res.json({
+                    success: true,
+                    message:
+                        'Job rejected successfully.',
+                    order: rows[0]
+                });
+            }
+        );
+    }
+);
+
+// ==========================================
 // TECHNICIAN - SINGLE ASSIGNED ORDER
 // JWT PROTECTED
 // ==========================================
@@ -6230,25 +6423,32 @@ app.post('/api/admin/assign-technician-manual', (req, res) => {
 
 
     const query = `
-        UPDATE public.orders
-        SET
-            technician_id = ?,
-            technician_name = ?,
-            technician_phone = ?,
-            eta = ?,
-            status = ?,
-            assigned_at = COALESCE(
-                assigned_at,
-                CURRENT_TIMESTAMP
-            )
-        WHERE order_id = ?
-        RETURNING
-            order_id,
-            technician_id,
-            technician_name,
-            technician_phone,
-            status
-    `;
+    UPDATE public.orders
+    SET
+        technician_id = ?,
+        technician_name = ?,
+        technician_phone = ?,
+        eta = ?,
+
+        status = ?,
+
+        technician_response = 'Pending',
+        technician_response_reason = NULL,
+        technician_responded_at = NULL,
+
+        assigned_at = CURRENT_TIMESTAMP
+
+    WHERE order_id = ?
+
+    RETURNING
+        order_id,
+        technician_id,
+        technician_name,
+        technician_phone,
+        status,
+        technician_response,
+        assigned_at
+`;
 
 
     db.query(
