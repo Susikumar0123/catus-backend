@@ -4721,11 +4721,16 @@ app.post(
         const query = `
             UPDATE public.orders
             SET
-                technician_response = 'Rejected',
-                technician_response_reason = ?,
-                technician_responded_at = NOW(),
-                technician_id = NULL,
-                status = 'Pending'
+    technician_response = 'Rejected',
+    technician_response_reason = ?,
+    technician_responded_at = NOW(),
+
+    technician_id = NULL,
+    technician_name = NULL,
+    technician_phone = NULL,
+    eta = NULL,
+
+    status = 'Pending'
             WHERE order_id = ?
               AND technician_id = ?
               AND COALESCE(is_deleted, 0) = 0
@@ -5065,6 +5070,7 @@ app.post(
 
                 WHERE o.order_id = ?
   AND o.technician_id = ?
+  AND COALESCE(o.technician_response, 'Pending') = 'Accepted'
   AND COALESCE(o.status, '') <> 'Trash'
 
                 LIMIT 1
