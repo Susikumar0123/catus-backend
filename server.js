@@ -2284,13 +2284,53 @@ app.post('/api/verify-otp-set-password', (req, res) => {
 // 3. GET USER ORDERS API ROUTE
 // ==========================================
 app.get('/api/orders/:phone', (req, res) => {
+
     const phone = req.params.phone;
-    
-    const query = 'SELECT * FROM orders WHERE phone = ? ORDER BY id DESC'; 
-    db.query(query, [phone], (err, results) => {
-        if (err) return res.status(500).json({ success: false, error: err.message });
-        res.json({ success: true, orders: results });
-    });
+
+    const query = `
+        SELECT *
+        FROM orders
+        WHERE phone = ?
+        ORDER BY id DESC
+    `;
+
+    db.query(
+        query,
+        [phone],
+        (err, results) => {
+
+            if (err) {
+                return res.status(500).json({
+                    success: false,
+                    error: err.message
+                });
+            }
+
+
+            // ==========================================
+            // CUSTOMER SECURITY
+            // NEVER EXPOSE TECHNICIAN PERSONAL MOBILE
+            // ==========================================
+
+            const safeOrders =
+                (results || []).map(order => {
+
+                    const safeOrder = {
+                        ...order
+                    };
+
+                    delete safeOrder.technician_phone;
+
+                    return safeOrder;
+                });
+
+
+            return res.json({
+                success: true,
+                orders: safeOrders
+            });
+        }
+    );
 });
 
 // ==========================================
