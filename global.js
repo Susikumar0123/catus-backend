@@ -442,8 +442,8 @@ function openPremiumDashboard() {
             
             let phoneDigits = String(currentUser.phone || '40001').replace(/[^0-9]/g, '');
             let displayCustId = 40000 + parseInt(phoneDigits.slice(-4));
-            document.getElementById('headerCustomerId').innerHTML = "Cust ID: #" + displayCustId;
             
+            document.getElementById('headerCustomerId').innerHTML = "Cust ID: " + displayCustId;
             let addrDisp = document.getElementById('premProfileAddressDisplay');
             if(addrDisp) addrDisp.textContent = currentUser.address || "No address saved";
             
@@ -1045,8 +1045,8 @@ function openInvoiceView(orderId, serviceName, amount, status, dateStr, productI
     let content = document.getElementById('invoiceContent');
     if(!content) return;
     content.innerHTML = `
-        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Order ID:</span> <strong style="color:#0f172a;">#${orderId}</strong></div>
-        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Product ID:</span> <strong style="color:#0f172a;">#${productId || 'N/A'}</strong></div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Order ID:</span> <strong style="color:#0f172a;">${orderId}</strong></div>
+        <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Product ID:</span> <strong style="color:#0f172a;">${productId || 'N/A'}</strong></div>
         <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Service:</span> <strong style="text-align:right; max-width:60%;">${serviceName}</strong></div>
         <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Date:</span> <strong>${dateStr}</strong></div>
         <div style="display:flex; justify-content:space-between; margin-bottom:5px;"><span>Amount Paid:</span> <strong>₹${amount}</strong></div>
@@ -1064,7 +1064,7 @@ function downloadInvoice(orderId, serviceName, amount, status, dateStr, productI
     let html = `
     <html>
     <head>
-        <title>Invoice - #${orderId}</title>
+        <title>Invoice - ${orderId}</title>
         <style>
             body { font-family: Arial, sans-serif; padding: 30px; color: #1e293b; }
             .header { display: flex; justify-content: space-between; border-bottom: 2px solid #0284c7; padding-bottom: 15px; margin-bottom: 20px; }
@@ -1083,7 +1083,7 @@ function downloadInvoice(orderId, serviceName, amount, status, dateStr, productI
         </div>
         <div class="details">
             <div><b>Billed To:</b><br>${custName}<br>+91 ${custPhone}</div>
-            <div><b>Order Details:</b><br>Order ID: #${orderId}<br>Product ID: #${productId}</div>
+            <div><b>Order Details:</b><br>Order ID: ${orderId}<br>Product ID: #${productId}</div>
         </div>
         <table>
             <thead><tr><th>Service Description</th><th>Qty</th><th>Amount</th></tr></thead>
