@@ -2307,6 +2307,11 @@ app.post('/api/orders/bulk', (req, res) => {
         address,
         district,
         pincode,
+        service_date,
+        service_time,
+        service_address,
+        service_district,
+        service_pincode,
         order_date,
         status,
         payment_verification,
@@ -2570,26 +2575,35 @@ const finalAmount =
     INSERT INTO orders
     (
         order_id,
-        customer_id,
-        product_id,
-        service_name,
-        customer_name,
-        phone,
-        whatsapp,
-        address,
-        district,
-        pincode,
-        amount,
-        order_date,
-        status,
-        payment_status,
-        payment_method,
-        booked_at
+customer_id,
+product_id,
+service_name,
+customer_name,
+phone,
+whatsapp,
+address,
+district,
+pincode,
+
+service_date,
+service_time,
+service_address,
+service_district,
+service_pincode,
+
+amount,
+order_date,
+status,
+payment_status,
+payment_method,
+booked_at
     )
     VALUES (
-        ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
-        CURRENT_TIMESTAMP
-    )
+    ?, ?, ?, ?, ?, ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    ?, ?, ?, ?, ?,
+    CURRENT_TIMESTAMP
+)
 `;
 
             let insertedOrders = [];
@@ -2624,9 +2638,16 @@ const finalAmount =
                     phone,
                     whatsapp || '',
                     address,
-                    district,
-                    pincode,
-                    order.amount,
+district,
+pincode,
+
+service_date || null,
+service_time || null,
+service_address || address,
+service_district || district,
+service_pincode || pincode,
+
+order.amount,
 order_date,
 'Pending',
 safeStatus === 'Paid' ? 'Paid' : 'Pending',
@@ -2869,13 +2890,20 @@ if (
     phone,
     whatsapp || '',
     address,
-    district,
-    pincode,
-    finalAmount,
-    order_date,
-    'Pending',
-    safeStatus === 'Paid' ? 'Paid' : 'Pending',
-    safeStatus === 'Paid' ? 'Online' : 'Pay Later'
+district,
+pincode,
+
+service_date || null,
+service_time || null,
+service_address || address,
+service_district || district,
+service_pincode || pincode,
+
+order.amount,
+order_date,
+'Pending',
+safeStatus === 'Paid' ? 'Paid' : 'Pending',
+safeStatus === 'Paid' ? 'Online' : 'Pay Later'
 ];
 
         db.query(query, values, (err) => {
