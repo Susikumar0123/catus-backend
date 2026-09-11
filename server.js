@@ -2507,48 +2507,107 @@ const finalAmount =
             let safeStatus = 'Pending';
 
             if (
-                status === 'Paid' &&
-                payment_verification &&
-                payment_verification.razorpay_order_id &&
-                payment_verification.razorpay_payment_id &&
-                payment_verification.razorpay_signature
-            ) {
+    status === 'Paid' &&
+    payment_verification &&
+    payment_verification.razorpay_order_id &&
+    payment_verification.razorpay_payment_id &&
+    payment_verification.razorpay_signature
+) {
 
-                const verificationBody =
-                    payment_verification
-                        .razorpay_order_id +
-                    '|' +
-                    payment_verification
-                        .razorpay_payment_id;
+    const verificationBody =
+        payment_verification.razorpay_order_id +
+        '|' +
+        payment_verification.razorpay_payment_id;
 
-                const expectedSignature =
-                    crypto
-                        .createHmac(
-                            'sha256',
-                            process.env
-                                .RAZORPAY_KEY_SECRET
-                        )
-                        .update(
-                            verificationBody
-                        )
-                        .digest('hex');
+    const expectedSignature =
+        crypto
+            .createHmac(
+                'sha256',
+                process.env.RAZORPAY_KEY_SECRET
+            )
+            .update(verificationBody)
+            .digest('hex');
 
-                if (
-                    expectedSignature ===
-                    payment_verification
-                        .razorpay_signature
-                ) {
-                    safeStatus = 'Paid';
-                } else {
-                    return res
-                        .status(400)
-                        .json({
-                            success: false,
-                            message:
-                                'Invalid Razorpay payment verification.'
-                        });
-                }
-            }
+    if (
+        expectedSignature !==
+        payment_verification.razorpay_signature
+    ) {
+        return res.status(400).json({
+            success: false,
+            message:
+                'Invalid Razorpay payment verification.'
+        });
+    }
+
+    try {
+
+        const razorpayPayment =
+            await razorpayInstance.payments.fetch(
+                payment_verification.razorpay_payment_id
+            );
+
+        if (!razorpayPayment) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Unable to confirm Razorpay payment.'
+            });
+        }
+
+        if (
+            razorpayPayment.order_id !==
+            payment_verification.razorpay_order_id
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Razorpay payment does not match this payment order.'
+            });
+        }
+
+        const paidAmount =
+            Number(razorpayPayment.amount) || 0;
+
+        const expectedAmount =
+            Math.round(finalAmount * 100);
+
+        if (paidAmount !== expectedAmount) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Paid amount does not match the booking amount.'
+            });
+        }
+
+        if (
+            razorpayPayment.status !== 'captured' &&
+            razorpayPayment.status !== 'authorized'
+        ) {
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Razorpay payment is not confirmed.'
+            });
+        }
+
+        safeStatus = 'Paid';
+
+    } catch (paymentError) {
+
+        console.error(
+            'Razorpay payment fetch error:',
+            paymentError
+        );
+
+        return res.status(500).json({
+            success: false,
+            message:
+                'Unable to verify payment with Razorpay.'
+        });
+    }
+}
+
+
 
             // ------------------------------------------
             // 5. SPLIT SHARED FEES ACROSS ORDERS
@@ -2646,89 +2705,145 @@ booked_at
 )
 `;
 
-            let insertedOrders = [];
-            let insertIndex = 0;
+                        let insertedOrders = [];
 
-            function insertNextOrder() {
+            let client;
+
+            try {
+
+                client = await db.getClient();
+
+                await client.query('BEGIN');
+
+                // ==========================================
+                // RECORD ONLINE PAYMENT INSIDE TRANSACTION
+                // ==========================================
+                if (safeStatus === 'Paid') {
+
+                    const paymentTransactionQuery = `
+                        INSERT INTO public.payment_transactions
+                        (
+                            razorpay_payment_id,
+                            razorpay_order_id,
+                            customer_id,
+                            customer_phone,
+                            amount_paise,
+                            payment_status
+                        )
+                        VALUES (?, ?, ?, ?, ?, ?)
+                        RETURNING id
+                    `;
+
+                    await client.query(
+                        paymentTransactionQuery,
+                        [
+                            payment_verification.razorpay_payment_id,
+                            payment_verification.razorpay_order_id,
+                            String(customer_id || ''),
+                            String(phone || ''),
+                            Math.round(finalAmount * 100),
+                            'Paid'
+                        ]
+                    );
+                }
+
+                // ==========================================
+                // INSERT ALL SERVICE ORDERS
+                // ==========================================
+                for (const order of orderRows) {
+
+                    const values = [
+                        order.order_id,
+                        customer_id,
+                        order.product_id,
+                        order.service_name,
+                        customer_name,
+                        phone,
+                        whatsapp || '',
+                        address,
+                        district,
+                        pincode,
+
+                        service_date || null,
+                        service_time || null,
+                        service_address || address,
+                        service_district || district,
+                        service_pincode || pincode,
+
+                        order.amount,
+                        order_date,
+                        'Pending',
+                        safeStatus === 'Paid'
+                            ? 'Paid'
+                            : 'Pending',
+                        safeStatus === 'Paid'
+                            ? 'Online'
+                            : 'Pay Later'
+                    ];
+
+                    await client.query(
+                        insertQuery,
+                        values
+                    );
+
+                    insertedOrders.push(order);
+                }
+
+                await client.query('COMMIT');
+
+                return res.json({
+                    success: true,
+                    message:
+                        'Separate service orders created successfully!',
+                    total_amount:
+                        finalAmount,
+                    orders:
+                        insertedOrders
+                });
+
+            } catch (transactionError) {
+
+                if (client) {
+
+                    try {
+                        await client.query('ROLLBACK');
+                    } catch (rollbackError) {
+                        console.error(
+                            'Bulk Order Rollback Error:',
+                            rollbackError
+                        );
+                    }
+                }
+
+                console.error(
+                    'Bulk Order Transaction Error:',
+                    transactionError
+                );
 
                 if (
-                    insertIndex >=
-                    orderRows.length
+                    transactionError.code === '23505'
                 ) {
-                    return res.json({
-                        success: true,
+                    return res.status(409).json({
+                        success: false,
+                        code:
+                            'PAYMENT_ALREADY_USED',
                         message:
-                            'Separate service orders created successfully!',
-                        total_amount:
-                            finalAmount,
-                        orders:
-                            insertedOrders
+                            'This Razorpay payment has already been used for a booking.'
                     });
                 }
 
-                const order =
-                    orderRows[insertIndex];
+                return res.status(500).json({
+                    success: false,
+                    message:
+                        'Unable to create all service orders securely.'
+                });
 
-                const values = [
-                    order.order_id,
-                    customer_id,
-                    order.product_id,
-                    order.service_name,
-                    customer_name,
-                    phone,
-                    whatsapp || '',
-                    address,
-district,
-pincode,
+            } finally {
 
-service_date || null,
-service_time || null,
-service_address || address,
-service_district || district,
-service_pincode || pincode,
-
-order.amount,
-order_date,
-'Pending',
-safeStatus === 'Paid' ? 'Paid' : 'Pending',
-safeStatus === 'Paid' ? 'Online' : 'Pay Later'
-                ];
-
-                db.query(
-                    insertQuery,
-                    values,
-                    (insertErr) => {
-
-                        if (insertErr) {
-
-                            console.error(
-                                'Bulk Insert Order Error:',
-                                insertErr.message
-                            );
-
-                            return res
-                                .status(500)
-                                .json({
-                                    success: false,
-                                    message:
-                                        'Unable to create all service orders.',
-                                    error:
-                                        insertErr.message
-                                });
-                        }
-
-                        insertedOrders.push(
-                            order
-                        );
-
-                        insertIndex++;
-
-                        insertNextOrder();
-                    }
-                );
+                if (client) {
+                    client.release();
+                }
             }
-
-            insertNextOrder();
         }
     );
 });

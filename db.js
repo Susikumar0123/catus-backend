@@ -19,7 +19,12 @@ pool.connect((err, client, release) => {
 });
 
 const db = {
+
+    // ==========================================
+    // NORMAL DATABASE QUERY
+    // ==========================================
     query: (text, params, callback) => {
+
         let queryText = text;
         let queryParams = params;
 
@@ -28,19 +33,77 @@ const db = {
             queryParams = [];
         }
 
+        queryParams = queryParams || [];
+
         let counter = 1;
 
-        // Convert MySQL-style ? placeholders to PostgreSQL $1, $2, $3...
-        queryText = queryText.replace(/\?/g, () => `$${counter++}`);
+        // Convert MySQL-style ? placeholders
+        // to PostgreSQL $1, $2, $3...
+        queryText = queryText.replace(
+            /\?/g,
+            () => `$${counter++}`
+        );
 
-        return pool.query(queryText, queryParams, (err, res) => {
-            if (err) {
-                return callback(err, null);
+        return pool.query(
+            queryText,
+            queryParams,
+            (err, res) => {
+
+                if (err) {
+
+                    if (typeof callback === 'function') {
+                        return callback(err, null);
+                    }
+
+                    return;
+                }
+
+                if (typeof callback === 'function') {
+                    callback(null, res.rows);
+                }
             }
+        );
+    },
 
-            callback(null, res.rows);
-        });
+
+    // ==========================================
+    // TRANSACTION DATABASE CONNECTION
+    // ==========================================
+    getClient: async () => {
+
+        const client =
+            await pool.connect();
+
+        return {
+
+            query: async (text, params = []) => {
+
+                let queryText = text;
+
+                let counter = 1;
+
+                // BEGIN / COMMIT / ROLLBACK have no ?
+                // Normal queries can still use ? placeholders
+                queryText = queryText.replace(
+                    /\?/g,
+                    () => `$${counter++}`
+                );
+
+                const result =
+                    await client.query(
+                        queryText,
+                        params
+                    );
+
+                return result.rows;
+            },
+
+            release: () => {
+                client.release();
+            }
+        };
     }
+
 };
 
 module.exports = db;
