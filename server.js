@@ -7302,6 +7302,53 @@ app.get(
 );
 
 // ==========================================
+// SEO - DUPLICATE DISTRICT/LOCATION -> CLEAN URL 301
+// Example:
+// /tamil-nadu/chennai/chennai/tv-repair
+// ->
+// /tamil-nadu/chennai/tv-repair
+// ==========================================
+
+app.get(
+    '/api/seo-clean-redirect/:state/:district/:location/:service',
+    (req, res) => {
+
+        const state =
+            String(req.params.state || '').trim().toLowerCase();
+
+        const district =
+            String(req.params.district || '').trim().toLowerCase();
+
+        const location =
+            String(req.params.location || '').trim().toLowerCase();
+
+        const service =
+            String(req.params.service || '').trim();
+
+        if (
+            !state ||
+            !district ||
+            !location ||
+            !service
+        ) {
+            return res.status(404).send('SEO page not found');
+        }
+
+        if (district !== location) {
+            return res.status(404).send('Redirect not required');
+        }
+
+        const cleanUrl =
+            `https://www.cerood.com/` +
+            `${encodeURIComponent(state)}/` +
+            `${encodeURIComponent(district)}/` +
+            `${encodeURIComponent(service)}`;
+
+        return res.redirect(301, cleanUrl);
+    }
+);
+
+// ==========================================
 // SEO - SCALABLE DYNAMIC SITEMAPS
 // ==========================================
 
@@ -7685,9 +7732,12 @@ app.get('/api/sitemap/:page', (req, res) => {
                                     sitemapServices
                                         .forEach(service => {
 
-                                            urls.push(
-                                                `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${service.slug}`
-                                            );
+                                            const seoUrl =
+    districtSlug === locationSlug
+        ? `${frontendBase}/${stateSlug}/${districtSlug}/${service.slug}`
+        : `${frontendBase}/${stateSlug}/${districtSlug}/${locationSlug}/${service.slug}`;
+
+urls.push(seoUrl);
                                         });
                                 });
 
@@ -8135,11 +8185,20 @@ app.get(
                         .trim();
 
                 const redirectUrl =
-                    `https://www.cerood.com/` +
-                    `${stateSlug}/` +
-                    `${districtSlug}/` +
-                    `${locationSlug}/` +
-                    `${serviceSlug}`;
+    districtSlug === locationSlug
+        ? (
+            `https://www.cerood.com/` +
+            `${stateSlug}/` +
+            `${districtSlug}/` +
+            `${serviceSlug}`
+        )
+        : (
+            `https://www.cerood.com/` +
+            `${stateSlug}/` +
+            `${districtSlug}/` +
+            `${locationSlug}/` +
+            `${serviceSlug}`
+        );
 
                 return res.redirect(
                     301,
