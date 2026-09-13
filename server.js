@@ -7696,12 +7696,16 @@ app.get('/api/sitemap/:page', (req, res) => {
 
                             const urls = [];
 
-                            // Homepage only sitemap-1
-                            if (page === 1) {
-                                urls.push(
-                                    `${frontendBase}/`
-                                );
-                            }
+// Static pages only in sitemap-1
+if (page === 1) {
+    urls.push(
+        `${frontendBase}/`
+    );
+
+    urls.push(
+        `${frontendBase}/about`
+    );
+}
 
                             (locations || [])
                                 .forEach(location => {
