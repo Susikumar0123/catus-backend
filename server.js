@@ -7709,6 +7709,10 @@ if (page === 1) {
     urls.push(
         `${frontendBase}/contact`
     );
+
+    urls.push(
+        `${frontendBase}/services`
+    );
 }
 
                             (locations || [])
