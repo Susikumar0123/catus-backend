@@ -7541,6 +7541,34 @@ if (page === 1) {
     );
 }
 
+
+// District hub pages only in sitemap-1
+if (page === 1) {
+
+    const districtHubSet = new Set();
+
+    (locations || []).forEach(location => {
+
+        const stateSlug =
+            sitemapSlugify(location.state);
+
+        const districtSlug =
+            sitemapSlugify(location.district);
+
+        if (!stateSlug || !districtSlug) {
+            return;
+        }
+
+        districtHubSet.add(
+            `${frontendBase}/${stateSlug}/${districtSlug}`
+        );
+    });
+
+    districtHubSet.forEach(url => {
+        urls.push(url);
+    });
+}
+
                             (locations || [])
                                 .forEach(location => {
 
