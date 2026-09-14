@@ -7539,8 +7539,11 @@ if (page === 1) {
     urls.push(
         `${frontendBase}/services`
     );
-}
 
+    urls.push(
+        `${frontendBase}/faq`
+    );
+}
 
 // District hub pages only in sitemap-1
 if (page === 1) {
