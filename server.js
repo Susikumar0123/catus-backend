@@ -7569,6 +7569,45 @@ if (page === 1) {
     });
 }
 
+// Location hub pages only in sitemap-1
+if (page === 1) {
+
+    const locationHubSet = new Set();
+
+    (locations || []).forEach(location => {
+
+        const stateSlug =
+            sitemapSlugify(location.state);
+
+        const districtSlug =
+            sitemapSlugify(location.district);
+
+        const locationSlug =
+            sitemapSlugify(location.slug);
+
+        if (
+            !stateSlug ||
+            !districtSlug ||
+            !locationSlug
+        ) {
+            return;
+        }
+
+        // District HQ already has district hub URL
+        if (locationSlug === districtSlug) {
+            return;
+        }
+
+        locationHubSet.add(
+            `${frontendBase}/${stateSlug}/${districtSlug}/location/${locationSlug}`
+        );
+    });
+
+    locationHubSet.forEach(url => {
+        urls.push(url);
+    });
+}
+
                             (locations || [])
                                 .forEach(location => {
 
