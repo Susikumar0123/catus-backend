@@ -2281,6 +2281,153 @@ app.post('/api/verify-otp-set-password', (req, res) => {
 });
 
 // ==========================================
+// CUSTOMER - SAVE / UPDATE SERVICE ADDRESS
+// ==========================================
+app.post('/api/users/update-address', (req, res) => {
+
+    const phone = String(req.body.phone || '')
+        .replace(/\D/g, '')
+        .slice(-10);
+
+    const address = String(req.body.address || '').trim();
+
+    const pincode = String(req.body.pincode || '')
+        .replace(/\D/g, '')
+        .slice(-6);
+
+    if (!/^[6-9]\d{9}$/.test(phone)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid mobile number is required.'
+        });
+    }
+
+    if (!address) {
+        return res.status(400).json({
+            success: false,
+            message: 'Service address is required.'
+        });
+    }
+
+    if (!/^[1-9]\d{5}$/.test(pincode)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid pincode is required.'
+        });
+    }
+
+    const query = `
+        UPDATE public.users
+        SET
+            address = ?,
+            pincode = ?
+        WHERE phone = ?
+        RETURNING
+            id,
+            name,
+            email,
+            phone,
+            pincode,
+            address
+    `;
+
+    db.query(
+        query,
+        [address, pincode, phone],
+        (err, rows) => {
+
+            if (err) {
+                console.error(
+                    'Customer Address Update Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to save service address.'
+                });
+            }
+
+            if (!rows || rows.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Customer account not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Service address saved successfully.',
+                user: rows[0]
+            });
+        }
+    );
+});
+
+
+// ==========================================
+// CUSTOMER - REMOVE SAVED SERVICE ADDRESS
+// ==========================================
+app.post('/api/users/remove-address', (req, res) => {
+
+    const phone = String(req.body.phone || '')
+        .replace(/\D/g, '')
+        .slice(-10);
+
+    if (!/^[6-9]\d{9}$/.test(phone)) {
+        return res.status(400).json({
+            success: false,
+            message: 'Valid mobile number is required.'
+        });
+    }
+
+    const query = `
+        UPDATE public.users
+        SET address = 'No address saved'
+        WHERE phone = ?
+        RETURNING
+            id,
+            name,
+            email,
+            phone,
+            pincode,
+            address
+    `;
+
+    db.query(
+        query,
+        [phone],
+        (err, rows) => {
+
+            if (err) {
+                console.error(
+                    'Customer Address Remove Error:',
+                    err
+                );
+
+                return res.status(500).json({
+                    success: false,
+                    message: 'Unable to remove service address.'
+                });
+            }
+
+            if (!rows || rows.length === 0) {
+                return res.status(404).json({
+                    success: false,
+                    message: 'Customer account not found.'
+                });
+            }
+
+            return res.json({
+                success: true,
+                message: 'Service address removed successfully.',
+                user: rows[0]
+            });
+        }
+    );
+});
+
+// ==========================================
 // 3. GET USER ORDERS API ROUTE
 // ==========================================
 app.get('/api/orders/:phone', (req, res) => {
