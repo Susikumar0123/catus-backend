@@ -3954,10 +3954,16 @@ const taxes =
         (gstPercent / 100)
     );
 
+const paymentMode = req.body.paymentMode;
+
+const servicePayFee =
+    paymentMode === 'later' ? 50 : 0;
+
 const finalAmount =
     subtotal +
     convenienceFee +
-    taxes;
+    taxes +
+    servicePayFee;
 
         
         return res.json({
@@ -3970,8 +3976,10 @@ const finalAmount =
     gstEnabled:
         checkoutSettings.gstEnabled,
     taxes,
+    servicePayFee,
     finalAmount
 });
+
     });
 });
 
