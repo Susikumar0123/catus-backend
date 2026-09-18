@@ -874,8 +874,32 @@ app.post(
 
 const upload = multer({
     storage: multer.memoryStorage(),
+
     limits: {
-        fileSize: 5 * 1024 * 1024 // 5 MB
+        fileSize: 25 * 1024 * 1024 // 25 MB
+    },
+
+    fileFilter: (req, file, cb) => {
+
+        const allowedMimeTypes = [
+            'image/jpeg',
+            'image/png',
+            'image/webp',
+            'image/gif',
+            'video/mp4',
+            'video/webm'
+        ];
+
+        if (!allowedMimeTypes.includes(file.mimetype)) {
+
+            return cb(
+                new Error(
+                    'Only JPG, PNG, WebP, GIF, MP4 and WebM files are allowed.'
+                )
+            );
+        }
+
+        cb(null, true);
     }
 });
 
@@ -918,7 +942,7 @@ app.post('/api/upload-image', upload.single('image'), async (req, res) => {
         if (!req.file) {
             return res.status(400).json({
                 success: false,
-                message: 'No image uploaded'
+                message: 'No media file uploaded'
             });
         }
 
@@ -1076,7 +1100,7 @@ return res.json({
 
         return res.status(500).json({
             success: false,
-            message: 'Image upload failed',
+            message: 'Media upload failed',
             error: error.response?.data || error.message
         });
     }
