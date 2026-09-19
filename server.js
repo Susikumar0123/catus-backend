@@ -9104,76 +9104,20 @@ async function renewedRunExpiry() {
 
 // In Phase 5B reservation is disabled by default. Do NOT enable for public
 // traffic until verified customer auth, payment initiation and webhook exist.
-app.post('/api/renewed/reservations', async (req,res) => {
-    if (process.env.RENEWED_RESERVATIONS_ENABLED !== 'true') {
-        return res.status(503).json({success:false,message:'Renewed checkout is not enabled yet.'});
-    }
-    const items = req.body && req.body.items;
-    if (!Array.isArray(items) || !items.length || items.length > 20) {
-        return res.status(400).json({success:false,message:'Provide 1–20 items.'});
-    }
-    const quantities = new Map();
-    for (const item of items) {
-        const id = String(item && item.product_id || '').trim();
-        const qty = Number(item && item.quantity);
-        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99) {
-            return res.status(400).json({success:false,message:'Invalid item or quantity.'});
-        }
-        const next = (quantities.get(id) || 0) + qty;
-        if (next > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
-        quantities.set(id,next);
-    }
-    const client = await db.getClient();
-    try {
-        await client.query('BEGIN');
-        await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
-        await renewedReleaseExpired(client);
-        const ids = [...quantities.keys()].sort();
-        const products = await client.query(`
-            SELECT id, name, price, stock, status FROM public.renewed_products
-            WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE
-        `,[ids]);
-        const byId = new Map(products.map(x=>[x.id,x]));
-        let subtotal = 0;
-        for (const id of ids) {
-            const product = byId.get(id), qty = quantities.get(id);
-            if (!product || product.status !== 'published' || Number(product.stock) < qty) {
-                await client.query('ROLLBACK');
-                return res.status(409).json({success:false,message:'Product unavailable or stock insufficient.',product_id:id});
-            }
-            subtotal += Number(product.price)*qty;
-            if (!Number.isSafeInteger(subtotal) || subtotal > 100000000) {
-                await client.query('ROLLBACK');
-                return res.status(400).json({success:false,message:'Order amount exceeds limit.'});
-            }
-        }
-        const orderId = crypto.randomUUID();
-        const inserted = await client.query(`
-            INSERT INTO public.renewed_orders
-            (id, subtotal, delivery_fee, total, status, reserved_until)
-            VALUES ($1,$2,0,$2,'pending_payment',NOW() + INTERVAL '15 minutes')
-            RETURNING id,subtotal,delivery_fee,total,currency,status,reserved_until
-        `,[orderId,subtotal]);
-        for (const id of ids) {
-            const product = byId.get(id), qty = quantities.get(id);
-            const updated = await client.query(`
-                UPDATE public.renewed_products SET stock = stock - $1, updated_at = NOW()
-                WHERE id = $2 AND status = 'published' AND stock >= $1 RETURNING id
-            `,[qty,id]);
-            if (!updated.length) throw new Error('Stock changed while reserving.');
-            await client.query(`
-                INSERT INTO public.renewed_order_items
-                (order_id,product_id,product_name,unit_price,quantity,line_total)
-                VALUES ($1,$2,$3,$4,$5,$6)
-            `,[orderId,id,product.name,product.price,qty,Number(product.price)*qty]);
-        }
-        await client.query('COMMIT');
-        return res.status(201).json({success:true,order:inserted[0],checkout_enabled:false,
-            message:'Reserved only. Payment is not enabled.'});
-    } catch(error) {
-        await client.query('ROLLBACK').catch(()=>{});
-        return renewedError(res,error);
-    } finally { client.release(); }
+// Phase 5F safety gate: do not expose the unauthenticated Phase 5B reservation
+// implementation by flipping an environment variable on a LIVE Razorpay account.
+// Future replacement must atomically verify identity, delivery amount, stock,
+// Razorpay order creation and webhook reconciliation before opening checkout.
+app.post('/api/renewed/reservations', (req,res) => {
+    return res.status(503).json({success:false,
+        message:'Renewed checkout is not enabled yet. Secure payment integration is in progress.'});
+});
+
+app.get('/api/renewed/checkout-status', (req,res) => {
+    res.set('Cache-Control','no-store');
+    return res.json({success:true,checkout_enabled:false,payment_enabled:false,
+        reservations_enabled:false,currency:'INR',
+        message:'Live Razorpay is not enabled for Renewed purchases yet.'});
 });
 
 // Release expired stock periodically, including when there are no customers.
