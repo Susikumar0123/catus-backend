@@ -8857,6 +8857,27 @@ const initDatabase = () => {
 }; 
  
 
+// PHASE 5F — ADMIN-ONLY DRAFT TEST PREVIEW (NO RAZORPAY CHARGE).
+// Registered after /api/admin auth middleware; no draft data in public product APIs.
+app.get('/api/admin/renewed/test-preview/:id', async (req,res) => {
+    res.set('Cache-Control','no-store');
+    try {
+        const id = String(req.params.id || '');
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id))
+            return res.status(400).json({success:false,message:'Invalid product ID.'});
+        const rows = await new Promise((resolve,reject) => db.query(
+            `SELECT id,name,price,stock,status,condition,warranty_days FROM public.renewed_products WHERE id=? LIMIT 1`,
+            [id],(error,data)=>error?reject(error):resolve(data||[])));
+        if (!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
+        const p=rows[0];
+        return res.json({success:true,test_only:true,payment_created:false,reservation_created:false,
+            product:{id:p.id,name:p.name,price:Number(p.price),stock:Number(p.stock),status:p.status,
+                     condition:p.condition,warranty_days:Number(p.warranty_days)},
+            message:'Admin preview only. No Razorpay order or payment is created.'});
+    } catch(e) {console.error('Renewed admin test preview:',e.message);
+        return res.status(503).json({success:false,message:'Test preview unavailable.'});}
+});
+
 // ==========================================
 // CEROOD RENEWED STORE — PHASE 4
 // Requires cerood_renewed_phase4.sql to be run in Supabase first.
