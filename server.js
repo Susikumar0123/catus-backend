@@ -8854,4 +8854,104 @@ const initDatabase = () => {
     }); 
 }; 
  
+
+// ==========================================
+// CEROOD RENEWED STORE — PHASE 4
+// Requires cerood_renewed_phase4.sql to be run in Supabase first.
+// Admin routes inherit /api/admin authentication middleware above.
+// ==========================================
+const renewedQuery = (sql, params = []) => new Promise((resolve, reject) => {
+    db.query(sql, params, (error, rows) => error ? reject(error) : resolve(rows || []));
+});
+const renewedAllowedCategories = new Set(['tv', 'refrigerator', 'washing-machine', 'ac', 'laptop', 'other']);
+const renewedAllowedConditions = new Set(['Refurbished', 'Pre-owned', 'Open box']);
+const renewedPublicFields = `id, name, category, condition, brand, model, price, compare_price,
+ stock, warranty_days, location, delivery, image_url, video_url,
+ known_defects, accessories, warranty_terms, status, created_at, updated_at`;
+function renewedPublicProduct(row) {
+    const p = { ...row };
+    p.media = [p.image_url && {type:'image',url:p.image_url,alt:p.name},
+               p.video_url && {type:'video',url:p.video_url}].filter(Boolean);
+    p.warranty = Number(p.warranty_days) > 0 ? `${p.warranty_days} day(s)` : 'No warranty';
+    p.condition_description = p.condition;
+    p.inspection = [];
+    p.accessories = String(p.accessories || '').split(/\r?\n|,/).map(s=>s.trim()).filter(Boolean);
+    p.specifications = { Brand: p.brand || 'Not specified', Model: p.model || 'Not specified' };
+    return p;
+}
+function renewedClean(body) {
+    const text = (key, max) => String(body[key] ?? '').trim().slice(0, max);
+    const num = key => Number(body[key]);
+    const name = text('name',140), category = text('category',40), condition = text('condition',40);
+    const price = num('price'), stock = num('stock'), warranty_days = num('warranty_days');
+    const compare_price = body.compare_price === '' || body.compare_price == null ? null : num('compare_price');
+    const status = text('status',20) || 'draft';
+    if (!name || !renewedAllowedCategories.has(category) || !renewedAllowedConditions.has(condition) ||
+        !Number.isSafeInteger(price) || price < 1 || price > 100000000 ||
+        !Number.isSafeInteger(stock) || stock < 0 || stock > 99999 ||
+        !Number.isSafeInteger(warranty_days) || warranty_days < 0 || warranty_days > 3650 ||
+        (compare_price !== null && (!Number.isSafeInteger(compare_price) || compare_price < 0)) ||
+        !['draft','published'].includes(status)) throw Object.assign(new Error('Invalid product fields, price, stock, warranty or status.'),{status:400});
+    const image_url = text('image_url',2048), video_url = text('video_url',2048);
+    for (const url of [image_url,video_url]) {
+        if (url && (!/^https:\/\//i.test(url) || !URL.canParse(url))) throw Object.assign(new Error('Use valid HTTPS media URLs.'),{status:400});
+    }
+    if (status === 'published' && (!image_url || !text('known_defects',2000) || !text('warranty_terms',1500)))
+        throw Object.assign(new Error('Publish requires actual photo URL, condition/defects and warranty terms.'),{status:400});
+    return {name,category,condition,brand:text('brand',80),model:text('model',80),price,compare_price,stock,warranty_days,
+        location:text('location',100),delivery:text('delivery',160),image_url,video_url,
+        known_defects:text('known_defects',2000),accessories:text('accessories',1000),
+        warranty_terms:text('warranty_terms',1500),status};
+}
+function renewedError(res,error) {
+    console.error('Renewed Store:',error.message);
+    res.status(error.status || 500).json({success:false,message:error.status ? error.message : 'Renewed Store database request failed.'});
+}
+app.get('/api/renewed/products', async (req,res) => {
+    try {
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE status = 'published' AND stock > 0 ORDER BY created_at DESC LIMIT 250`);
+        res.json({success:true,products:rows.map(renewedPublicProduct)});
+    } catch(error) { renewedError(res,error); }
+});
+app.get('/api/renewed/products/:id', async (req,res) => {
+    try {
+        if(!/^[a-zA-Z0-9_-]{1,80}$/.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid product ID.'});
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE id = ? AND status = 'published' LIMIT 1`,[req.params.id]);
+        if(!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
+        res.json({success:true,product:renewedPublicProduct(rows[0])});
+    } catch(error) { renewedError(res,error); }
+});
+app.get('/api/admin/renewed/products', async (req,res) => {
+    try {
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products ORDER BY updated_at DESC LIMIT 500`);
+        res.json({success:true,products:rows});
+    } catch(error) { renewedError(res,error); }
+});
+app.post('/api/admin/renewed/products', async (req,res) => {
+    try {
+        const p = renewedClean(req.body || {}), id = crypto.randomUUID();
+        const fields = Object.keys(p);
+        const rows = await renewedQuery(`INSERT INTO public.renewed_products (id, ${fields.join(', ')}) VALUES (?, ${fields.map(()=>'?').join(', ')}) RETURNING ${renewedPublicFields}`,[id,...Object.values(p)]);
+        res.status(201).json({success:true,product:rows[0]});
+    } catch(error) { renewedError(res,error); }
+});
+app.put('/api/admin/renewed/products/:id', async (req,res) => {
+    try {
+        if(!/^[a-zA-Z0-9_-]{1,80}$/.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid ID.'});
+        const p = renewedClean(req.body || {}), fields = Object.keys(p);
+        const rows = await renewedQuery(`UPDATE public.renewed_products SET ${fields.map(f=>`${f} = ?`).join(', ')}, updated_at = NOW() WHERE id = ? RETURNING ${renewedPublicFields}`,[...Object.values(p),req.params.id]);
+        if(!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
+        res.json({success:true,product:rows[0]});
+    } catch(error) { renewedError(res,error); }
+});
+app.delete('/api/admin/renewed/products/:id', async (req,res) => {
+    try {
+        if(!/^[a-zA-Z0-9_-]{1,80}$/.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid ID.'});
+        const rows = await renewedQuery('DELETE FROM public.renewed_products WHERE id = ? RETURNING id',[req.params.id]);
+        if(!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
+        res.json({success:true,deleted_id:rows[0].id});
+    } catch(error) { renewedError(res,error); }
+});
+// Shopping checkout/payment intentionally not enabled in Phase 4.
+
 initDatabase();
