@@ -9188,6 +9188,177 @@ async function renewedRunExpiry() {
     } finally { client.release(); }
 }
 
+// ==========================================
+// CEROOD RENEWED — PHASE 5F STEP 3 (STAGED)
+// Atomic stock reservation + Razorpay order creation.
+// HARD DISABLED until payment verification, webhook and reconciliation ship.
+// Do not remove this gate or expose the route in production yet.
+// ==========================================
+app.post('/api/renewed/prepare-payment', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const RENEWED_PAYMENT_FLOW_READY = false; // Step 4 must implement webhook and payment reconciliation first.
+    if (!RENEWED_PAYMENT_FLOW_READY) {
+        return res.status(503).json({success:false,
+            message:'Renewed payment preparation is not enabled yet. Payment verification and webhook integration are pending.'});
+    }
+
+    let client;
+    let committedOrderId = null;
+    try {
+        const accessToken = String(req.body?.accessToken || '').trim();
+        if (!accessToken || accessToken.length > 8192)
+            return res.status(401).json({success:false,message:'Customer OTP verification required.'});
+        let verifiedPhone;
+        try {
+            const verification = await verifyMsg91AccessToken(accessToken);
+            if (String(verification?.type || '').toLowerCase() !== 'success')
+                return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+            verifiedPhone = extractVerifiedPhoneFromMsg91(verification, accessToken);
+        } catch (_) {
+            return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+        }
+        if (!/^[6-9]\d{9}$/.test(verifiedPhone || ''))
+            return res.status(401).json({success:false,message:'Verified phone is unavailable.'});
+        const users = await renewedQuery(
+            'SELECT id, name, email FROM public.users WHERE phone = ? LIMIT 1', [verifiedPhone]);
+        if (!users.length) return res.status(401).json({success:false,message:'Register before checkout.'});
+
+        const address = req.body?.address;
+        const items = req.body?.items;
+        if (!address || typeof address !== 'object' || Array.isArray(address) ||
+            !Array.isArray(items) || items.length < 1 || items.length > 20)
+            return res.status(400).json({success:false,message:'Address and 1–20 items required.'});
+        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const pincode = String(address.pincode || '').trim();
+        const fullName = String(address.full_name || address.name || '').trim();
+        const street = String(address.street || address.address || '').trim();
+        const city = String(address.city || '').trim();
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
+            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
+            fullName.length < 2 || fullName.length > 140 ||
+            street.length < 5 || street.length > 500 || city.length < 2 || city.length > 100)
+            return res.status(400).json({success:false,message:'Complete Tamil Nadu delivery address required.'});
+        const quantities = new Map();
+        for (const item of items) {
+            const id = String(item?.product_id || '').trim();
+            const qty = Number(item?.quantity);
+            if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99)
+                return res.status(400).json({success:false,message:'Invalid item.'});
+            const sum = (quantities.get(id) || 0) + qty;
+            if (sum > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+            quantities.set(id,sum);
+        }
+        const sortedIds = [...quantities.keys()].sort();
+        client = await db.getClient();
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
+        await renewedReleaseExpired(client);
+        const products = await client.query(
+            `SELECT id,name,price,stock,status FROM public.renewed_products
+             WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,[sortedIds]);
+        const byId = new Map(products.map(p => [String(p.id),p]));
+        let subtotal = 0;
+        const orderItems = [];
+        for (const id of sortedIds) {
+            const p = byId.get(id), qty = quantities.get(id);
+            if (!p || p.status !== 'published' || Number(p.stock) < qty) {
+                const e = new Error('Product unavailable or insufficient stock.'); e.status = 409; throw e;
+            }
+            const unit = Number(p.price), line = unit * qty;
+            if (!Number.isSafeInteger(unit) || unit < 1 || !Number.isSafeInteger(line)) throw Error('Invalid product price.');
+            subtotal += line;
+            if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
+            orderItems.push({id,name:p.name,qty,unit,line});
+        }
+        const rates = await client.query(
+            `SELECT fee FROM public.renewed_delivery_rates
+             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if (!rates.length) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
+        const fee = Number(rates[0].fee), total = subtotal + fee;
+        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) ||
+            total < 1 || total > 10000000) throw Error('Invalid payment amount.');
+        const orderId = crypto.randomUUID();
+        const savedAddress = {
+            full_name:fullName,street,city,district,state:'Tamil Nadu',pincode,
+            area:String(address.area || '').trim().slice(0,200)
+        };
+        await client.query(
+            `INSERT INTO public.renewed_orders
+             (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
+              subtotal,delivery_fee,total,currency,status,reserved_until)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','pending_payment',
+                     NOW() + INTERVAL '15 minutes')`,
+            [orderId,String(users[0].id),fullName,verifiedPhone,users[0].email || null,
+             JSON.stringify(savedAddress),subtotal,fee,total]);
+        for (const item of orderItems) {
+            const reduced = await client.query(
+                `UPDATE public.renewed_products SET stock = stock - $1,updated_at = NOW()
+                 WHERE id = $2 AND status = 'published' AND stock >= $1 RETURNING id`,
+                [item.qty,item.id]);
+            if (!reduced.length) {const e=new Error('Product sold out.');e.status=409;throw e;}
+            await client.query(
+                `INSERT INTO public.renewed_order_items
+                 (order_id,product_id,product_name,unit_price,quantity,line_total)
+                 VALUES ($1,$2,$3,$4,$5,$6)`,
+                [orderId,item.id,item.name,item.unit,item.qty,item.line]);
+        }
+        await client.query('COMMIT');
+        client.release(); client = null;
+        committedOrderId = orderId;
+
+        // Network call is OUTSIDE the DB transaction; rollback by order ID on failure.
+        const razorpayOrder = await razorpayInstance.orders.create({
+            amount:total * 100,currency:'INR',receipt:`renewed_${orderId.slice(0,24)}`,
+            notes:{renewed_order_id:orderId}
+        });
+        const updated = await renewedQuery(
+            `UPDATE public.renewed_orders SET razorpay_order_id = ?,updated_at = NOW()
+             WHERE id = ? AND status = 'pending_payment' AND reserved_until > NOW()
+               AND razorpay_order_id IS NULL RETURNING id,reserved_until`,
+            [razorpayOrder.id,orderId]);
+        if (!updated.length) {
+            // Razorpay order exists but local reservation expired; never present it for payment.
+            return res.status(409).json({success:false,message:'Reservation expired. Please retry checkout.'});
+        }
+        return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
+            amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
+            reserved_until:updated[0].reserved_until});
+    } catch (e) {
+        if (client) {
+            await client.query('ROLLBACK').catch(()=>{});
+            client.release(); client = null;
+        }
+        if (committedOrderId) {
+            // Release only the exact pending reservation, under the same global lock.
+            let cleanup;
+            try {
+                cleanup = await db.getClient();
+                await cleanup.query('BEGIN');
+                await cleanup.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
+                const released = await cleanup.query(
+                    `UPDATE public.renewed_orders SET status='cancelled',updated_at=NOW()
+                     WHERE id=$1 AND status='pending_payment' AND razorpay_order_id IS NULL
+                     RETURNING id`,[committedOrderId]);
+                if (released.length) {
+                    await cleanup.query(
+                        `UPDATE public.renewed_products p SET stock=p.stock+r.qty,updated_at=NOW()
+                         FROM (SELECT product_id,SUM(quantity)::integer qty
+                               FROM public.renewed_order_items WHERE order_id=$1
+                               GROUP BY product_id) r WHERE p.id=r.product_id`,[committedOrderId]);
+                }
+                await cleanup.query('COMMIT');
+            } catch (cleanupError) {
+                if (cleanup) await cleanup.query('ROLLBACK').catch(()=>{});
+                console.error('Renewed payment preparation cleanup failed:',cleanupError.message);
+            } finally {if (cleanup) cleanup.release();}
+        }
+        console.error('Renewed prepare payment:',e.message);
+        return res.status(e.status || 503).json({success:false,
+            message:e.status ? e.message : 'Unable to prepare payment. Please retry.'});
+    }
+});
+
 // In Phase 5B reservation is disabled by default. Do NOT enable for public
 // traffic until verified customer auth, payment initiation and webhook exist.
 // Phase 5F safety gate: do not expose the unauthenticated Phase 5B reservation
