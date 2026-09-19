@@ -9003,6 +9003,134 @@ app.post('/api/renewed/quote', async (req, res) => {
     }
 });
 
-// Shopping checkout/payment intentionally not enabled in Phase 5A.
+// ==========================================
+// CEROOD RENEWED — PHASE 5B: ATOMIC STOCK RESERVATION
+// Not customer-facing yet. Enable only after login/payment workflow is ready.
+// ==========================================
+const RENEWED_RESERVE_LOCK = 51029019;
+const RENEWED_RESERVE_MINUTES = 15;
+
+// Lock + release is performed in one transaction, serializing reserve/release.
+async function renewedReleaseExpired(client) {
+    const expired = await client.query(`
+        SELECT id FROM public.renewed_orders
+        WHERE status = 'pending_payment' AND reserved_until <= NOW()
+        ORDER BY id FOR UPDATE
+    `);
+    if (!expired.length) return 0;
+    const ids = expired.map(o => o.id);
+    await client.query(`
+        UPDATE public.renewed_products p SET stock = p.stock + r.qty, updated_at = NOW()
+        FROM (
+          SELECT product_id, SUM(quantity)::integer AS qty
+          FROM public.renewed_order_items WHERE order_id = ANY($1::uuid[])
+          GROUP BY product_id
+        ) r
+        WHERE p.id = r.product_id
+    `,[ids]);
+    await client.query(`
+        UPDATE public.renewed_orders SET status = 'expired', updated_at = NOW()
+        WHERE id = ANY($1::uuid[]) AND status = 'pending_payment'
+    `,[ids]);
+    return ids.length;
+}
+
+async function renewedRunExpiry() {
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
+        const count = await renewedReleaseExpired(client);
+        await client.query('COMMIT');
+        return count;
+    } catch(e) {
+        await client.query('ROLLBACK').catch(()=>{});
+        throw e;
+    } finally { client.release(); }
+}
+
+// In Phase 5B reservation is disabled by default. Do NOT enable for public
+// traffic until verified customer auth, payment initiation and webhook exist.
+app.post('/api/renewed/reservations', async (req,res) => {
+    if (process.env.RENEWED_RESERVATIONS_ENABLED !== 'true') {
+        return res.status(503).json({success:false,message:'Renewed checkout is not enabled yet.'});
+    }
+    const items = req.body && req.body.items;
+    if (!Array.isArray(items) || !items.length || items.length > 20) {
+        return res.status(400).json({success:false,message:'Provide 1–20 items.'});
+    }
+    const quantities = new Map();
+    for (const item of items) {
+        const id = String(item && item.product_id || '').trim();
+        const qty = Number(item && item.quantity);
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99) {
+            return res.status(400).json({success:false,message:'Invalid item or quantity.'});
+        }
+        const next = (quantities.get(id) || 0) + qty;
+        if (next > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+        quantities.set(id,next);
+    }
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
+        await renewedReleaseExpired(client);
+        const ids = [...quantities.keys()].sort();
+        const products = await client.query(`
+            SELECT id, name, price, stock, status FROM public.renewed_products
+            WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE
+        `,[ids]);
+        const byId = new Map(products.map(x=>[x.id,x]));
+        let subtotal = 0;
+        for (const id of ids) {
+            const product = byId.get(id), qty = quantities.get(id);
+            if (!product || product.status !== 'published' || Number(product.stock) < qty) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({success:false,message:'Product unavailable or stock insufficient.',product_id:id});
+            }
+            subtotal += Number(product.price)*qty;
+            if (!Number.isSafeInteger(subtotal) || subtotal > 100000000) {
+                await client.query('ROLLBACK');
+                return res.status(400).json({success:false,message:'Order amount exceeds limit.'});
+            }
+        }
+        const orderId = crypto.randomUUID();
+        const inserted = await client.query(`
+            INSERT INTO public.renewed_orders
+            (id, subtotal, delivery_fee, total, status, reserved_until)
+            VALUES ($1,$2,0,$2,'pending_payment',NOW() + INTERVAL '15 minutes')
+            RETURNING id,subtotal,delivery_fee,total,currency,status,reserved_until
+        `,[orderId,subtotal]);
+        for (const id of ids) {
+            const product = byId.get(id), qty = quantities.get(id);
+            const updated = await client.query(`
+                UPDATE public.renewed_products SET stock = stock - $1, updated_at = NOW()
+                WHERE id = $2 AND status = 'published' AND stock >= $1 RETURNING id
+            `,[qty,id]);
+            if (!updated.length) throw new Error('Stock changed while reserving.');
+            await client.query(`
+                INSERT INTO public.renewed_order_items
+                (order_id,product_id,product_name,unit_price,quantity,line_total)
+                VALUES ($1,$2,$3,$4,$5,$6)
+            `,[orderId,id,product.name,product.price,qty,Number(product.price)*qty]);
+        }
+        await client.query('COMMIT');
+        return res.status(201).json({success:true,order:inserted[0],checkout_enabled:false,
+            message:'Reserved only. Payment is not enabled.'});
+    } catch(error) {
+        await client.query('ROLLBACK').catch(()=>{});
+        return renewedError(res,error);
+    } finally { client.release(); }
+});
+
+// Release expired stock periodically, including when there are no customers.
+// Keep the timer unref'd so it does not hold up shutdown.
+const renewedExpiryTimer = setInterval(() => {
+    renewedRunExpiry().catch(e=>console.error('Renewed expiry cleanup:',e.message));
+},60*1000);
+renewedExpiryTimer.unref();
+
+// No payment success, cancellation or manual stock-release endpoints in Phase 5B.
+// Those must authenticate the customer and verify payment server-side first.
 
 initDatabase();
