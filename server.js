@@ -9057,6 +9057,92 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
 });
 
 // ==========================================
+// CEROOD RENEWED — PHASE 5F STEP 2: VERIFIED CUSTOMER PRICE CHECK
+// No order, stock reservation or Razorpay charge is created here.
+// MSG91 token must be freshly verified by MSG91, not trusted from localStorage.
+// ==========================================
+app.post('/api/renewed/secure-quote', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const accessToken = String(req.body?.accessToken || '').trim();
+        if (!accessToken || accessToken.length > 8192) {
+            return res.status(401).json({success:false,message:'Verified customer OTP access token is required.'});
+        }
+        let verifiedPhone;
+        try {
+            const verification = await verifyMsg91AccessToken(accessToken);
+            if (String(verification?.type || '').toLowerCase() !== 'success') {
+                return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+            }
+            verifiedPhone = extractVerifiedPhoneFromMsg91(verification, accessToken);
+        } catch (e) {
+            console.error('Renewed customer verification failed:', e.message);
+            return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+        }
+        if (!/^[6-9]\d{9}$/.test(verifiedPhone || '')) {
+            return res.status(401).json({success:false,message:'Verified mobile number is unavailable.'});
+        }
+        const users = await renewedQuery('SELECT id FROM public.users WHERE phone = ? LIMIT 1',[verifiedPhone]);
+        if (!users.length) return res.status(401).json({success:false,message:'Register or login before checkout.'});
+        const address = req.body?.address;
+        const items = req.body?.items;
+        if (!address || typeof address !== 'object' || Array.isArray(address) ||
+            !Array.isArray(items) || items.length < 1 || items.length > 20) {
+            return res.status(400).json({success:false,message:'Delivery address and 1–20 items are required.'});
+        }
+        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const pincode = String(address.pincode || '').trim();
+        const fullName = String(address.full_name || address.name || '').trim();
+        const street = String(address.street || address.address || '').trim();
+        const city = String(address.city || '').trim();
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
+            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
+            fullName.length < 2 || fullName.length > 140 || street.length < 5 || street.length > 500 ||
+            city.length < 2 || city.length > 100) {
+            return res.status(400).json({success:false,message:'Enter a complete Tamil Nadu delivery address.'});
+        }
+        const quantities = new Map();
+        for (const item of items) {
+            const id = String(item?.product_id || '').trim();
+            const qty = Number(item?.quantity);
+            if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99) {
+                return res.status(400).json({success:false,message:'Invalid product ID or quantity.'});
+            }
+            const sum = (quantities.get(id) || 0) + qty;
+            if (sum > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+            quantities.set(id,sum);
+        }
+        const ids = [...quantities.keys()];
+        const products = await renewedQuery(
+            `SELECT id,name,price,stock,status FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
+        const byId = new Map(products.map(p=>[String(p.id),p]));
+        let subtotal = 0;
+        const quoteItems = [];
+        for (const id of ids) {
+            const p = byId.get(id), qty = quantities.get(id);
+            if (!p || p.status !== 'published' || Number(p.stock) < qty) {
+                return res.status(409).json({success:false,message:'Product unavailable or insufficient stock.'});
+            }
+            const unit = Number(p.price), line = unit * qty;
+            if (!Number.isSafeInteger(unit) || unit < 1 || !Number.isSafeInteger(line)) throw Error('Invalid product price.');
+            subtotal += line;
+            if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
+            quoteItems.push({product_id:id,name:p.name,quantity:qty,unit_price:unit,line_total:line});
+        }
+        const rates = await renewedQuery(
+            'SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1',
+            [district]);
+        if (!rates.length) return res.status(409).json({success:false,message:'Delivery rate not configured for this district.'});
+        const fee = Number(rates[0].fee), total = subtotal + fee;
+        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) || total < 1) throw Error('Invalid delivery amount.');
+        return res.json({success:true,currency:'INR',items:quoteItems,subtotal,delivery_fee:fee,total,
+            district,pincode,customer_verified:true,checkout_enabled:false,payment_enabled:false,
+            message:'Verified quote only. No order, reservation or payment created.'});
+    } catch (e) { return renewedError(res,e); }
+});
+
+// ==========================================
 // CEROOD RENEWED — PHASE 5B: ATOMIC STOCK RESERVATION
 // Not customer-facing yet. Enable only after login/payment workflow is ready.
 // ==========================================
