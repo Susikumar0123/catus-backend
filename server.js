@@ -8952,6 +8952,57 @@ app.delete('/api/admin/renewed/products/:id', async (req,res) => {
         res.json({success:true,deleted_id:rows[0].id});
     } catch(error) { renewedError(res,error); }
 });
-// Shopping checkout/payment intentionally not enabled in Phase 4.
+// ==========================================
+// CEROOD RENEWED — PHASE 5A: SERVER-VERIFIED PRICE QUOTE
+// Does NOT create orders, reserve stock, or accept payments yet.
+// ==========================================
+app.post('/api/renewed/quote', async (req, res) => {
+    try {
+        const items = req.body && req.body.items;
+        if (!Array.isArray(items) || items.length < 1 || items.length > 20) {
+            return res.status(400).json({success:false,message:'Provide 1–20 product items.'});
+        }
+        const quantities = new Map();
+        for (const item of items) {
+            const id = String(item && item.product_id || '').trim();
+            const quantity = Number(item && item.quantity);
+            if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(quantity) || quantity < 1 || quantity > 99) {
+                return res.status(400).json({success:false,message:'Invalid product ID or quantity.'});
+            }
+            const combined = (quantities.get(id) || 0) + quantity;
+            if (combined > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+            quantities.set(id, combined);
+        }
+        const ids = [...quantities.keys()];
+        const placeholders = ids.map(() => '?').join(',');
+        const rows = await renewedQuery(
+            `SELECT id, name, price, stock, status, image_url, condition, warranty_days
+             FROM public.renewed_products WHERE id IN (${placeholders})`, ids
+        );
+        const byId = new Map(rows.map(row => [row.id, row]));
+        let subtotal = 0;
+        const quoteItems = [];
+        for (const id of ids) {
+            const p = byId.get(id), quantity = quantities.get(id);
+            if (!p || p.status !== 'published' || p.stock < quantity) {
+                return res.status(409).json({success:false,message:'A product is unavailable or has insufficient stock.',product_id:id});
+            }
+            const unitPrice = Number(p.price);
+            if (!Number.isSafeInteger(unitPrice) || unitPrice < 1) throw Error('Invalid stored price');
+            const lineTotal = unitPrice * quantity;
+            subtotal += lineTotal;
+            if (!Number.isSafeInteger(subtotal)) throw Error('Quote amount overflow');
+            quoteItems.push({product_id:id,name:p.name,quantity,unit_price:unitPrice,line_total:lineTotal,
+                image_url:p.image_url,condition:p.condition,warranty_days:p.warranty_days});
+        }
+        return res.json({success:true,currency:'INR',items:quoteItems,subtotal,
+            delivery_fee:null,total:null,checkout_enabled:false,
+            message:'Price quote only. Delivery fee and payment will be enabled after secure stock reservation integration.'});
+    } catch (error) {
+        return renewedError(res,error);
+    }
+});
+
+// Shopping checkout/payment intentionally not enabled in Phase 5A.
 
 initDatabase();
