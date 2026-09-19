@@ -9003,6 +9003,59 @@ app.post('/api/renewed/quote', async (req, res) => {
     }
 });
 
+
+// ==========================================
+// CEROOD RENEWED — PHASE 5E: DESTINATION DISTRICT DELIVERY QUOTE
+// Price and stock rechecked server-side. No order, reservation or payment.
+// Admin must explicitly activate a verified rate for each district.
+// ==========================================
+app.post('/api/renewed/delivery-quote', async (req,res) => {
+    try {
+        const items = req.body && req.body.items;
+        const address = req.body && req.body.address;
+        if (!Array.isArray(items) || items.length < 1 || items.length > 20 || !address || typeof address !== 'object' || Array.isArray(address))
+            return res.status(400).json({success:false,message:'Items and delivery address are required.'});
+        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
+        const pincode = String(address.pincode || '').trim();
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) || !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^\d{6}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a valid Tamil Nadu district and six-digit pincode.'});
+        // TN PIN prefixes are a preliminary input check, not a deliverability guarantee.
+        if (!/^[56]\d{5}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a Tamil Nadu pincode.'});
+        const quantities = new Map();
+        for (const item of items) {
+            const id = String(item && item.product_id || '').trim();
+            const qty = Number(item && item.quantity);
+            if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99)
+                return res.status(400).json({success:false,message:'Invalid product or quantity.'});
+            const combined = (quantities.get(id) || 0) + qty;
+            if (combined > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+            quantities.set(id,combined);
+        }
+        const ids = [...quantities.keys()];
+        const rows = await renewedQuery(`SELECT id,price,stock,status FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
+        const byId = new Map(rows.map(p=>[p.id,p]));
+        let subtotal = 0;
+        for (const id of ids) {
+            const p = byId.get(id),qty = quantities.get(id);
+            if (!p || p.status !== 'published' || Number(p.stock) < qty)
+                return res.status(409).json({success:false,message:'A product is unavailable or has insufficient stock.'});
+            subtotal += Number(p.price)*qty;
+            if (!Number.isSafeInteger(subtotal) || subtotal < 1)
+                throw new Error('Invalid stored quote price.');
+        }
+        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE district = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if (!rates.length) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
+            delivery_status:'pending',checkout_enabled:false,message:'Tamil Nadu delivery requested. Cerood has not configured/confirmed a delivery rate for this district.'});
+        const fee = Number(rates[0].fee);
+        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(subtotal+fee)) throw new Error('Invalid delivery amount.');
+        return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:fee,total:subtotal+fee,
+            delivery_status:'rate_configured',checkout_enabled:false,
+            message:'Estimated total only. Final delivery availability and amount must be reconfirmed before payment.'});
+    } catch(e) { renewedError(res,e); }
+});
+
 // ==========================================
 // CEROOD RENEWED — PHASE 5B: ATOMIC STOCK RESERVATION
 // Not customer-facing yet. Enable only after login/payment workflow is ready.
