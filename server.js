@@ -9045,7 +9045,7 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
             if (!Number.isSafeInteger(subtotal) || subtotal < 1)
                 throw new Error('Invalid stored quote price.');
         }
-        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE district = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
         if (!rates.length) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
             delivery_status:'pending',checkout_enabled:false,message:'Tamil Nadu delivery requested. Cerood has not configured/confirmed a delivery rate for this district.'});
         const fee = Number(rates[0].fee);
