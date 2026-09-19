@@ -41,6 +41,8 @@ app.use(cors({
     credentials: true
 }));
 
+// Razorpay webhook requires the ORIGINAL bytes, before JSON parsing.
+app.use('/api/renewed/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use(express.json());
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
@@ -9150,6 +9152,43 @@ const RENEWED_RESERVE_LOCK = 51029019;
 const RENEWED_RESERVE_MINUTES = 15;
 
 // Lock + release is performed in one transaction, serializing reserve/release.
+// Payment finalization is idempotent and must run under the global advisory lock.
+async function renewedFinalizePayment(client, orderId, razorpayOrderId, paymentId) {
+    const rows = await client.query(
+        `SELECT id,status,total,razorpay_order_id,razorpay_payment_id FROM public.renewed_orders
+         WHERE id=$1 FOR UPDATE`,[orderId]);
+    const order = rows[0];
+    if (!order || order.razorpay_order_id !== razorpayOrderId) return 'mismatch';
+    if (order.status === 'paid') return order.razorpay_payment_id === paymentId ? 'paid' : 'mismatch';
+    if (order.status !== 'pending_payment') {
+        // Expired/cancelled stock may already be sold: never silently mark fulfilled.
+        await client.query(`UPDATE public.renewed_orders SET status='payment_review',
+          razorpay_payment_id=$2,updated_at=NOW() WHERE id=$1 AND status <> 'paid'`,[orderId,paymentId]);
+        return 'payment_review';
+    }
+    await client.query(`UPDATE public.renewed_orders SET status='paid',
+      razorpay_payment_id=$2,paid_at=NOW(),updated_at=NOW() WHERE id=$1`,[orderId,paymentId]);
+    return 'paid';
+}
+async function renewedVerifyAndFinalize(razorpayOrderId,paymentId) {
+    const rows = await renewedQuery(`SELECT id,total FROM public.renewed_orders
+      WHERE razorpay_order_id=? LIMIT 1`,[razorpayOrderId]);
+    if (!rows.length) return 'not_found';
+    const payment = await razorpayInstance.payments.fetch(paymentId);
+    if (payment.order_id !== razorpayOrderId || payment.currency !== 'INR' ||
+        Number(payment.amount) !== Number(rows[0].total)*100 || payment.status !== 'captured')
+        return 'not_captured';
+    const client = await db.getClient();
+    try {
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
+        const outcome = await renewedFinalizePayment(client,rows[0].id,razorpayOrderId,paymentId);
+        await client.query('COMMIT');
+        return outcome;
+    } catch(e) {await client.query('ROLLBACK').catch(()=>{});throw e;}
+    finally {client.release();}
+}
+
 async function renewedReleaseExpired(client) {
     const expired = await client.query(`
         SELECT id FROM public.renewed_orders
@@ -9157,7 +9196,24 @@ async function renewedReleaseExpired(client) {
         ORDER BY id FOR UPDATE
     `);
     if (!expired.length) return 0;
-    const ids = expired.map(o => o.id);
+    const ids = [];
+    for (const row of expired) {
+        const detail = await client.query('SELECT razorpay_order_id,total FROM public.renewed_orders WHERE id=$1',[row.id]);
+        if (detail[0]?.razorpay_order_id) {
+            // Fail closed on Razorpay outage: never release inventory without checking payment.
+            const payments = await razorpayInstance.orders.fetchPayments(detail[0].razorpay_order_id);
+            const captured = (payments.items || []).find(p => p.status === 'captured' &&
+                Number(p.amount) === Number(detail[0].total)*100 && p.currency === 'INR');
+            if (captured) {
+                await renewedFinalizePayment(client,row.id,detail[0].razorpay_order_id,captured.id);
+                continue;
+            }
+            // Authorized/in-flight payment: hold stock until manual reconciliation.
+            if ((payments.items || []).some(p => p.status === 'authorized' || p.status === 'created')) continue;
+        }
+        ids.push(row.id);
+    }
+    if (!ids.length) return 0;
     await client.query(`
         UPDATE public.renewed_products p SET stock = p.stock + r.qty, updated_at = NOW()
         FROM (
@@ -9196,10 +9252,10 @@ async function renewedRunExpiry() {
 // ==========================================
 app.post('/api/renewed/prepare-payment', async (req, res) => {
     res.set('Cache-Control', 'no-store');
-    const RENEWED_PAYMENT_FLOW_READY = false; // Step 4 must implement webhook and payment reconciliation first.
+    const RENEWED_PAYMENT_FLOW_READY = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' && Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
     if (!RENEWED_PAYMENT_FLOW_READY) {
         return res.status(503).json({success:false,
-            message:'Renewed payment preparation is not enabled yet. Payment verification and webhook integration are pending.'});
+            message:'Renewed payment preparation is disabled. Configure webhook and explicitly enable Renewed checkout after testing.'});
     }
 
     let client;
@@ -9365,6 +9421,67 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
 // implementation by flipping an environment variable on a LIVE Razorpay account.
 // Future replacement must atomically verify identity, delivery amount, stock,
 // Razorpay order creation and webhook reconciliation before opening checkout.
+// Customer callback: signature plus server-side payment fetch; never trust client success alone.
+app.post('/api/renewed/verify-payment',async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const {razorpay_order_id:orderId,razorpay_payment_id:paymentId,razorpay_signature:signature} = req.body || {};
+        if (![orderId,paymentId,signature].every(v=>typeof v==='string' && v.length>3 && v.length<256))
+            return res.status(400).json({success:false,message:'Missing payment proof.'});
+        const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET || '')
+            .update(orderId+'|'+paymentId).digest('hex');
+        if (!/^[a-f0-9]{64}$/i.test(signature) ||
+            !crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))
+            return res.status(401).json({success:false,message:'Invalid payment signature.'});
+        const result=await renewedVerifyAndFinalize(orderId,paymentId);
+        return res.status(result==='paid'?200:409).json({success:result==='paid',status:result,
+            message:result==='paid'?'Payment verified.': 'Payment requires reconciliation; contact support if debited.'});
+    }catch(e){console.error('Renewed payment verification:',e.message);
+        return res.status(503).json({success:false,message:'Verification pending. If debited, do not pay again; contact support.'});}
+});
+
+// Configure Razorpay Dashboard webhook URL /api/renewed/razorpay-webhook,
+// event payment.captured; secret is distinct from RAZORPAY_KEY_SECRET.
+app.post('/api/renewed/razorpay-webhook',async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const secret=process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET;
+        const sig=String(req.get('x-razorpay-signature') || '');
+        if (!secret || !Buffer.isBuffer(req.body) || !/^[a-f0-9]{64}$/i.test(sig))
+            return res.status(401).json({success:false});
+        const expected=crypto.createHmac('sha256',secret).update(req.body).digest('hex');
+        if (!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(sig,'hex')))
+            return res.status(401).json({success:false});
+        const event=JSON.parse(req.body.toString('utf8'));
+        if (event.event !== 'payment.captured') return res.json({success:true,ignored:true});
+        const payment=event.payload?.payment?.entity;
+        if (!payment?.id || !payment?.order_id) return res.status(400).json({success:false});
+        const result=await renewedVerifyAndFinalize(payment.order_id,payment.id);
+        // Unknown orders may belong to Doorstep checkout: ignore.
+        return res.json({success:true,status:result});
+    }catch(e){console.error('Renewed webhook:',e.message);
+        return res.status(503).json({success:false,message:'Retry webhook.'});}
+});
+
+// Read-only order status. Phone OTP token is required to prevent order enumeration.
+app.post('/api/renewed/order-status',async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const orderId=String(req.body?.order_id||'');
+        if (!/^[0-9a-f-]{36}$/i.test(orderId)) return res.status(400).json({success:false});
+        const token=String(req.body?.accessToken||'');
+        if (!token || token.length>8192) return res.status(401).json({success:false});
+        const verified=await verifyMsg91AccessToken(token);
+        if (String(verified?.type||'').toLowerCase()!=='success') return res.status(401).json({success:false});
+        const phone=extractVerifiedPhoneFromMsg91(verified,token);
+        const rows=await renewedQuery(`SELECT id,status,total,currency,created_at,paid_at
+          FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[orderId,phone]);
+        if (!rows.length) return res.status(404).json({success:false});
+        return res.json({success:true,order:rows[0]});
+    }catch(e){console.error('Renewed order status:',e.message);
+        return res.status(503).json({success:false,message:'Order status unavailable.'});}
+});
+
 app.post('/api/renewed/reservations', (req,res) => {
     return res.status(503).json({success:false,
         message:'Renewed checkout is not enabled yet. Secure payment integration is in progress.'});
@@ -9372,9 +9489,11 @@ app.post('/api/renewed/reservations', (req,res) => {
 
 app.get('/api/renewed/checkout-status', (req,res) => {
     res.set('Cache-Control','no-store');
-    return res.json({success:true,checkout_enabled:false,payment_enabled:false,
-        reservations_enabled:false,currency:'INR',
-        message:'Live Razorpay is not enabled for Renewed purchases yet.'});
+    const enabled = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' &&
+        Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+    return res.json({success:true,checkout_enabled:enabled,payment_enabled:enabled,
+        reservations_enabled:enabled,currency:'INR',
+        message:enabled?'Renewed payment backend enabled.':'Renewed purchases remain disabled until explicitly enabled.'});
 });
 
 // Release expired stock periodically, including when there are no customers.
