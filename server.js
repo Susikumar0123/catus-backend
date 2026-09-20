@@ -9514,6 +9514,47 @@ app.get('/api/renewed/checkout-status', (req,res) => {
         message:enabled?'Renewed payment backend enabled.':'Renewed purchases remain disabled until explicitly enabled.'});
 });
 
+// Phase 5H: Recover captured payments when the browser callback or webhook was missed.
+// Razorpay network calls stay OUTSIDE all database transactions and advisory locks.
+// Unpaid Razorpay-linked reservations remain held for manual review: a snapshot
+// showing no capture cannot rule out a late capture or an in-flight payment.
+let renewedReconciliationRunning = false;
+async function renewedReconcileCapturedPayments() {
+    if (renewedReconciliationRunning || process.env.RENEWED_LIVE_CHECKOUT_ENABLED !== 'true') return;
+    renewedReconciliationRunning = true;
+    try {
+        const candidates = await renewedQuery(`
+            SELECT id,razorpay_order_id FROM public.renewed_orders
+            WHERE status='pending_payment' AND razorpay_order_id IS NOT NULL
+              AND reserved_until <= NOW()
+            ORDER BY reserved_until ASC LIMIT 20
+        `);
+        for (const order of candidates) {
+            try {
+                // Query payment records by the *server-stored* Razorpay order ID.
+                const response = await razorpayInstance.orders.fetchPayments(order.razorpay_order_id);
+                const payments = Array.isArray(response?.items) ? response.items : [];
+                for (const payment of payments) {
+                    if (payment?.status !== 'captured' || !payment?.id) continue;
+                    const result = await renewedVerifyAndFinalize(order.razorpay_order_id,payment.id);
+                    console.log('Renewed payment reconciliation:',order.id,result);
+                    if (result === 'paid' || result === 'payment_review') break;
+                }
+                // Deliberately DO NOT release stock when no captured payment is found.
+            } catch (error) {
+                console.error('Renewed reconciliation retry pending:',order.id,error.message);
+            }
+        }
+    } finally {
+        renewedReconciliationRunning = false;
+    }
+}
+const renewedReconciliationTimer = setInterval(() => {
+    renewedReconcileCapturedPayments().catch(e =>
+        console.error('Renewed reconciliation:',e.message));
+}, 5*60*1000);
+renewedReconciliationTimer.unref();
+
 // Release expired stock periodically, including when there are no customers.
 // Keep the timer unref'd so it does not hold up shutdown.
 const renewedExpiryTimer = setInterval(() => {
