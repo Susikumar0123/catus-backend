@@ -9181,7 +9181,7 @@ async function renewedFinalizePayment(client, orderId, razorpayOrderId, paymentI
     const order = rows[0];
     if (!order || order.razorpay_order_id !== razorpayOrderId) return 'mismatch';
     if (order.status === 'paid') return order.razorpay_payment_id === paymentId ? 'paid' : 'mismatch';
-    if (order.status !== 'pending_payment') {
+    if (!['pending_payment','creating_order'].includes(order.status)) {
         // Expired/cancelled stock may already be sold: never silently mark fulfilled.
         await client.query(`UPDATE public.renewed_orders SET status='payment_review',
           razorpay_payment_id=$2,updated_at=NOW() WHERE id=$1 AND status <> 'paid'`,[orderId,paymentId]);
@@ -9361,8 +9361,8 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             `INSERT INTO public.renewed_orders
              (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
               subtotal,delivery_fee,total,currency,status,reserved_until)
-             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','pending_payment',
-                     NOW() + INTERVAL '15 minutes')`,
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','creating_order',
+        NOW() + INTERVAL '15 minutes')`,
             [orderId,String(users[0].id),fullName,verifiedPhone,users[0].email || null,
              JSON.stringify(savedAddress),subtotal,fee,total]);
         for (const item of orderItems) {
@@ -9381,19 +9381,29 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         client.release(); client = null;
         committedOrderId = orderId;
 
-        // Network call is OUTSIDE the DB transaction; rollback by order ID on failure.
+        // Network call is OUTSIDE the DB transaction; ambiguous failures require review, never blind stock release.
         const razorpayOrder = await razorpayInstance.orders.create({
             amount:total * 100,currency:'INR',receipt:`renewed_${orderId.slice(0,24)}`,
             notes:{renewed_order_id:orderId}
         });
         const updated = await renewedQuery(
-            `UPDATE public.renewed_orders SET razorpay_order_id = ?,updated_at = NOW()
-             WHERE id = ? AND status = 'pending_payment' AND reserved_until > NOW()
-               AND razorpay_order_id IS NULL RETURNING id,reserved_until`,
-            [razorpayOrder.id,orderId]);
+    `UPDATE public.renewed_orders
+     SET razorpay_order_id = ?,
+         status = 'pending_payment',
+         updated_at = NOW()
+     WHERE id = ?
+       AND status = 'creating_order'
+       AND razorpay_order_id IS NULL
+     RETURNING id,reserved_until`,
+    [razorpayOrder.id,orderId]);
         if (!updated.length) {
-            // Razorpay order exists but local reservation expired; never present it for payment.
-            return res.status(409).json({success:false,message:'Reservation expired. Please retry checkout.'});
+            // External order exists; do not release inventory or offer another payment.
+            console.error('RENEWED_ORDER_LINK_REVIEW:', orderId, razorpayOrder.id);
+            return res.status(503).json({success:false,message:'Payment preparation needs support review. Do not retry payment.'});
+        }
+        if (new Date(updated[0].reserved_until).getTime() <= Date.now()) {
+            // Keep the Razorpay link for reconciliation, but never offer expired checkout.
+            return res.status(409).json({success:false,message:'Reservation timed out. Contact support before retrying.'});
         }
         return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
             amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
@@ -9403,30 +9413,15 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             await client.query('ROLLBACK').catch(()=>{});
             client.release(); client = null;
         }
-        if (committedOrderId) {
-            // Release only the exact pending reservation, under the same global lock.
-            let cleanup;
-            try {
-                cleanup = await db.getClient();
-                await cleanup.query('BEGIN');
-                await cleanup.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
-                const released = await cleanup.query(
-                    `UPDATE public.renewed_orders SET status='cancelled',updated_at=NOW()
-                     WHERE id=$1 AND status='pending_payment' AND razorpay_order_id IS NULL
-                     RETURNING id`,[committedOrderId]);
-                if (released.length) {
-                    await cleanup.query(
-                        `UPDATE public.renewed_products p SET stock=p.stock+r.qty,updated_at=NOW()
-                         FROM (SELECT product_id,SUM(quantity)::integer qty
-                               FROM public.renewed_order_items WHERE order_id=$1
-                               GROUP BY product_id) r WHERE p.id=r.product_id`,[committedOrderId]);
-                }
-                await cleanup.query('COMMIT');
-            } catch (cleanupError) {
-                if (cleanup) await cleanup.query('ROLLBACK').catch(()=>{});
-                console.error('Renewed payment preparation cleanup failed:',cleanupError.message);
-            } finally {if (cleanup) cleanup.release();}
-        }
+       if (committedOrderId) {
+    // Razorpay creation may have succeeded even if its API call failed.
+    // Keep stock reserved until the order is safely reconciled.
+    console.error(
+        'RENEWED_ORDER_REQUIRES_REVIEW:',
+        committedOrderId,
+        e.message
+    );
+}
         console.error('Renewed prepare payment:',e.message);
         return res.status(e.status || 503).json({success:false,
             message:e.status ? e.message : 'Unable to prepare payment. Please retry.'});
@@ -9520,15 +9515,26 @@ app.get('/api/renewed/checkout-status', (req,res) => {
 // showing no capture cannot rule out a late capture or an in-flight payment.
 let renewedReconciliationRunning = false;
 async function renewedReconcileCapturedPayments() {
-    if (renewedReconciliationRunning || process.env.RENEWED_LIVE_CHECKOUT_ENABLED !== 'true') return;
+    if (renewedReconciliationRunning || !process.env.RAZORPAY_KEY_ID || !process.env.RAZORPAY_KEY_SECRET) return;
     renewedReconciliationRunning = true;
     try {
         const candidates = await renewedQuery(`
             SELECT id,razorpay_order_id FROM public.renewed_orders
-            WHERE status='pending_payment' AND razorpay_order_id IS NOT NULL
+            WHERE status IN ('pending_payment','creating_order') AND razorpay_order_id IS NOT NULL
               AND reserved_until <= NOW()
             ORDER BY reserved_until ASC LIMIT 20
         `);
+        // Ambiguous remote creation must be reviewed against Razorpay receipt/notes.
+        // Never auto-release this stock based only on elapsed time.
+        const unlinked = await renewedQuery(`
+            SELECT id,created_at,reserved_until FROM public.renewed_orders
+            WHERE status='creating_order' AND razorpay_order_id IS NULL
+              AND reserved_until <= NOW()
+            ORDER BY reserved_until ASC LIMIT 20
+        `);
+        for (const order of unlinked) {
+            console.error('RENEWED_CREATION_MANUAL_REVIEW:', order.id);
+        }
         for (const order of candidates) {
             try {
                 // Query payment records by the *server-stored* Razorpay order ID.
