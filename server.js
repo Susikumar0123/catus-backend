@@ -9211,44 +9211,41 @@ async function renewedVerifyAndFinalize(razorpayOrderId,paymentId) {
 }
 
 async function renewedReleaseExpired(client) {
+    // IMPORTANT: No Razorpay HTTP calls while holding the DB transaction/advisory lock.
+    // A Razorpay order can receive a late capture even after the local reservation deadline.
+    // Fail closed: only reservations that NEVER received a Razorpay order can be
+    // automatically released. Reservations with a Razorpay order require payment
+    // reconciliation before stock is returned; they remain pending and unavailable.
     const expired = await client.query(`
         SELECT id FROM public.renewed_orders
-        WHERE status = 'pending_payment' AND reserved_until <= NOW()
+        WHERE status = 'pending_payment'
+          AND reserved_until <= NOW()
+          AND razorpay_order_id IS NULL
         ORDER BY id FOR UPDATE
     `);
     if (!expired.length) return 0;
-    const ids = [];
-    for (const row of expired) {
-        const detail = await client.query('SELECT razorpay_order_id,total FROM public.renewed_orders WHERE id=$1',[row.id]);
-        if (detail[0]?.razorpay_order_id) {
-            // Fail closed on Razorpay outage: never release inventory without checking payment.
-            const payments = await razorpayInstance.orders.fetchPayments(detail[0].razorpay_order_id);
-            const captured = (payments.items || []).find(p => p.status === 'captured' &&
-                Number(p.amount) === Number(detail[0].total)*100 && p.currency === 'INR');
-            if (captured) {
-                await renewedFinalizePayment(client,row.id,detail[0].razorpay_order_id,captured.id);
-                continue;
-            }
-            // Authorized/in-flight payment: hold stock until manual reconciliation.
-            if ((payments.items || []).some(p => p.status === 'authorized' || p.status === 'created')) continue;
-        }
-        ids.push(row.id);
-    }
-    if (!ids.length) return 0;
+    const ids = expired.map(row => row.id);
+    const changed = await client.query(`
+        UPDATE public.renewed_orders SET status = 'expired', updated_at = NOW()
+        WHERE id = ANY($1::uuid[])
+          AND status = 'pending_payment'
+          AND razorpay_order_id IS NULL
+        RETURNING id
+    `,[ids]);
+    const releasedIds = changed.map(row => row.id);
+    if (!releasedIds.length) return 0;
     await client.query(`
-        UPDATE public.renewed_products p SET stock = p.stock + r.qty, updated_at = NOW()
+        UPDATE public.renewed_products p
+        SET stock = p.stock + r.qty, updated_at = NOW()
         FROM (
           SELECT product_id, SUM(quantity)::integer AS qty
-          FROM public.renewed_order_items WHERE order_id = ANY($1::uuid[])
+          FROM public.renewed_order_items
+          WHERE order_id = ANY($1::uuid[])
           GROUP BY product_id
         ) r
         WHERE p.id = r.product_id
-    `,[ids]);
-    await client.query(`
-        UPDATE public.renewed_orders SET status = 'expired', updated_at = NOW()
-        WHERE id = ANY($1::uuid[]) AND status = 'pending_payment'
-    `,[ids]);
-    return ids.length;
+    `,[releasedIds]);
+    return releasedIds.length;
 }
 
 async function renewedRunExpiry() {
