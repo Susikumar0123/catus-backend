@@ -7520,13 +7520,13 @@ app.get('/api/sitemap.xml', (req, res) => {
                     // First child sitemap-la homepage-um irukkum.
                     // Every page safe-ah same location limit use pannuvom.
                     const locationsPerSitemap =
-                        Math.max(
-                            1,
-                            Math.floor(
-                                (SITEMAP_MAX_URLS - 1) /
-                                totalServices
-                            )
-                        );
+    Math.max(
+        1,
+        Math.floor(
+            (SITEMAP_MAX_URLS - 1000) /
+            (totalServices + 2)
+        )
+    );
 
                     const totalPages =
                         Math.max(
@@ -7652,13 +7652,13 @@ app.get('/api/sitemap/:page', (req, res) => {
             }
 
             const locationsPerSitemap =
-                Math.max(
-                    1,
-                    Math.floor(
-                        (SITEMAP_MAX_URLS - 1) /
-                        sitemapServices.length
-                    )
-                );
+    Math.max(
+        1,
+        Math.floor(
+            (SITEMAP_MAX_URLS - 1000) /
+            (sitemapServices.length + 2)
+        )
+    );
 
             const offset =
                 (page - 1) *
@@ -7731,7 +7731,10 @@ app.get('/api/sitemap/:page', (req, res) => {
       AND TRIM(district) <> ''
       AND state IS NOT NULL
       AND TRIM(state) <> ''
-    ORDER BY id
+    ORDER BY
+    LOWER(TRIM(state)),
+    LOWER(TRIM(district)),
+    id
     LIMIT ${locationsPerSitemap}
     OFFSET ${offset}
 `;
@@ -7784,9 +7787,8 @@ if (page === 1) {
     );
 }
 
-// District hub pages only in sitemap-1
-if (page === 1) {
-
+// District hub pages for every sitemap batch
+{
     const districtHubSet = new Set();
 
     (locations || []).forEach(location => {
@@ -7811,8 +7813,8 @@ if (page === 1) {
     });
 }
 
-// Location hub pages only in sitemap-1
-if (page === 1) {
+// Location hub pages for every sitemap batch
+{
 
     const locationHubSet = new Set();
 
@@ -8460,7 +8462,9 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
             TRUE AS is_available,
             (
     s.service_name ||
-    ' Near Me | Doorstep Repair & Service'
+    ' in ' ||
+    l.location_name ||
+    ' | Cerood'
 ) AS seo_title,
 
 (
@@ -8468,9 +8472,13 @@ app.get('/api/location-page/:state/:district/:location/:service', (req, res) => 
     LOWER(s.service_name) ||
     ' in ' ||
     l.location_name ||
-    ', ' ||
-    l.district ||
-    '. Doorstep appliance service by Cerood with easy online booking and local service support.'
+    CASE
+        WHEN LOWER(TRIM(l.location_name)) =
+             LOWER(TRIM(l.district))
+        THEN ''
+        ELSE ', ' || l.district
+    END ||
+    ' with Cerood. Check technician availability and request doorstep service online.'
 ) AS seo_description,
 
 NULL AS content
