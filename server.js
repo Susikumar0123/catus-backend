@@ -3404,10 +3404,68 @@ function requireAdminAuth(req, res, next) {
     next();
 }
 
+
+// CEROOD PARTNERSHIP LEADS — public intake; admin access protected by existing middleware.
+const partnerTypes = ['apartment', 'hotel', 'pg-hostel', 'other'];
+const partnerStatuses = ['New', 'Contacted', 'Follow-up', 'Partnered', 'Closed'];
+app.post('/api/partnership-leads', async (req, res) => {
+    try {
+        const body = req.body || {};
+        const clean = (key, max = 500) => String(body[key] ?? '').trim().slice(0, max);
+        const partner_type = clean('partner_type', 30);
+        const business_name = clean('business_name', 160);
+        const contact_name = clean('contact_name', 120);
+        const phone = clean('phone', 24).replace(/\D/g, '').replace(/^91(?=[6-9]\d{9}$)/, '');
+        const location = clean('location', 250);
+        const email = clean('email', 160);
+        const property_size = clean('property_size', 100);
+        const services = clean('services', 1200);
+        const message = clean('message', 2500);
+        const website = clean('website', 200); // honeypot
+        if (website) return res.status(400).json({success:false,message:'Invalid submission.'});
+        if (!partnerTypes.includes(partner_type) || !business_name || !contact_name || !location || !/^[6-9]\d{9}$/.test(phone)) {
+            return res.status(400).json({success:false,message:'Enter business type, business name, contact person, valid 10-digit mobile and location.'});
+        }
+        if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) return res.status(400).json({success:false,message:'Invalid email.'});
+        const rows = await new Promise((resolve, reject) => db.query(
+            `INSERT INTO public.partnership_leads (partner_type,business_name,contact_name,phone,location,email,property_size,services,message)
+             VALUES (?,?,?,?,?,?,?,?,?) RETURNING id, created_at`,
+            [partner_type,business_name,contact_name,phone,location,email,property_size,services,message],
+            (err, result) => err ? reject(err) : resolve(result)
+        ));
+        return res.status(201).json({success:true,message:'Enquiry submitted successfully. Our team will contact you.',id:rows[0].id});
+    } catch (error) {
+        console.error('Partnership lead submit:', error.message);
+        return res.status(500).json({success:false,message:'Unable to submit enquiry. Please try again.'});
+    }
+});
+
 // Protect every /api/admin/* route below this line
 app.use('/api/admin', requireAdminAuth);
 
 // ==========================================
+
+// CEROOD PARTNERSHIP LEADS — these routes inherit requireAdminAuth.
+app.get('/api/admin/partnership-leads', (req, res) => {
+    db.query(`SELECT id,partner_type,business_name,contact_name,phone,location,email,property_size,services,message,status,admin_notes,created_at,updated_at
+              FROM public.partnership_leads ORDER BY created_at DESC LIMIT 500`, [], (err, rows) => {
+        if (err) { console.error('Partner leads list:',err.message); return res.status(500).json({success:false,message:'Unable to load partnership leads.'}); }
+        res.json({success:true,leads:rows});
+    });
+});
+app.patch('/api/admin/partnership-leads/:id', (req, res) => {
+    const id = Number(req.params.id);
+    const status = String(req.body?.status || '').trim();
+    const admin_notes = String(req.body?.admin_notes || '').trim().slice(0, 4000);
+    if (!Number.isSafeInteger(id) || id < 1 || !partnerStatuses.includes(status)) return res.status(400).json({success:false,message:'Invalid lead or status.'});
+    db.query(`UPDATE public.partnership_leads SET status=?,admin_notes=?,updated_at=NOW() WHERE id=? RETURNING id,status,admin_notes`,
+        [status,admin_notes,id],(err,rows)=>{
+            if(err){console.error('Partner lead update:',err.message);return res.status(500).json({success:false,message:'Unable to update lead.'});}
+            if(!rows.length)return res.status(404).json({success:false,message:'Lead not found.'});
+            res.json({success:true,lead:rows[0]});
+        });
+});
+
 // ADMIN - CHECKOUT SETTINGS
 // ==========================================
 
