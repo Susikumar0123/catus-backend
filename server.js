@@ -9747,6 +9747,35 @@ app.post('/api/renewed/customer-login',(req,res)=>{
     return res.json({success:true,token,user:{name:u.name,phone:u.phone}});
   });
 });
+// Explicit guest COD receipt claim. A signed-in user must possess the original
+// checkout request UUID AND the order's checkout phone must match their account.
+// Never claim by phone/order ID alone; never overwrite another account's ownership.
+app.post('/api/renewed/claim-guest-orders',renewedCustomerSession,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const entries=req.body?.receipts;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!Array.isArray(entries)||entries.length<1||entries.length>30||
+     entries.some(e=>!uuid.test(String(e?.id||''))||!uuid.test(String(e?.request_id||''))))
+    return res.status(400).json({success:false,message:'Valid checkout receipts required (maximum 30).'});
+  try{
+    // Confirm the current account phone from the DB, not a client-supplied value.
+    const users=await renewedQuery('SELECT phone FROM public.users WHERE id=? LIMIT 1',[req.renewedCustomerId]);
+    if(!users.length||String(users[0].phone)!==req.renewedCustomerPhone)
+      return res.status(401).json({success:false,message:'Account session changed. Please sign in again.'});
+    const linked=[];
+    for(const entry of entries){
+      const rows=await renewedQuery(`UPDATE public.renewed_orders
+        SET customer_id=?,updated_at=NOW()
+        WHERE id=? AND cod_request_id=? AND payment_method='cod'
+          AND customer_id IS NULL AND customer_phone=?
+        RETURNING id`,[req.renewedCustomerId,entry.id,entry.request_id,req.renewedCustomerPhone]);
+      if(rows.length)linked.push(rows[0].id);
+    }
+    return res.json({success:true,linked_count:linked.length,linked_order_ids:linked,
+      message:linked.length?'Guest orders linked to your account.':'No eligible unlinked orders for this account. Check the checkout phone and receipt.'});
+  }catch(e){console.error('Renewed guest claim:',e.message);
+    return res.status(503).json({success:false,message:'Could not link guest orders. Please retry.'});}
+});
 app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
 app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
