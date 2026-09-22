@@ -9013,7 +9013,7 @@ function renewedError(res,error) {
 }
 app.get('/api/renewed/products', async (req,res) => {
     try {
-        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE status = 'published' AND stock > 0 ORDER BY created_at DESC LIMIT 250`);
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE status = 'published' ORDER BY created_at DESC LIMIT 250`);
         res.json({success:true,products:rows.map(renewedPublicProduct)});
     } catch(error) { renewedError(res,error); }
 });
