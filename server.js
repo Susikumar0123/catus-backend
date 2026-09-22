@@ -9219,7 +9219,7 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
         }
         const ids = [...quantities.keys()];
         const products = await renewedQuery(
-            `SELECT id,name,price,stock,status FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
+            `SELECT id,name,price,stock,status,warranty_days FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
         const byId = new Map(products.map(p=>[String(p.id),p]));
         let subtotal = 0;
         const quoteItems = [];
@@ -9406,7 +9406,7 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         }
         const users=guestCheckout?[]:await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
         if(!guestCheckout&&!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
-        const products=await client.query(`SELECT id,name,price,stock,status FROM public.renewed_products
+        const products=await client.query(`SELECT id,name,price,stock,status,warranty_days FROM public.renewed_products
           WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
         const byId=new Map(products.map(p=>[String(p.id),p]));
         let subtotal=0;const orderItems=[];
@@ -9415,7 +9415,7 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             if(!p||p.status!=='published'||Number(p.stock)<qty){const e=Error('Product unavailable or sold out.');e.status=409;throw e;}
             const unit=Number(p.price),line=unit*qty;subtotal+=line;
             if(!Number.isSafeInteger(unit)||unit<1||!Number.isSafeInteger(line)||!Number.isSafeInteger(subtotal))throw Error('Invalid price.');
-            orderItems.push({id,name:p.name,qty,unit,line});
+            orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
         }
         const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
           WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
@@ -9435,8 +9435,8 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
               WHERE id=$2 AND status='published' AND stock >= $1 RETURNING id`,[item.qty,item.id]);
             if(!reduced.length){const e=Error('Product sold out.');e.status=409;throw e;}
             await client.query(`INSERT INTO public.renewed_order_items
-              (order_id,product_id,product_name,unit_price,quantity,line_total)
-              VALUES ($1,$2,$3,$4,$5,$6)`,[id,item.id,item.name,item.unit,item.qty,item.line]);
+              (order_id,product_id,product_name,unit_price,quantity,line_total,warranty_days_at_purchase)
+              VALUES ($1,$2,$3,$4,$5,$6,$7)`,[id,item.id,item.name,item.unit,item.qty,item.line,item.warranty_days]);
         }
         await client.query('COMMIT');
         return res.status(201).json({success:true,order_id:id,total,payment_method:'cod',payment_due:total,
@@ -9508,7 +9508,7 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
         await renewedReleaseExpired(client);
         const products = await client.query(
-            `SELECT id,name,price,stock,status FROM public.renewed_products
+            `SELECT id,name,price,stock,status,warranty_days FROM public.renewed_products
              WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,[sortedIds]);
         const byId = new Map(products.map(p => [String(p.id),p]));
         let subtotal = 0;
@@ -9522,7 +9522,7 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             if (!Number.isSafeInteger(unit) || unit < 1 || !Number.isSafeInteger(line)) throw Error('Invalid product price.');
             subtotal += line;
             if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
-            orderItems.push({id,name:p.name,qty,unit,line});
+            orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
         }
         const rates = await client.query(
             `SELECT fee FROM public.renewed_delivery_rates
@@ -9552,9 +9552,9 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             if (!reduced.length) {const e=new Error('Product sold out.');e.status=409;throw e;}
             await client.query(
                 `INSERT INTO public.renewed_order_items
-                 (order_id,product_id,product_name,unit_price,quantity,line_total)
-                 VALUES ($1,$2,$3,$4,$5,$6)`,
-                [orderId,item.id,item.name,item.unit,item.qty,item.line]);
+                 (order_id,product_id,product_name,unit_price,quantity,line_total,warranty_days_at_purchase)
+                 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+                [orderId,item.id,item.name,item.unit,item.qty,item.line,item.warranty_days]);
         }
         await client.query('COMMIT');
         client.release(); client = null;
@@ -9663,7 +9663,7 @@ app.get('/api/admin/renewed/orders', async (req,res) => {
     try {
         const orders = await renewedQuery(`SELECT id,customer_name,customer_phone,customer_email,
           delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,
-          razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
+          delivered_at,razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
           FROM public.renewed_orders ORDER BY created_at DESC LIMIT 300`);
         const ids = orders.map(o=>o.id);
         const items = ids.length ? await renewedQuery(`SELECT order_id,product_id,product_name,unit_price,quantity,line_total
@@ -9682,7 +9682,7 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
         if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) || !renewedDeliveryStages.includes(next))
             return res.status(400).json({success:false,message:'Invalid order ID or delivery status.'});
         const rows=await renewedQuery(`UPDATE public.renewed_orders
-          SET delivery_status=?,updated_at=NOW()
+          SET delivery_status=?,delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at,NOW()) ELSE delivered_at END,updated_at=NOW()
           WHERE id=? AND (status='paid' OR (status='processing' AND payment_method='cod')) AND
           (delivery_status IS NULL OR delivery_status IN ('confirmed','packing','packed','shipped','out_for_delivery','delivered'))
           AND (CASE COALESCE(delivery_status,'confirmed')
@@ -9690,7 +9690,7 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
             WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE 99 END)
           <= (CASE ? WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
             WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE -1 END)
-          RETURNING id,status,delivery_status,updated_at`,[next,id,next]);
+          RETURNING id,status,delivery_status,delivered_at,updated_at`,[next,next,id,next]);
         if(!rows.length)return res.status(409).json({success:false,message:'Only paid online or confirmed COD orders can advance; status cannot move backward. Refresh orders.'});
         return res.json({success:true,order:rows[0]});
     } catch(e){console.error('Renewed delivery update:',e.message);
@@ -9708,10 +9708,10 @@ app.post('/api/renewed/device-orders',async(req,res)=>{
   try{
     const orders=[];
     for(const entry of entries){
-      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,created_at,updated_at
+      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,created_at,updated_at
         FROM public.renewed_orders WHERE id=? AND cod_request_id=? AND payment_method='cod' LIMIT 1`,[entry.id,entry.request_id]);
       if(!rows.length)continue;
-      const items=await renewedQuery(`SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days
+      const items=await renewedQuery(`SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase
         FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id=? ORDER BY i.id`,[entry.id]);
       orders.push({...rows[0],items});
     }
@@ -9779,9 +9779,9 @@ app.post('/api/renewed/claim-guest-orders',renewedCustomerSession,async(req,res)
 app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
 app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
-  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
+  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
     const ids=orders.map(o=>o.id);
-    const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
+    const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
     const byId=new Map();for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item)}
     return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
   }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
@@ -9805,12 +9805,12 @@ app.post('/api/renewed/my-orders', async (req,res)=>{
         if(String(verified?.type||'').toLowerCase()!=='success')return res.status(401).json({success:false,message:'Mobile verification expired.'});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
         if(!/^[6-9]\d{9}$/.test(phone))return res.status(401).json({success:false,message:'Verified phone not available.'});
-        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,
+        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,
             paid_at,created_at,updated_at FROM public.renewed_orders
             WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[phone]);
         const ids=orders.map(o=>o.id);
         const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,
-            p.image_url,p.condition,p.warranty_days FROM public.renewed_order_items i
+            p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase FROM public.renewed_order_items i
             LEFT JOIN public.renewed_products p ON p.id=i.product_id
             WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
         const byId=new Map();
