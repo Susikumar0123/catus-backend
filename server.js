@@ -9682,6 +9682,29 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
         return res.status(503).json({success:false,message:'Could not update delivery status.'});}
 });
 
+// Device-bound COD receipt access: the random checkout request UUID is a bearer
+// credential, not a phone number or order ID alone. Never log or expose it in URLs.
+app.post('/api/renewed/device-orders',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const entries=req.body?.receipts;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!Array.isArray(entries)||entries.length>30||entries.some(e=>!uuid.test(String(e?.id||''))||!uuid.test(String(e?.request_id||''))))
+    return res.status(400).json({success:false,message:'Invalid device receipts.'});
+  try{
+    const orders=[];
+    for(const entry of entries){
+      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,created_at,updated_at
+        FROM public.renewed_orders WHERE id=? AND cod_request_id=? AND payment_method='cod' LIMIT 1`,[entry.id,entry.request_id]);
+      if(!rows.length)continue;
+      const items=await renewedQuery(`SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days
+        FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id=? ORDER BY i.id`,[entry.id]);
+      orders.push({...rows[0],items});
+    }
+    orders.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+    return res.json({success:true,orders});
+  }catch(e){console.error('Renewed device orders:',e.message);return res.status(503).json({success:false,message:'Order history temporarily unavailable.'});}
+});
+
 // Renewed customer session: existing Cerood account credentials, no OTP on dashboard.
 // Keep RENEWED_CUSTOMER_JWT_SECRET private on Render; never trust localStorage user/phone as identity.
 function renewedCustomerSession(req,res,next){
@@ -9725,23 +9748,6 @@ app.get('/api/renewed/customer-order/:id',renewedCustomerSession,async(req,res)=
   try{const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[id,req.renewedCustomerPhone]);
     if(!rows.length)return res.status(404).json({success:false,message:'Order not found for this account.'});return res.json({success:true,order:rows[0]});
   }catch(e){console.error('Renewed customer tracking:',e.message);return res.status(503).json({success:false,message:'Order status temporarily unavailable.'});}
-});
-
-
-// Renewed reviews: authenticated customer + delivered order + actual purchased product.
-app.post('/api/renewed/customer-reviews',renewedCustomerSession,async(req,res)=>{
- res.set('Cache-Control','no-store');
- const orderId=String(req.body?.order_id||''),productId=String(req.body?.product_id||'');
- const rating=Number(req.body?.rating),comment=String(req.body?.comment||'').trim();
- if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(orderId)||!productId||productId.length>200||!Number.isInteger(rating)||rating<1||rating>5||comment.length<5||comment.length>1500)
-  return res.status(400).json({success:false,message:'Choose 1–5 stars and write a review of 5–1500 characters.'});
- try{
-  const matches=await renewedQuery(`SELECT o.id FROM public.renewed_orders o JOIN public.renewed_order_items i ON i.order_id=o.id WHERE o.id=? AND o.customer_phone=? AND o.delivery_status='delivered' AND (o.status='paid' OR (o.status='processing' AND o.payment_method='cod')) AND i.product_id=? LIMIT 1`,[orderId,req.renewedCustomerPhone,productId]);
-  if(!matches.length)return res.status(403).json({success:false,message:'Only a delivered product purchased by your account can be reviewed.'});
-  const result=await renewedQuery(`INSERT INTO public.renewed_product_reviews(order_id,product_id,customer_phone,rating,comment) VALUES (?,?,?,?,?) ON CONFLICT (order_id,product_id) DO NOTHING RETURNING id`,[orderId,productId,req.renewedCustomerPhone,rating,comment]);
-  if(!result.length)return res.status(409).json({success:false,message:'You have already reviewed this product in this order.'});
-  return res.status(201).json({success:true,message:'Verified review saved.'});
- }catch(e){console.error('Renewed customer review:',e.message);return res.status(503).json({success:false,message:'Review service unavailable. Check Renewed reviews SQL migration.'});}
 });
 
 // Renewed customer dashboard V2: all orders for the MSG91-verified checkout phone.
