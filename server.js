@@ -9342,13 +9342,17 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         return res.status(503).json({success:false,message:'Cash on delivery is not enabled by Cerood yet.'});
     let client;
     try{
-        const token=String(req.body?.accessToken||'').trim();
-        if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile before ordering.'});
-        const verified=await verifyMsg91AccessToken(token);
-        if(String(verified?.type||'').toLowerCase()!=='success')
-            return res.status(401).json({success:false,message:'Mobile OTP verification expired.'});
-        const phone=extractVerifiedPhoneFromMsg91(verified,token);
-        if(!/^[6-9]\d{9}$/.test(phone||''))return res.status(401).json({success:false,message:'Verified mobile unavailable.'});
+        // Guest checkout is an explicit deployment choice; existing OTP flow remains when disabled.
+        const guestCheckout = process.env.RENEWED_GUEST_CHECKOUT_ENABLED === 'true';
+        let phone = String(req.body?.address?.phone || '').trim();
+        if (!guestCheckout) {
+            const token=String(req.body?.accessToken||'').trim();
+            if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile before ordering.'});
+            const verified=await verifyMsg91AccessToken(token);
+            if(String(verified?.type||'').toLowerCase()!=='success')return res.status(401).json({success:false,message:'Mobile OTP verification expired.'});
+            phone=extractVerifiedPhoneFromMsg91(verified,token);
+        }
+        if(!/^[6-9]\d{9}$/.test(phone||''))return res.status(400).json({success:false,message:'Valid mobile number required.'});
         const requestId=String(req.body?.request_id||'').trim();
         if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId))
             return res.status(400).json({success:false,message:'Invalid order request ID.'});
@@ -9385,8 +9389,8 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             if(duplicate[0].customer_phone!==phone){await client.query('ROLLBACK');return res.status(409).json({success:false,message:'Order request conflict.'});}
             await client.query('COMMIT');return res.json({success:true,order_id:duplicate[0].id,total:Number(duplicate[0].total),payment_method:'cod',already_created:true});
         }
-        const users=await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
-        if(!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
+        const users=guestCheckout?[]:await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
+        if(!guestCheckout&&!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
         const products=await client.query(`SELECT id,name,price,stock,status FROM public.renewed_products
           WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
         const byId=new Map(products.map(p=>[String(p.id),p]));
@@ -9410,7 +9414,7 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
           (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
            subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,cod_request_id)
           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','processing','confirmed','cod',$10)`,
-          [id,String(users[0].id),fullName,phone,users[0].email||null,JSON.stringify(savedAddress),subtotal,fee,total,requestId]);
+          [id,guestCheckout?null:String(users[0].id),fullName,phone,guestCheckout?null:(users[0].email||null),JSON.stringify(savedAddress),subtotal,fee,total,requestId]);
         for(const item of orderItems){
             const reduced=await client.query(`UPDATE public.renewed_products SET stock=stock-$1,updated_at=NOW()
               WHERE id=$2 AND status='published' AND stock >= $1 RETURNING id`,[item.qty,item.id]);
@@ -9439,24 +9443,24 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
     let client;
     let committedOrderId = null;
     try {
-        const accessToken = String(req.body?.accessToken || '').trim();
-        if (!accessToken || accessToken.length > 8192)
-            return res.status(401).json({success:false,message:'Customer OTP verification required.'});
-        let verifiedPhone;
-        try {
-            const verification = await verifyMsg91AccessToken(accessToken);
-            if (String(verification?.type || '').toLowerCase() !== 'success')
-                return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
-            verifiedPhone = extractVerifiedPhoneFromMsg91(verification, accessToken);
-        } catch (_) {
-            return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+        const guestCheckout = process.env.RENEWED_GUEST_CHECKOUT_ENABLED === 'true';
+        let verifiedPhone = String(req.body?.address?.phone || '').trim();
+        let users = [];
+        if (!guestCheckout) {
+            const accessToken = String(req.body?.accessToken || '').trim();
+            if (!accessToken || accessToken.length > 8192)
+                return res.status(401).json({success:false,message:'Customer OTP verification required.'});
+            try {
+                const verification = await verifyMsg91AccessToken(accessToken);
+                if (String(verification?.type || '').toLowerCase() !== 'success')
+                    return res.status(401).json({success:false,message:'Customer OTP verification failed.'});
+                verifiedPhone = extractVerifiedPhoneFromMsg91(verification, accessToken);
+            } catch (_) { return res.status(401).json({success:false,message:'Customer OTP verification failed.'}); }
+            users = await renewedQuery('SELECT id, name, email FROM public.users WHERE phone = ? LIMIT 1', [verifiedPhone]);
+            if (!users.length) return res.status(401).json({success:false,message:'Register before checkout.'});
         }
         if (!/^[6-9]\d{9}$/.test(verifiedPhone || ''))
-            return res.status(401).json({success:false,message:'Verified phone is unavailable.'});
-        const users = await renewedQuery(
-            'SELECT id, name, email FROM public.users WHERE phone = ? LIMIT 1', [verifiedPhone]);
-        if (!users.length) return res.status(401).json({success:false,message:'Register before checkout.'});
-
+            return res.status(400).json({success:false,message:'Valid mobile number required.'});
         const address = req.body?.address;
         const items = req.body?.items;
         if (!address || typeof address !== 'object' || Array.isArray(address) ||
@@ -9523,7 +9527,7 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
               subtotal,delivery_fee,total,currency,status,reserved_until)
              VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','creating_order',
         NOW() + INTERVAL '15 minutes')`,
-            [orderId,String(users[0].id),fullName,verifiedPhone,users[0].email || null,
+            [orderId,guestCheckout?null:String(users[0].id),fullName,verifiedPhone,guestCheckout?null:(users[0].email || null),
              JSON.stringify(savedAddress),subtotal,fee,total]);
         for (const item of orderItems) {
             const reduced = await client.query(
@@ -9733,7 +9737,7 @@ app.get('/api/renewed/checkout-status', (req,res) => {
     const enabled = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' &&
         Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
     const codEnabled = process.env.RENEWED_COD_ENABLED === 'true';
-    return res.json({success:true,checkout_enabled:enabled||codEnabled,payment_enabled:enabled,cod_enabled:codEnabled,
+    return res.json({success:true,guest_checkout_enabled:process.env.RENEWED_GUEST_CHECKOUT_ENABLED === 'true',checkout_enabled:enabled||codEnabled,payment_enabled:enabled,cod_enabled:codEnabled,
         reservations_enabled:enabled,currency:'INR',
         message:enabled?'Renewed online payment backend enabled.':codEnabled?'Renewed COD available; online payment disabled.':'Renewed purchases remain disabled until explicitly enabled.'});
 });
