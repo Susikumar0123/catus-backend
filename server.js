@@ -9542,6 +9542,48 @@ app.post('/api/renewed/razorpay-webhook',async(req,res)=>{
         return res.status(503).json({success:false,message:'Retry webhook.'});}
 });
 
+// RENEWED ADMIN ORDER MANAGEMENT — payment status and delivery status are separate.
+// Protected by the existing /api/admin Bearer-token middleware above.
+const renewedDeliveryStages = ['confirmed','packing','packed','shipped','out_for_delivery','delivered'];
+app.get('/api/admin/renewed/orders', async (req,res) => {
+    res.set('Cache-Control','no-store');
+    try {
+        const orders = await renewedQuery(`SELECT id,customer_name,customer_phone,customer_email,
+          delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,
+          razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
+          FROM public.renewed_orders ORDER BY created_at DESC LIMIT 300`);
+        const ids = orders.map(o=>o.id);
+        const items = ids.length ? await renewedQuery(`SELECT order_id,product_id,product_name,unit_price,quantity,line_total
+          FROM public.renewed_order_items WHERE order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`,ids) : [];
+        const byOrder = new Map();
+        for(const item of items){const k=String(item.order_id);if(!byOrder.has(k))byOrder.set(k,[]);byOrder.get(k).push(item);}
+        return res.json({success:true,orders:orders.map(o=>({...o,items:byOrder.get(String(o.id))||[]}))});
+    } catch(e){console.error('Renewed admin orders:',e.message);
+        return res.status(503).json({success:false,message:'Renewed orders unavailable. Check database migration.'});}
+});
+app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const id=String(req.params.id||'');
+        const next=String(req.body?.delivery_status||'');
+        if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) || !renewedDeliveryStages.includes(next))
+            return res.status(400).json({success:false,message:'Invalid order ID or delivery status.'});
+        const rows=await renewedQuery(`UPDATE public.renewed_orders
+          SET delivery_status=?,updated_at=NOW()
+          WHERE id=? AND status='paid' AND
+          (delivery_status IS NULL OR delivery_status IN ('confirmed','packing','packed','shipped','out_for_delivery','delivered'))
+          AND (CASE COALESCE(delivery_status,'confirmed')
+            WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
+            WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE 99 END)
+          <= (CASE ? WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
+            WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE -1 END)
+          RETURNING id,status,delivery_status,updated_at`,[next,id,next]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Only paid orders can advance; status cannot move backward. Refresh orders.'});
+        return res.json({success:true,order:rows[0]});
+    } catch(e){console.error('Renewed delivery update:',e.message);
+        return res.status(503).json({success:false,message:'Could not update delivery status.'});}
+});
+
 // Read-only order status. Phone OTP token is required to prevent order enumeration.
 app.post('/api/renewed/order-status',async(req,res)=>{
     res.set('Cache-Control','no-store');
@@ -9553,7 +9595,7 @@ app.post('/api/renewed/order-status',async(req,res)=>{
         const verified=await verifyMsg91AccessToken(token);
         if (String(verified?.type||'').toLowerCase()!=='success') return res.status(401).json({success:false});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
-        const rows=await renewedQuery(`SELECT id,status,total,currency,created_at,paid_at
+        const rows=await renewedQuery(`SELECT id,status,delivery_status,total,currency,created_at,paid_at,updated_at
           FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[orderId,phone]);
         if (!rows.length) return res.status(404).json({success:false});
         return res.json({success:true,order:rows[0]});
