@@ -9584,6 +9584,32 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
         return res.status(503).json({success:false,message:'Could not update delivery status.'});}
 });
 
+// Renewed customer dashboard V2: all orders for the MSG91-verified checkout phone.
+// Never accept a phone number from the client as proof of identity.
+app.post('/api/renewed/my-orders', async (req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const token=String(req.body?.accessToken||'').trim();
+        if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify your mobile number.'});
+        const verified=await verifyMsg91AccessToken(token);
+        if(String(verified?.type||'').toLowerCase()!=='success')return res.status(401).json({success:false,message:'Mobile verification expired.'});
+        const phone=extractVerifiedPhoneFromMsg91(verified,token);
+        if(!/^[6-9]\d{9}$/.test(phone))return res.status(401).json({success:false,message:'Verified phone not available.'});
+        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,
+            paid_at,created_at,updated_at FROM public.renewed_orders
+            WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[phone]);
+        const ids=orders.map(o=>o.id);
+        const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,
+            p.image_url,p.condition,p.warranty_days FROM public.renewed_order_items i
+            LEFT JOIN public.renewed_products p ON p.id=i.product_id
+            WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
+        const byId=new Map();
+        for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item);}
+        return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
+    }catch(e){console.error('Renewed my-orders:',e.message);
+        return res.status(503).json({success:false,message:'Orders are temporarily unavailable.'});}
+});
+
 // Read-only order status. Phone OTP token is required to prevent order enumeration.
 app.post('/api/renewed/order-status',async(req,res)=>{
     res.set('Cache-Control','no-store');
