@@ -9334,6 +9334,100 @@ async function renewedRunExpiry() {
 // HARD DISABLED until payment verification, webhook and reconciliation ship.
 // Do not remove this gate or expose the route in production yet.
 // ==========================================
+// RENEWED CASH ON DELIVERY: atomic stock decrement + order creation.
+// Independent from Razorpay; only enabled by explicit environment switch.
+app.post('/api/renewed/place-cod-order', async (req,res)=>{
+    res.set('Cache-Control','no-store');
+    if(process.env.RENEWED_COD_ENABLED !== 'true')
+        return res.status(503).json({success:false,message:'Cash on delivery is not enabled by Cerood yet.'});
+    let client;
+    try{
+        const token=String(req.body?.accessToken||'').trim();
+        if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile before ordering.'});
+        const verified=await verifyMsg91AccessToken(token);
+        if(String(verified?.type||'').toLowerCase()!=='success')
+            return res.status(401).json({success:false,message:'Mobile OTP verification expired.'});
+        const phone=extractVerifiedPhoneFromMsg91(verified,token);
+        if(!/^[6-9]\d{9}$/.test(phone||''))return res.status(401).json({success:false,message:'Verified mobile unavailable.'});
+        const requestId=String(req.body?.request_id||'').trim();
+        if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId))
+            return res.status(400).json({success:false,message:'Invalid order request ID.'});
+        const address=req.body?.address, items=req.body?.items;
+        if(!address||typeof address!=='object'||Array.isArray(address)||!Array.isArray(items)||items.length<1||items.length>20)
+            return res.status(400).json({success:false,message:'Address and 1–20 products required.'});
+        const state=String(address.state||'').trim().replace(/\s+/g,' ').toLowerCase();
+        const district=String(address.district||'').trim().replace(/\s+/g,' ').toLowerCase();
+        const pincode=String(address.pincode||'').trim();
+        const fullName=String(address.full_name||'').trim();
+        const street=String(address.street||'').trim();
+        const city=String(address.city||'').trim();
+        if(!['tamil nadu','tamilnadu','tn'].includes(state)||!/^[a-z][a-z .'-]{1,99}$/.test(district)||
+           !/^[56]\d{5}$/.test(pincode)||fullName.length<2||fullName.length>140||
+           street.length<5||street.length>500||city.length<2||city.length>100||
+           String(address.phone||'').trim()!==phone)
+            return res.status(400).json({success:false,message:'Complete Tamil Nadu address and verified mobile are required.'});
+        const quantities=new Map();
+        for(const item of items){
+            const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);
+            if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!Number.isSafeInteger(qty)||qty<1||qty>99)
+                return res.status(400).json({success:false,message:'Invalid product or quantity.'});
+            const sum=(quantities.get(id)||0)+qty;
+            if(sum>99)return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
+            quantities.set(id,sum);
+        }
+        const ids=[...quantities.keys()].sort();
+        client=await db.getClient();
+        await client.query('BEGIN');
+        await client.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
+        const duplicate=await client.query(`SELECT id,total,customer_phone FROM public.renewed_orders
+          WHERE cod_request_id=$1 LIMIT 1`,[requestId]);
+        if(duplicate.length){
+            if(duplicate[0].customer_phone!==phone){await client.query('ROLLBACK');return res.status(409).json({success:false,message:'Order request conflict.'});}
+            await client.query('COMMIT');return res.json({success:true,order_id:duplicate[0].id,total:Number(duplicate[0].total),payment_method:'cod',already_created:true});
+        }
+        const users=await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
+        if(!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
+        const products=await client.query(`SELECT id,name,price,stock,status FROM public.renewed_products
+          WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
+        const byId=new Map(products.map(p=>[String(p.id),p]));
+        let subtotal=0;const orderItems=[];
+        for(const id of ids){
+            const p=byId.get(id),qty=quantities.get(id);
+            if(!p||p.status!=='published'||Number(p.stock)<qty){const e=Error('Product unavailable or sold out.');e.status=409;throw e;}
+            const unit=Number(p.price),line=unit*qty;subtotal+=line;
+            if(!Number.isSafeInteger(unit)||unit<1||!Number.isSafeInteger(line)||!Number.isSafeInteger(subtotal))throw Error('Invalid price.');
+            orderItems.push({id,name:p.name,qty,unit,line});
+        }
+        const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
+          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if(!rates.length){const e=Error('Delivery rate unavailable for this district.');e.status=409;throw e;}
+        const fee=Number(rates[0].fee),total=subtotal+fee;
+        if(!Number.isSafeInteger(fee)||fee<0||!Number.isSafeInteger(total)||total<1||total>10000000)throw Error('Invalid order total.');
+        const id=crypto.randomUUID();
+        const savedAddress={full_name:fullName,street,area:String(address.area||'').trim().slice(0,200),
+          city,district,state:'Tamil Nadu',pincode};
+        await client.query(`INSERT INTO public.renewed_orders
+          (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
+           subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,cod_request_id)
+          VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','processing','confirmed','cod',$10)`,
+          [id,String(users[0].id),fullName,phone,users[0].email||null,JSON.stringify(savedAddress),subtotal,fee,total,requestId]);
+        for(const item of orderItems){
+            const reduced=await client.query(`UPDATE public.renewed_products SET stock=stock-$1,updated_at=NOW()
+              WHERE id=$2 AND status='published' AND stock >= $1 RETURNING id`,[item.qty,item.id]);
+            if(!reduced.length){const e=Error('Product sold out.');e.status=409;throw e;}
+            await client.query(`INSERT INTO public.renewed_order_items
+              (order_id,product_id,product_name,unit_price,quantity,line_total)
+              VALUES ($1,$2,$3,$4,$5,$6)`,[id,item.id,item.name,item.unit,item.qty,item.line]);
+        }
+        await client.query('COMMIT');
+        return res.status(201).json({success:true,order_id:id,total,payment_method:'cod',payment_due:total,
+          message:'COD order confirmed. Pay on delivery.'});
+    }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});
+        console.error('Renewed COD order:',e.message);
+        return res.status(e.status||503).json({success:false,message:e.status?e.message:'Could not place COD order. Please retry with the same request.'});
+    }finally{if(client)client.release();}
+});
+
 app.post('/api/renewed/prepare-payment', async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const RENEWED_PAYMENT_FLOW_READY = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' && Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
@@ -9549,7 +9643,7 @@ app.get('/api/admin/renewed/orders', async (req,res) => {
     res.set('Cache-Control','no-store');
     try {
         const orders = await renewedQuery(`SELECT id,customer_name,customer_phone,customer_email,
-          delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,
+          delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,
           razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
           FROM public.renewed_orders ORDER BY created_at DESC LIMIT 300`);
         const ids = orders.map(o=>o.id);
@@ -9570,7 +9664,7 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
             return res.status(400).json({success:false,message:'Invalid order ID or delivery status.'});
         const rows=await renewedQuery(`UPDATE public.renewed_orders
           SET delivery_status=?,updated_at=NOW()
-          WHERE id=? AND status='paid' AND
+          WHERE id=? AND (status='paid' OR (status='processing' AND payment_method='cod')) AND
           (delivery_status IS NULL OR delivery_status IN ('confirmed','packing','packed','shipped','out_for_delivery','delivered'))
           AND (CASE COALESCE(delivery_status,'confirmed')
             WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
@@ -9578,7 +9672,7 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
           <= (CASE ? WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
             WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE -1 END)
           RETURNING id,status,delivery_status,updated_at`,[next,id,next]);
-        if(!rows.length)return res.status(409).json({success:false,message:'Only paid orders can advance; status cannot move backward. Refresh orders.'});
+        if(!rows.length)return res.status(409).json({success:false,message:'Only paid online or confirmed COD orders can advance; status cannot move backward. Refresh orders.'});
         return res.json({success:true,order:rows[0]});
     } catch(e){console.error('Renewed delivery update:',e.message);
         return res.status(503).json({success:false,message:'Could not update delivery status.'});}
@@ -9595,7 +9689,7 @@ app.post('/api/renewed/my-orders', async (req,res)=>{
         if(String(verified?.type||'').toLowerCase()!=='success')return res.status(401).json({success:false,message:'Mobile verification expired.'});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
         if(!/^[6-9]\d{9}$/.test(phone))return res.status(401).json({success:false,message:'Verified phone not available.'});
-        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,
+        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,
             paid_at,created_at,updated_at FROM public.renewed_orders
             WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[phone]);
         const ids=orders.map(o=>o.id);
@@ -9621,7 +9715,7 @@ app.post('/api/renewed/order-status',async(req,res)=>{
         const verified=await verifyMsg91AccessToken(token);
         if (String(verified?.type||'').toLowerCase()!=='success') return res.status(401).json({success:false});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
-        const rows=await renewedQuery(`SELECT id,status,delivery_status,total,currency,created_at,paid_at,updated_at
+        const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at
           FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[orderId,phone]);
         if (!rows.length) return res.status(404).json({success:false});
         return res.json({success:true,order:rows[0]});
@@ -9638,9 +9732,10 @@ app.get('/api/renewed/checkout-status', (req,res) => {
     res.set('Cache-Control','no-store');
     const enabled = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' &&
         Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
-    return res.json({success:true,checkout_enabled:enabled,payment_enabled:enabled,
+    const codEnabled = process.env.RENEWED_COD_ENABLED === 'true';
+    return res.json({success:true,checkout_enabled:enabled||codEnabled,payment_enabled:enabled,cod_enabled:codEnabled,
         reservations_enabled:enabled,currency:'INR',
-        message:enabled?'Renewed payment backend enabled.':'Renewed purchases remain disabled until explicitly enabled.'});
+        message:enabled?'Renewed online payment backend enabled.':codEnabled?'Renewed COD available; online payment disabled.':'Renewed purchases remain disabled until explicitly enabled.'});
 });
 
 // Phase 5H: Recover captured payments when the browser callback or webhook was missed.
