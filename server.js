@@ -1830,6 +1830,20 @@ app.post('/api/check-user', (req, res) => {
 // ==========================================
 // LOGIN PASSWORD ROUTE (Fixed for proper matching)
 // ==========================================
+
+// RENEWED-ONLY: create a separate Renewed session after a real Cerood login.
+// Never mint this token from a browser-supplied user object or phone alone.
+function createRenewedSessionForAuthenticatedUser(user) {
+    const secret = String(process.env.RENEWED_CUSTOMER_JWT_SECRET || '');
+    const phone = String(user?.phone || '').trim();
+    if (secret.length < 32 || !/^[6-9]\d{9}$/.test(phone) || user?.id == null) return null;
+    return jwt.sign(
+        { sub: String(user.id), phone, role: 'renewed_customer' },
+        secret,
+        { algorithm: 'HS256', expiresIn: '7d', issuer: 'cerood-renewed' }
+    );
+}
+
 app.post('/api/login-password', (req, res) => {
     const { phone, password } = req.body;
     const query = 'SELECT * FROM users WHERE phone = ?';
@@ -1840,7 +1854,7 @@ app.post('/api/login-password', (req, res) => {
             const user = results[0];
             // Passwords-ah trim panrathu space error-ai thavirkkum
             if (await bcrypt.compare(String(password), String(user.password))) {
-                res.json({ success: true, user: user });
+                res.json({ success: true, user: user, renewed_session: createRenewedSessionForAuthenticatedUser(user) });
             } else {
                 res.status(401).json({ success: false, message: 'Incorrect password.' });
             }
@@ -2299,7 +2313,8 @@ app.post('/api/verify-otp-set-password', (req, res) => {
                 return res.json({
                     success: true,
                     message: 'Password updated successfully!',
-                    user: updatedRows[0]
+                    user: updatedRows[0],
+                    renewed_session: createRenewedSessionForAuthenticatedUser(updatedRows[0])
                 });
             }
         );
@@ -9713,8 +9728,8 @@ function renewedCustomerSession(req,res,next){
   const m=/^Bearer (\S+)$/.exec(String(req.headers.authorization||''));
   if(!m)return res.status(401).json({success:false,message:'Sign in to view your orders.'});
   try{const claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-renewed'});
-    if(claims.role!=='renewed_customer'||! /^[6-9]\d{9}$/.test(claims.phone))throw Error('Invalid session');
-    req.renewedCustomerPhone=claims.phone;next();
+    if(claims.role!=='renewed_customer'||! /^[6-9]\d{9}$/.test(claims.phone)||!/^\d+$/.test(String(claims.sub||'')))throw Error('Invalid session');
+    req.renewedCustomerId=String(claims.sub);req.renewedCustomerPhone=claims.phone;next();
   }catch(e){return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});}
 }
 app.post('/api/renewed/customer-login',(req,res)=>{
@@ -9735,7 +9750,7 @@ app.post('/api/renewed/customer-login',(req,res)=>{
 app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
 app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
-  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerPhone]);
+  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
     const ids=orders.map(o=>o.id);
     const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
     const byId=new Map();for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item)}
@@ -9745,7 +9760,7 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
 app.get('/api/renewed/customer-order/:id',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
   const id=String(req.params.id||'');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Invalid order ID.'});
-  try{const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[id,req.renewedCustomerPhone]);
+  try{const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_id=? LIMIT 1`,[id,req.renewedCustomerId]);
     if(!rows.length)return res.status(404).json({success:false,message:'Order not found for this account.'});return res.json({success:true,order:rows[0]});
   }catch(e){console.error('Renewed customer tracking:',e.message);return res.status(503).json({success:false,message:'Order status temporarily unavailable.'});}
 });
