@@ -9584,9 +9584,15 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             // Keep the Razorpay link for reconciliation, but never offer expired checkout.
             return res.status(409).json({success:false,message:'Reservation timed out. Contact support before retrying.'});
         }
+        // Read-only, order-scoped guest recovery capability; never use the order ID as authentication.
+        const recoverySecret = crypto.createHash('sha256')
+            .update('cerood-renewed-recovery-v1:' + process.env.RAZORPAY_KEY_SECRET).digest();
+        const recoveryToken = jwt.sign({order_id:orderId,razorpay_order_id:razorpayOrder.id,
+            scope:'renewed_payment_status'},recoverySecret,
+            {algorithm:'HS256',expiresIn:'30d',issuer:'cerood-renewed-recovery'});
         return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
             amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
-            reserved_until:updated[0].reserved_until});
+            reserved_until:updated[0].reserved_until,recovery_token:recoveryToken});
     } catch (e) {
         if (client) {
             await client.query('ROLLBACK').catch(()=>{});
@@ -9821,6 +9827,35 @@ app.post('/api/renewed/my-orders', async (req,res)=>{
 });
 
 // Read-only order status. Phone OTP token is required to prevent order enumeration.
+// Read-only guest payment recovery. A signed, order-scoped capability is returned ONLY
+// to the browser that prepared the Razorpay order. Never accept an order ID alone.
+app.post('/api/renewed/guest-payment-status',async(req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const token=String(req.body?.recovery_token||'');
+        if(!token || token.length>4096 || !process.env.RAZORPAY_KEY_SECRET)
+            return res.status(401).json({success:false,message:'Recovery authorization unavailable. Contact Cerood with the order ID.'});
+        const secret=crypto.createHash('sha256')
+            .update('cerood-renewed-recovery-v1:' + process.env.RAZORPAY_KEY_SECRET).digest();
+        const claim=jwt.verify(token,secret,{algorithms:['HS256'],issuer:'cerood-renewed-recovery'});
+        if(claim.scope!=='renewed_payment_status' ||
+            !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(String(claim.order_id||'')) ||
+            !/^order_[a-zA-Z0-9]+$/.test(String(claim.razorpay_order_id||'')))
+            return res.status(401).json({success:false,message:'Invalid recovery authorization.'});
+        const rows=await renewedQuery(`SELECT id,status,total,currency,paid_at
+            FROM public.renewed_orders WHERE id=? AND razorpay_order_id=? LIMIT 1`,
+            [claim.order_id,claim.razorpay_order_id]);
+        if(!rows.length)return res.status(404).json({success:false,message:'Order not found. Contact Cerood.'});
+        const o=rows[0];
+        return res.json({success:true,order:{id:o.id,status:o.status,total:o.total,currency:o.currency,paid_at:o.paid_at}});
+    }catch(e){
+        if(e.name==='JsonWebTokenError'||e.name==='TokenExpiredError'||e.name==='NotBeforeError')
+            return res.status(401).json({success:false,message:'Recovery authorization expired or invalid. Contact Cerood with the order ID.'});
+        console.error('Renewed guest payment recovery:',e.message);
+        return res.status(503).json({success:false,message:'Payment status temporarily unavailable. Do not pay again.'});
+    }
+});
+
 app.post('/api/renewed/order-status',async(req,res)=>{
     res.set('Cache-Control','no-store');
     try {
