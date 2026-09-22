@@ -9682,6 +9682,74 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
         return res.status(503).json({success:false,message:'Could not update delivery status.'});}
 });
 
+// Device-bound COD receipt access: the random checkout request UUID is a bearer
+// credential, not a phone number or order ID alone. Never log or expose it in URLs.
+app.post('/api/renewed/device-orders',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const entries=req.body?.receipts;
+  const uuid=/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+  if(!Array.isArray(entries)||entries.length>30||entries.some(e=>!uuid.test(String(e?.id||''))||!uuid.test(String(e?.request_id||''))))
+    return res.status(400).json({success:false,message:'Invalid device receipts.'});
+  try{
+    const orders=[];
+    for(const entry of entries){
+      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,created_at,updated_at
+        FROM public.renewed_orders WHERE id=? AND cod_request_id=? AND payment_method='cod' LIMIT 1`,[entry.id,entry.request_id]);
+      if(!rows.length)continue;
+      const items=await renewedQuery(`SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days
+        FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id=? ORDER BY i.id`,[entry.id]);
+      orders.push({...rows[0],items});
+    }
+    orders.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+    return res.json({success:true,orders});
+  }catch(e){console.error('Renewed device orders:',e.message);return res.status(503).json({success:false,message:'Order history temporarily unavailable.'});}
+});
+
+// Renewed customer session: existing Cerood account credentials, no OTP on dashboard.
+// Keep RENEWED_CUSTOMER_JWT_SECRET private on Render; never trust localStorage user/phone as identity.
+function renewedCustomerSession(req,res,next){
+  const secret=String(process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
+  if(secret.length<32)return res.status(503).json({success:false,message:'Renewed account sessions are not configured.'});
+  const m=/^Bearer (\S+)$/.exec(String(req.headers.authorization||''));
+  if(!m)return res.status(401).json({success:false,message:'Sign in to view your orders.'});
+  try{const claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-renewed'});
+    if(claims.role!=='renewed_customer'||! /^[6-9]\d{9}$/.test(claims.phone))throw Error('Invalid session');
+    req.renewedCustomerPhone=claims.phone;next();
+  }catch(e){return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});}
+}
+app.post('/api/renewed/customer-login',(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const phone=String(req.body?.phone||'').trim(),password=String(req.body?.password||'');
+  if(!/^[6-9]\d{9}$/.test(phone)||!password||password.length>256)return res.status(400).json({success:false,message:'Enter your registered mobile and password.'});
+  const secret=String(process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
+  if(secret.length<32)return res.status(503).json({success:false,message:'Renewed account sessions are not configured.'});
+  db.query('SELECT id,name,phone,password FROM public.users WHERE phone=? LIMIT 1',[phone],async(err,rows)=>{
+    if(err){console.error('Renewed customer login:',err.message);return res.status(503).json({success:false,message:'Login temporarily unavailable.'});}
+    const u=rows?.[0];let valid=false;
+    try{valid=Boolean(u?.password)&&await bcrypt.compare(password,String(u.password));}catch(e){valid=false;}
+    if(!valid)return res.status(401).json({success:false,message:'Invalid mobile number or password.'});
+    const token=jwt.sign({sub:String(u.id),phone:u.phone,role:'renewed_customer'},secret,{algorithm:'HS256',expiresIn:'7d',issuer:'cerood-renewed'});
+    return res.json({success:true,token,user:{name:u.name,phone:u.phone}});
+  });
+});
+app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
+app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerPhone]);
+    const ids=orders.map(o=>o.id);
+    const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
+    const byId=new Map();for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item)}
+    return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
+  }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
+});
+app.get('/api/renewed/customer-order/:id',renewedCustomerSession,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const id=String(req.params.id||'');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Invalid order ID.'});
+  try{const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[id,req.renewedCustomerPhone]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Order not found for this account.'});return res.json({success:true,order:rows[0]});
+  }catch(e){console.error('Renewed customer tracking:',e.message);return res.status(503).json({success:false,message:'Order status temporarily unavailable.'});}
+});
+
 // Renewed customer dashboard V2: all orders for the MSG91-verified checkout phone.
 // Never accept a phone number from the client as proof of identity.
 app.post('/api/renewed/my-orders', async (req,res)=>{
