@@ -10329,3 +10329,36 @@ app.get('/api/admin/cosmetics/orders',async(req,res)=>{
 app.patch('/api/admin/cosmetics/orders/:id/tracking',async(req,res)=>{
  try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') RETURNING id,status,tracking_number,courier_name,tracking_url`,[status,courier,number,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
 });
+
+
+// CEROOD CLOTHING — isolated new routes, after existing admin auth.
+// CEROOD CLOTHING — isolated inventory routes; no existing business tables touched.
+// Included by server.js AFTER existing /api/admin authentication middleware.
+const clothingDb = (sql,values=[])=>new Promise((resolve,reject)=>db.query(sql,values,(err,rows)=>err?reject(err):resolve(rows||[])));
+const clothingFields = `id,name,category,brand,description,variant,shade,net_quantity,ingredients,directions,warnings,batch_number,manufacture_date,expiry_date,price,compare_price,stock,image_url,video_url,manufacturer,importer,status,created_at,updated_at`;
+const clothingIdOk=id=>/^[a-zA-Z0-9_-]{1,80}$/.test(String(id||''));
+const clothingError=(res,e)=>{console.error('Clothing inventory:',e.message);return res.status(e.httpStatus||503).json({success:false,message:e.httpStatus?e.message:'Clothing inventory temporarily unavailable. Check clothing schema.'});};
+function clothingClean(b){
+ const s=(k,n)=>String(b[k]??'').trim().slice(0,n);
+ const name=s('name',140),category=s('category',80),price=Number(b.price),stock=Number(b.stock),status=s('status',20)||'draft';
+ const compare_price=b.compare_price===''||b.compare_price==null?null:Number(b.compare_price);
+ const image_url=s('image_url',2048),video_url=s('video_url',2048);
+ if(!name||!category||!Number.isFinite(price)||price<=0||price>10000000||!Number.isSafeInteger(stock)||stock<0||stock>1000000||!['draft','published'].includes(status)||compare_price!==null&&(!Number.isFinite(compare_price)||compare_price<0))throw Object.assign(new Error('Invalid clothing name, category, price, stock or status.'),{httpStatus:400});
+ if([image_url,video_url].some(u=>u&&!/^https:\/\//i.test(u)))throw Object.assign(new Error('Media must use HTTPS URLs.'),{httpStatus:400});
+ if(status==='published'&&!image_url)throw Object.assign(new Error('Upload a product image before publishing.'),{httpStatus:400});
+ // Clothing fields are mapped to the existing frontend form; no cosmetics table is reused.
+ return {name,category,brand:s('brand',100),description:s('description',5000),variant:s('variant',100),shade:s('shade',100),net_quantity:s('net_quantity',100),ingredients:s('ingredients',5000),directions:s('directions',5000),warnings:s('warnings',5000),batch_number:s('batch_number',100),manufacture_date:null,expiry_date:null,price,compare_price,stock,image_url,video_url,manufacturer:s('manufacturer',250),importer:s('importer',250),status};
+}
+const clothingPublic=p=>({...p,image:p.image_url,media:[p.image_url&&{type:'image',url:p.image_url},p.video_url&&{type:'video',url:p.video_url}].filter(Boolean)});
+app.get('/api/clothing/products',async(req,res)=>{try{const rows=await clothingDb(`SELECT ${clothingFields} FROM public.clothing_products WHERE status='published' ORDER BY created_at DESC LIMIT 250`);res.json({success:true,products:rows.map(clothingPublic)});}catch(e){clothingError(res,e);}});
+app.get('/api/clothing/products/:id',async(req,res)=>{if(!clothingIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid product ID.'});try{const rows=await clothingDb(`SELECT ${clothingFields} FROM public.clothing_products WHERE id=? AND status='published' LIMIT 1`,[req.params.id]);return rows.length?res.json({success:true,product:clothingPublic(rows[0])}):res.status(404).json({success:false,message:'Product not found.'});}catch(e){clothingError(res,e);}});
+app.get('/api/admin/clothing/products',async(req,res)=>{try{res.json({success:true,products:await clothingDb(`SELECT ${clothingFields} FROM public.clothing_products ORDER BY updated_at DESC LIMIT 500`)});}catch(e){clothingError(res,e);}});
+app.post('/api/admin/clothing/products',async(req,res)=>{try{const p=clothingClean(req.body||{}),keys=Object.keys(p),id=crypto.randomUUID();const rows=await clothingDb(`INSERT INTO public.clothing_products(id,${keys.join(',')}) VALUES (?,${keys.map(()=>'?').join(',')}) RETURNING ${clothingFields}`,[id,...Object.values(p)]);res.status(201).json({success:true,product:rows[0]});}catch(e){clothingError(res,e);}});
+app.put('/api/admin/clothing/products/:id',async(req,res)=>{if(!clothingIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid product ID.'});try{const p=clothingClean(req.body||{}),keys=Object.keys(p),rows=await clothingDb(`UPDATE public.clothing_products SET ${keys.map(k=>k+'=?').join(',')},updated_at=NOW() WHERE id=? RETURNING ${clothingFields}`,[...Object.values(p),req.params.id]);return rows.length?res.json({success:true,product:rows[0]}):res.status(404).json({success:false,message:'Product not found.'});}catch(e){clothingError(res,e);}});
+app.delete('/api/admin/clothing/products/:id',async(req,res)=>{if(!clothingIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid product ID.'});try{const rows=await clothingDb('DELETE FROM public.clothing_products WHERE id=? RETURNING id',[req.params.id]);return rows.length?res.json({success:true,deleted_id:rows[0].id}):res.status(404).json({success:false,message:'Product not found.'});}catch(e){clothingError(res,e);}});
+// Explicitly disabled checkout until independent clothing variant stock/order/payment schema is built and tested.
+app.get('/api/clothing/checkout-status',(req,res)=>res.json({success:true,cod_enabled:false,online_enabled:false,live_checkout:false,delivery_fee:0,message:'Clothing checkout not yet enabled.'}));
+app.post('/api/clothing/quote',(req,res)=>res.status(503).json({success:false,message:'Clothing checkout is not enabled.'}));
+app.post(['/api/clothing/place-cod-order','/api/clothing/create-razorpay-order','/api/clothing/verify-razorpay-payment','/api/clothing/recover-razorpay-payment'],(req,res)=>res.status(503).json({success:false,message:'Clothing payments are not enabled.'}));
+app.get('/api/admin/clothing/orders',(req,res)=>res.json({success:true,orders:[]}));
+
