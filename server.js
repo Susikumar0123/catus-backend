@@ -10044,4 +10044,59 @@ app.delete('/api/admin/cosmetics/products/:id',async(req,res)=>{
   catch(e){return cosmeticsFail(res,e);}
 });
 // Phase 1 checkout intentionally blocked; never simulate an accepted order.
-app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:false,online_enabled:false,delivery_fee:79,live_checkout:false}));
+
+
+
+// CEROOD BEAUTY — Phase 2: server-priced quote and atomic COD checkout.
+// Online payments remain OFF until a dedicated, verified Razorpay flow is tested.
+const beautyFee = () => { const n=Number(process.env.COSMETICS_INDIA_DELIVERY_FEE ?? 79); return Number.isSafeInteger(n)&&n>=0&&n<=10000?n:79; };
+const beautyCodOn = () => process.env.COSMETICS_COD_ENABLED === 'true' && process.env.COSMETICS_LIVE_CHECKOUT_ENABLED === 'true';
+const beautyErr = (res,e) => { console.error('Beauty checkout:',e.message);return res.status(e.httpStatus||503).json({success:false,message:e.httpStatus?e.message:'Beauty checkout temporarily unavailable.'}); };
+function beautyRequest(body){
+ const a=body?.address, items=body?.items;
+ const invalid=m=>{throw Object.assign(new Error(m),{httpStatus:400})};
+ if(!a||typeof a!=='object'||Array.isArray(a)||!Array.isArray(items)||items.length<1||items.length>20)invalid('Address and 1–20 products required.');
+ const address={full_name:String(a.full_name||'').trim(),phone:String(a.phone||'').trim(),street:String(a.street||'').trim(),area:String(a.area||'').trim(),city:String(a.city||'').trim(),district:String(a.district||'').trim(),state:String(a.state||'').trim(),pincode:String(a.pincode||'').trim()};
+ if(address.full_name.length<2||address.full_name.length>140||!/^[6-9]\d{9}$/.test(address.phone)||address.street.length<5||address.street.length>500||address.city.length<2||address.city.length>100||address.district.length<2||address.district.length>100||address.state.length<2||address.state.length>100||!/^[1-9]\d{5}$/.test(address.pincode)||address.area.length>200)invalid('Enter a complete Indian delivery address and valid mobile number.');
+ const counts=new Map();
+ for(const item of items){const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);if(!cosmeticsIdOk(id)||!Number.isSafeInteger(qty)||qty<1||qty>99)invalid('Invalid product or quantity.');const total=(counts.get(id)||0)+qty;if(total>99)invalid('Maximum quantity per product is 99.');counts.set(id,total);}
+ return {address,counts};
+}
+function beautyTotals(products,counts){
+ const map=new Map(products.map(p=>[String(p.id),p]));let subtotal=0;const lines=[];
+ for(const [id,qty] of counts){const p=map.get(id);if(!p||p.status!=='published'||(p.expiry_date&&new Date(p.expiry_date).getTime()<Date.now()-86400000)||Number(p.stock)<qty)throw Object.assign(new Error('Product unavailable, expired or insufficient stock. Refresh your cart.'),{httpStatus:409});
+ const price=Number(p.price),line=price*qty;if(!Number.isSafeInteger(price)||price<=0||!Number.isSafeInteger(line))throw Object.assign(new Error('Invalid product price.'),{httpStatus:409});subtotal+=line;if(!Number.isSafeInteger(subtotal)||subtotal>10000000)throw Object.assign(new Error('Order amount exceeds limit.'),{httpStatus:400});
+ lines.push({product_id:id,product_name:p.name,variant:p.variant||null,quantity:qty,unit_price:price,total_price:line});}
+ const delivery_fee=beautyFee();return {items:lines,subtotal,delivery_fee,discount:0,total:subtotal+delivery_fee,currency:'INR'};
+}
+app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:beautyCodOn(),online_enabled:false,delivery_fee:beautyFee(),live_checkout:beautyCodOn()}));
+app.post('/api/cosmetics/quote',async(req,res)=>{
+ res.set('Cache-Control','no-store');try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);return res.json({success:true,...beautyTotals(products,counts),cod_enabled:beautyCodOn(),online_enabled:false});}catch(e){return beautyErr(res,e);}
+});
+app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
+ res.set('Cache-Control','no-store');if(!beautyCodOn())return res.status(503).json({success:false,message:'Beauty checkout is not live yet.'});
+ let client;try{
+ const {address,counts}=beautyRequest(req.body||{}),id=String(req.body?.request_id||'').trim();
+ if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Valid checkout request ID required.'});
+ if(process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true'){
+ const token=String(req.body?.accessToken||'').trim();if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile OTP before ordering.'});
+ const verified=await verifyMsg91AccessToken(token);if(String(verified?.type||'').toLowerCase()!=='success'||extractVerifiedPhoneFromMsg91(verified,token)!==address.phone)return res.status(401).json({success:false,message:'Verified mobile does not match delivery address.'});
+ }
+ client=await db.getClient();await client.query('BEGIN');
+ // A stable UUID makes retries safe; serialise duplicate attempts with transaction advisory lock.
+ await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);
+ const existing=await client.query('SELECT id,customer_phone,total FROM public.cosmetics_orders WHERE id=$1',[id]);
+ if(existing.length){await client.query('COMMIT');if(existing[0].customer_phone!==address.phone)return res.status(409).json({success:false,message:'Checkout request conflict.'});return res.json({success:true,order_id:id,total:Number(existing[0].total),already_created:true,payment_method:'cod'});}
+ const ids=[...counts.keys()];const products=await client.query(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
+ const totals=beautyTotals(products,counts);
+ await client.query(`INSERT INTO public.cosmetics_orders (id,customer_name,customer_phone,customer_email,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'cod','pending','confirmed')`,[id,address.full_name,address.phone,null,JSON.stringify(address),totals.subtotal,totals.delivery_fee,0,totals.total]);
+ for(const line of totals.items){await client.query(`UPDATE public.cosmetics_products SET stock=stock-$1,updated_at=NOW() WHERE id=$2`,[line.quantity,line.product_id]);await client.query(`INSERT INTO public.cosmetics_order_items(order_id,product_id,product_name,variant,quantity,unit_price,total_price) VALUES ($1,$2,$3,$4,$5,$6,$7)`,[id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);}
+ await client.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...totals,message:'Beauty COD order confirmed.'});
+ }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}finally{if(client)client.release();}
+});
+app.get('/api/admin/cosmetics/orders',async(req,res)=>{
+ try{const rows=await cosmeticsDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at FROM public.cosmetics_orders ORDER BY created_at DESC LIMIT 200`);return res.json({success:true,orders:rows});}catch(e){return beautyErr(res,e);}
+});
+app.patch('/api/admin/cosmetics/orders/:id/tracking',async(req,res)=>{
+ try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? RETURNING id,status,tracking_number,courier_name,tracking_url`,[status,courier,number,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
+});
