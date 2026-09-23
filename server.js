@@ -10070,9 +10070,9 @@ function beautyTotals(products,counts){
  lines.push({product_id:id,product_name:p.name,variant:p.variant||null,quantity:qty,unit_price:price,total_price:line});}
  const delivery_fee=beautyFee();return {items:lines,subtotal,delivery_fee,discount:0,total:subtotal+delivery_fee,currency:'INR'};
 }
-app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:beautyCodOn(),online_enabled:false,delivery_fee:beautyFee(),live_checkout:beautyCodOn()}));
+app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn(),delivery_fee:beautyFee(),live_checkout:beautyCodOn()||beautyOnlineOn()}));
 app.post('/api/cosmetics/quote',async(req,res)=>{
- res.set('Cache-Control','no-store');try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);return res.json({success:true,...beautyTotals(products,counts),cod_enabled:beautyCodOn(),online_enabled:false});}catch(e){return beautyErr(res,e);}
+ res.set('Cache-Control','no-store');try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);return res.json({success:true,...beautyTotals(products,counts),cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn()});}catch(e){return beautyErr(res,e);}
 });
 app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  res.set('Cache-Control','no-store');if(!beautyCodOn())return res.status(503).json({success:false,message:'Beauty checkout is not live yet.'});
@@ -10086,8 +10086,8 @@ app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  client=await db.getClient();await client.query('BEGIN');
  // A stable UUID makes retries safe; serialise duplicate attempts with transaction advisory lock.
  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);
- const existing=await client.query('SELECT id,customer_phone,total FROM public.cosmetics_orders WHERE id=$1',[id]);
- if(existing.length){await client.query('COMMIT');if(existing[0].customer_phone!==address.phone)return res.status(409).json({success:false,message:'Checkout request conflict.'});return res.json({success:true,order_id:id,total:Number(existing[0].total),already_created:true,payment_method:'cod'});}
+ const existing=await client.query('SELECT id,customer_phone,total,payment_method FROM public.cosmetics_orders WHERE id=$1',[id]);
+ if(existing.length){await client.query('COMMIT');if(existing[0].customer_phone!==address.phone||existing[0].payment_method!=='cod')return res.status(409).json({success:false,message:'Checkout request conflict.'});return res.json({success:true,order_id:id,total:Number(existing[0].total),already_created:true,payment_method:'cod'});}
  const ids=[...counts.keys()];const products=await client.query(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
  const totals=beautyTotals(products,counts);
  await client.query(`INSERT INTO public.cosmetics_orders (id,customer_name,customer_phone,customer_email,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'cod','pending','confirmed')`,[id,address.full_name,address.phone,null,JSON.stringify(address),totals.subtotal,totals.delivery_fee,0,totals.total]);
@@ -10099,7 +10099,9 @@ app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
 // Keep COSMETICS_ONLINE_ENABLED unset/false until verification, recovery and
 // webhook finalisation are deployed. This endpoint cannot mark an order paid.
 const beautyOnlineOn = () => process.env.COSMETICS_ONLINE_ENABLED === 'true'
-    && process.env.COSMETICS_LIVE_CHECKOUT_ENABLED === 'true';
+    && process.env.COSMETICS_LIVE_CHECKOUT_ENABLED === 'true'
+    && !!process.env.RAZORPAY_KEY_ID && !!process.env.RAZORPAY_KEY_SECRET
+    && !!process.env.COSMETICS_RAZORPAY_WEBHOOK_SECRET;
 app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
  res.set('Cache-Control', 'no-store');
  if (!beautyOnlineOn()) return res.status(503).json({success:false,message:'Beauty online payment is not enabled yet.'});
@@ -10118,12 +10120,13 @@ app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
   }
   client=await db.getClient();await client.query('BEGIN');
   await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);
-  const existing=await client.query(`SELECT id,customer_phone,total,payment_method,payment_status,razorpay_order_id
+  const existing=await client.query(`SELECT id,customer_phone,total,payment_method,payment_status,razorpay_order_id,status,payment_expires_at
     FROM public.cosmetics_orders WHERE id=$1 FOR UPDATE`,[id]);
   if(existing.length){
    const o=existing[0];await client.query('COMMIT');
    if(o.customer_phone!==address.phone||o.payment_method!=='razorpay')
     return res.status(409).json({success:false,message:'Checkout request ID already belongs to another order.'});
+   if(o.status==='expired'||o.status==='payment_review'||(o.payment_expires_at&&new Date(o.payment_expires_at).getTime()<Date.now()))return res.status(409).json({success:false,message:'This payment attempt is closed. Please start a new checkout or contact support.'});
    if(o.payment_status==='paid')return res.json({success:true,already_paid:true,order_id:id,total:Number(o.total)});
    if(!o.razorpay_order_id)return res.status(409).json({success:false,message:'Payment preparation incomplete; contact support.'});
    return res.json({success:true,already_created:true,order_id:id,razorpay_order_id:o.razorpay_order_id,
@@ -10134,7 +10137,7 @@ app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
     FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
   const totals=beautyTotals(products,counts);
   const amount=totals.total*100;
-  if(!Number.isSafeInteger(amount)||amount<100)return res.status(400).json({success:false,message:'Invalid online payment amount.'});
+  if(!Number.isSafeInteger(amount)||amount<100)throw Object.assign(new Error('Invalid online payment amount.'),{httpStatus:400});
   // Razorpay order amount is computed on the server, never trusted from browser.
   const razorpayOrder=await razorpayInstance.orders.create({amount,currency:'INR',receipt:id,
     notes:{store:'cerood_beauty',beauty_order_id:id}});
@@ -10142,19 +10145,166 @@ app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
    throw new Error('Razorpay returned an invalid order.');
   await client.query(`INSERT INTO public.cosmetics_orders
     (id,customer_name,customer_phone,customer_email,delivery_address,subtotal,delivery_fee,discount,total,
-     payment_method,payment_status,status,razorpay_order_id)
-    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'razorpay','pending','pending',$10)`,
+     payment_method,payment_status,status,razorpay_order_id,payment_expires_at)
+    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'razorpay','pending','pending',$10,NOW()+INTERVAL '24 hours')`,
     [id,address.full_name,address.phone,null,JSON.stringify(address),totals.subtotal,totals.delivery_fee,
      totals.discount,totals.total,razorpayOrder.id]);
-  for(const line of totals.items)await client.query(`INSERT INTO public.cosmetics_order_items
+  // Reserve stock in this same transaction. Never release a Razorpay reservation
+  // without checking Razorpay capture status; a late payment could otherwise oversell.
+  for(const line of totals.items){
+   const changed=await client.query(`UPDATE public.cosmetics_products SET stock=stock-$1,updated_at=NOW()
+     WHERE id=$2 AND stock >= $1 RETURNING id`,[line.quantity,line.product_id]);
+   if(!changed.length)throw Object.assign(new Error('Product stock changed. Refresh your cart.'),{httpStatus:409});
+   await client.query(`INSERT INTO public.cosmetics_order_items
     (order_id,product_id,product_name,variant,quantity,unit_price,total_price)
     VALUES ($1,$2,$3,$4,$5,$6,$7)`,
     [id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);
+  }
   await client.query('COMMIT');
   return res.status(201).json({success:true,order_id:id,razorpay_order_id:razorpayOrder.id,
     key_id:process.env.RAZORPAY_KEY_ID,amount,currency:'INR',total:totals.total});
  }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}
  finally{if(client)client.release();}
+});
+
+// Beauty payment finalisation: only Razorpay-confirmed CAPTURED payments become paid.
+// An order's inventory was reserved atomically during create-razorpay-order.
+async function beautyFinalizeCaptured(razorpayOrderId,paymentId){
+ if(!/^order_[A-Za-z0-9]+$/.test(String(razorpayOrderId||''))||
+    !/^pay_[A-Za-z0-9]+$/.test(String(paymentId||'')))return 'invalid';
+ const rows=await cosmeticsDb(`SELECT id,total,payment_status,razorpay_payment_id FROM public.cosmetics_orders
+    WHERE razorpay_order_id=? AND payment_method='razorpay' LIMIT 1`,[razorpayOrderId]);
+ if(!rows.length)return 'not_found';
+ const payment=await razorpayInstance.payments.fetch(paymentId);
+ if(payment.order_id!==razorpayOrderId||payment.currency!=='INR'||
+    Number(payment.amount)!==Math.round(Number(rows[0].total)*100)||payment.status!=='captured')return 'not_captured';
+ let client;
+ try{
+  client=await db.getClient();await client.query('BEGIN');
+  const locked=await client.query(`SELECT id,payment_status,razorpay_payment_id,status FROM public.cosmetics_orders
+    WHERE razorpay_order_id=$1 AND payment_method='razorpay' FOR UPDATE`,[razorpayOrderId]);
+  const order=locked[0];if(!order){await client.query('ROLLBACK');return 'not_found';}
+  if(order.payment_status==='paid'){
+   await client.query('COMMIT');return order.razorpay_payment_id===paymentId?'paid':'payment_review';
+  }
+  if(order.razorpay_payment_id&&order.razorpay_payment_id!==paymentId){
+   await client.query('ROLLBACK');return 'payment_review';
+  }
+  if(order.status!=='pending'){
+   // A late captured payment must NEVER silently confirm an expired/released reservation.
+   await client.query(`UPDATE public.cosmetics_orders SET payment_status='payment_review',
+     razorpay_payment_id=$2,updated_at=NOW() WHERE id=$1 AND payment_status<>'paid'`,[order.id,paymentId]);
+   await client.query('COMMIT');return 'payment_review';
+  }
+  await client.query(`UPDATE public.cosmetics_orders SET payment_status='paid',status='confirmed',
+    razorpay_payment_id=$2,paid_at=NOW(),updated_at=NOW() WHERE id=$1`,[order.id,paymentId]);
+  await client.query('COMMIT');return 'paid';
+ }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});throw e;}
+ finally{if(client)client.release();}
+}
+app.post('/api/cosmetics/verify-razorpay-payment',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const orderId=String(req.body?.razorpay_order_id||''),paymentId=String(req.body?.razorpay_payment_id||'');
+  const signature=String(req.body?.razorpay_signature||'');
+  if(!/^order_[A-Za-z0-9]+$/.test(orderId)||!/^pay_[A-Za-z0-9]+$/.test(paymentId)||
+     !/^[0-9a-f]{64}$/i.test(signature))return res.status(400).json({success:false,message:'Invalid payment verification data.'});
+  const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET||'')
+    .update(orderId+'|'+paymentId).digest('hex');
+  if(!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))
+    return res.status(401).json({success:false,message:'Payment signature verification failed.'});
+  const result=await beautyFinalizeCaptured(orderId,paymentId);
+  if(result!=='paid')return res.status(result==='not_captured'?202:409).json({success:false,
+    message:result==='not_captured'?'Payment is not captured yet. Please check again shortly.':'Payment requires support review.',payment_state:result});
+  const orders=await cosmeticsDb('SELECT id,total,customer_phone FROM public.cosmetics_orders WHERE razorpay_order_id=?',[orderId]);
+  return res.json({success:true,order_id:orders[0].id,total:Number(orders[0].total),payment_status:'paid'});
+ }catch(e){return beautyErr(res,e);}
+});
+// Browser-close recovery: UUID and matching delivery phone required; server fetches
+// Razorpay payments rather than trusting a browser-supplied payment status.
+app.post('/api/cosmetics/recover-razorpay-payment',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const id=String(req.body?.order_id||''),phone=String(req.body?.phone||'');
+  if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)||!/^[6-9]\d{9}$/.test(phone))
+   return res.status(400).json({success:false,message:'Valid order ID and phone required.'});
+  const rows=await cosmeticsDb(`SELECT id,customer_phone,razorpay_order_id,payment_status,total
+    FROM public.cosmetics_orders WHERE id=? AND payment_method='razorpay'`,[id]);
+  if(!rows.length||rows[0].customer_phone!==phone)return res.status(404).json({success:false,message:'Order not found.'});
+  const order=rows[0];if(order.payment_status==='paid')return res.json({success:true,paid:true,order_id:id,total:Number(order.total)});
+  const payments=await razorpayInstance.orders.fetchPayments(order.razorpay_order_id);
+  const captured=(payments.items||[]).find(x=>x.status==='captured'&&x.order_id===order.razorpay_order_id);
+  if(!captured)return res.json({success:true,paid:false,order_id:id,message:'No captured payment found yet.'});
+  const result=await beautyFinalizeCaptured(order.razorpay_order_id,captured.id);
+  return res.json({success:true,paid:result==='paid',order_id:id,payment_state:result,total:Number(order.total)});
+ }catch(e){return beautyErr(res,e);}
+});
+// Razorpay Dashboard: set a dedicated Beauty webhook secret and subscribe to payment.captured.
+app.post('/api/cosmetics/razorpay-webhook',async(req,res)=>{
+ try{
+  const secret=process.env.COSMETICS_RAZORPAY_WEBHOOK_SECRET||'';
+  const signature=String(req.get('x-razorpay-signature')||'');
+  if(!secret||!Buffer.isBuffer(req.body)||!/^[0-9a-f]{64}$/i.test(signature))return res.sendStatus(401);
+  const expected=crypto.createHmac('sha256',secret).update(req.body).digest('hex');
+  if(!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))return res.sendStatus(401);
+  const event=JSON.parse(req.body.toString('utf8'));
+  if(event.event==='payment.captured'){
+   const payment=event.payload?.payment?.entity;
+   if(payment?.order_id&&payment?.id){const result=await beautyFinalizeCaptured(payment.order_id,payment.id);
+    if(result==='not_captured'||result==='payment_review')return res.sendStatus(503);
+   }
+  }
+  return res.status(200).json({success:true});
+ }catch(e){console.error('Beauty webhook:',e.message);return res.sendStatus(503);}
+});
+
+// Expired Beauty reservations: only release after querying Razorpay; never assume a
+// browser-close or failed callback means the customer was not charged.
+async function beautyReconcileExpired(limit=12){
+ const pending=await cosmeticsDb(`SELECT id,razorpay_order_id FROM public.cosmetics_orders
+  WHERE payment_method='razorpay' AND payment_status='pending' AND status='pending'
+  AND payment_expires_at < NOW() ORDER BY payment_expires_at LIMIT ?`,[limit]);
+ for(const o of pending){
+  try{
+   const payments=await razorpayInstance.orders.fetchPayments(o.razorpay_order_id);
+   const captured=(payments.items||[]).find(p=>p.status==='captured'&&p.order_id===o.razorpay_order_id);
+   if(captured){await beautyFinalizeCaptured(o.razorpay_order_id,captured.id);continue;}
+   // Do not release an authorised payment: it may be captured asynchronously.
+   if((payments.items||[]).some(p=>p.status==='authorized'))continue;
+   let client;
+   try{
+    client=await db.getClient();await client.query('BEGIN');
+    const locked=await client.query(`SELECT id,status,payment_status FROM public.cosmetics_orders
+      WHERE id=$1 FOR UPDATE`,[o.id]);
+    if(locked[0]?.status==='pending'&&locked[0]?.payment_status==='pending'){
+     const items=await client.query(`SELECT product_id,quantity FROM public.cosmetics_order_items WHERE order_id=$1`,[o.id]);
+     for(const item of items)await client.query(`UPDATE public.cosmetics_products SET stock=stock+$1,updated_at=NOW() WHERE id=$2`,[item.quantity,item.product_id]);
+     await client.query(`UPDATE public.cosmetics_orders SET status='expired',payment_status='expired',updated_at=NOW() WHERE id=$1`,[o.id]);
+    }
+    await client.query('COMMIT');
+   }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});throw e;}
+   finally{if(client)client.release();}
+  }catch(e){console.error('Beauty reservation reconciliation:',o.id,e.message);}
+ }
+}
+// Run in a single Render instance; DB row locks prevent duplicate stock releases.
+setInterval(()=>{if(beautyOnlineOn())beautyReconcileExpired().catch(e=>console.error('Beauty sweep:',e.message));},15*60*1000).unref();
+app.post('/api/cosmetics/reconcile-my-payment',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const id=String(req.body?.order_id||''),phone=String(req.body?.phone||'');
+  if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)||!/^[6-9]\d{9}$/.test(phone))
+   return res.status(400).json({success:false,message:'Invalid order reference.'});
+  const rows=await cosmeticsDb(`SELECT razorpay_order_id,payment_status,status FROM public.cosmetics_orders
+    WHERE id=? AND customer_phone=? AND payment_method='razorpay'`,[id,phone]);
+  if(!rows.length)return res.status(404).json({success:false,message:'Order not found.'});
+  if(rows[0].payment_status==='paid')return res.json({success:true,paid:true,order_id:id});
+  const payments=await razorpayInstance.orders.fetchPayments(rows[0].razorpay_order_id);
+  const captured=(payments.items||[]).find(p=>p.status==='captured'&&p.order_id===rows[0].razorpay_order_id);
+  if(captured){const state=await beautyFinalizeCaptured(rows[0].razorpay_order_id,captured.id);
+   return res.json({success:true,paid:state==='paid',order_id:id,payment_state:state});}
+  return res.json({success:true,paid:false,order_id:id,payment_state:rows[0].status});
+ }catch(e){return beautyErr(res,e);}
 });
 
 // Device receipt lookup: UUID + delivery phone are both required. No public order listing.
@@ -10168,7 +10318,7 @@ app.post('/api/cosmetics/device-orders',async(req,res)=>{
   if(!keys.length)return res.json({success:true,orders:[]});
   const ids=[...new Set(keys.map(x=>x.id))];
   const rows=await cosmeticsDb(`SELECT o.id,o.customer_name,o.customer_phone,o.delivery_address,o.subtotal,o.delivery_fee,o.total,o.payment_method,o.payment_status,o.status,o.tracking_number,o.courier_name,o.tracking_url,o.created_at,o.updated_at FROM public.cosmetics_orders o WHERE o.id IN (${ids.map(()=>'?').join(',')})`,ids);
-  const safe=rows.filter(o=>keys.some(k=>k.id===o.id&&k.phone===o.customer_phone));
+  const safe=rows.filter(o=>keys.some(k=>k.id===o.id&&k.phone===o.customer_phone) && (o.payment_method==='cod'||o.payment_status==='paid'||o.payment_status==='payment_review'));
   for(const o of safe){o.delivery_status=o.status;o.items=await cosmeticsDb(`SELECT i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price AS line_total,p.image_url FROM public.cosmetics_order_items i LEFT JOIN public.cosmetics_products p ON p.id=i.product_id WHERE i.order_id=?`,[o.id]);}
   return res.json({success:true,orders:safe});
  }catch(e){return beautyErr(res,e);}
@@ -10177,5 +10327,5 @@ app.get('/api/admin/cosmetics/orders',async(req,res)=>{
  try{const rows=await cosmeticsDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at FROM public.cosmetics_orders ORDER BY created_at DESC LIMIT 200`);return res.json({success:true,orders:rows});}catch(e){return beautyErr(res,e);}
 });
 app.patch('/api/admin/cosmetics/orders/:id/tracking',async(req,res)=>{
- try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? RETURNING id,status,tracking_number,courier_name,tracking_url`,[status,courier,number,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
+ try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') RETURNING id,status,tracking_number,courier_name,tracking_url`,[status,courier,number,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
 });
