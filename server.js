@@ -9109,7 +9109,7 @@ app.post('/api/renewed/quote', async (req, res) => {
 
 
 
-// Renewed Store only: India-wide address validation. Courier coverage must be
+// Renewed Store only: India-wide address validation. Nationwide fee overrides district rates when set. Courier coverage must be
 // independently confirmed before enabling a nationwide shipping rate.
 function renewedIndiaAddressValid(state, district, pincode) {
     return /^[A-Za-z][A-Za-z .,'()&/-]{1,99}$/.test(String(state || '').trim()) &&
@@ -9165,7 +9165,7 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
         const nationwideFee = renewedNationwideFee();
         if (!rates.length && nationwideFee === null) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
             delivery_status:'pending',checkout_enabled:false,message:'India delivery requested. Cerood has not configured a shipping rate for this destination.'});
-        const fee = rates.length ? Number(rates[0].fee) : nationwideFee;
+        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee);
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(subtotal+fee)) throw new Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:fee,total:subtotal+fee,
             delivery_status:'rate_configured',checkout_enabled:false,
@@ -9251,7 +9251,7 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
             [(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
         const nationwideFee = renewedNationwideFee();
         if (!rates.length && nationwideFee === null) return res.status(409).json({success:false,message:'Delivery rate not configured for this destination.'});
-        const fee = rates.length ? Number(rates[0].fee) : nationwideFee, total = subtotal + fee;
+        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee), total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) || total < 1) throw Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',items:quoteItems,subtotal,delivery_fee:fee,total,
             district,pincode,customer_verified:true,checkout_enabled:false,payment_enabled:false,
@@ -9433,7 +9433,7 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
           WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
         const nationwideFee = renewedNationwideFee();
         if(!rates.length && nationwideFee === null){const e=Error('Delivery rate unavailable for this destination.');e.status=409;throw e;}
-        const fee=rates.length ? Number(rates[0].fee) : nationwideFee,total=subtotal+fee;
+        const fee=nationwideFee !== null ? nationwideFee : Number(rates[0].fee),total=subtotal+fee;
         if(!Number.isSafeInteger(fee)||fee<0||!Number.isSafeInteger(total)||total<1||total>10000000)throw Error('Invalid order total.');
         const id=crypto.randomUUID();
         const savedAddress={full_name:fullName,street,area:String(address.area||'').trim().slice(0,200),
@@ -9541,7 +9541,7 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
              WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
         const nationwideFee = renewedNationwideFee();
         if (!rates.length && nationwideFee === null) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
-        const fee = rates.length ? Number(rates[0].fee) : nationwideFee, total = subtotal + fee;
+        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee), total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) ||
             total < 1 || total > 10000000) throw Error('Invalid payment amount.');
         const orderId = crypto.randomUUID();
