@@ -9108,21 +9108,6 @@ app.post('/api/renewed/quote', async (req, res) => {
 });
 
 
-
-// Renewed Store only: India-wide address validation. Nationwide fee overrides district rates when set. Courier coverage must be
-// independently confirmed before enabling a nationwide shipping rate.
-function renewedIndiaAddressValid(state, district, pincode) {
-    return /^[A-Za-z][A-Za-z .,'()&/-]{1,99}$/.test(String(state || '').trim()) &&
-        /^[A-Za-z][A-Za-z .,'()&/-]{1,99}$/.test(String(district || '').trim()) &&
-        /^[1-9]\d{5}$/.test(String(pincode || '').trim());
-}
-function renewedNationwideFee() {
-    const value = String(process.env.RENEWED_INDIA_DELIVERY_FEE ?? '').trim();
-    if (!/^\d+$/.test(value)) return null;
-    const fee = Number(value);
-    return Number.isSafeInteger(fee) && fee >= 0 ? fee : null;
-}
-
 // ==========================================
 // CEROOD RENEWED — PHASE 5E: DESTINATION DISTRICT DELIVERY QUOTE
 // Price and stock rechecked server-side. No order, reservation or payment.
@@ -9137,8 +9122,11 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
         const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
         const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
         const pincode = String(address.pincode || '').trim();
-        if (!renewedIndiaAddressValid(state,district,pincode))
-            return res.status(400).json({success:false,message:'Enter a valid Indian state, district and six-digit PIN code.'});
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) || !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^\d{6}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a valid Tamil Nadu district and six-digit pincode.'});
+        // TN PIN prefixes are a preliminary input check, not a deliverability guarantee.
+        if (!/^[56]\d{5}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a Tamil Nadu pincode.'});
         const quantities = new Map();
         for (const item of items) {
             const id = String(item && item.product_id || '').trim();
@@ -9161,11 +9149,10 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
             if (!Number.isSafeInteger(subtotal) || subtotal < 1)
                 throw new Error('Invalid stored quote price.');
         }
-        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
-        const nationwideFee = renewedNationwideFee();
-        if (!rates.length && nationwideFee === null) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
-            delivery_status:'pending',checkout_enabled:false,message:'India delivery requested. Cerood has not configured a shipping rate for this destination.'});
-        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee);
+        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if (!rates.length) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
+            delivery_status:'pending',checkout_enabled:false,message:'Tamil Nadu delivery requested. Cerood has not configured/confirmed a delivery rate for this district.'});
+        const fee = Number(rates[0].fee);
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(subtotal+fee)) throw new Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:fee,total:subtotal+fee,
             delivery_status:'rate_configured',checkout_enabled:false,
@@ -9213,10 +9200,11 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
         const fullName = String(address.full_name || address.name || '').trim();
         const street = String(address.street || address.address || '').trim();
         const city = String(address.city || '').trim();
-        if (!renewedIndiaAddressValid(state,district,pincode) ||
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
+            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
             fullName.length < 2 || fullName.length > 140 || street.length < 5 || street.length > 500 ||
             city.length < 2 || city.length > 100) {
-            return res.status(400).json({success:false,message:'Enter a complete Indian delivery address.'});
+            return res.status(400).json({success:false,message:'Enter a complete Tamil Nadu delivery address.'});
         }
         const quantities = new Map();
         for (const item of items) {
@@ -9248,10 +9236,9 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
         }
         const rates = await renewedQuery(
             'SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1',
-            [(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
-        const nationwideFee = renewedNationwideFee();
-        if (!rates.length && nationwideFee === null) return res.status(409).json({success:false,message:'Delivery rate not configured for this destination.'});
-        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee), total = subtotal + fee;
+            [district]);
+        if (!rates.length) return res.status(409).json({success:false,message:'Delivery rate not configured for this district.'});
+        const fee = Number(rates[0].fee), total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) || total < 1) throw Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',items:quoteItems,subtotal,delivery_fee:fee,total,
             district,pincode,customer_verified:true,checkout_enabled:false,payment_enabled:false,
@@ -9393,10 +9380,11 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         const fullName=String(address.full_name||'').trim();
         const street=String(address.street||'').trim();
         const city=String(address.city||'').trim();
-        if(!renewedIndiaAddressValid(state,district,pincode)||fullName.length<2||fullName.length>140||
+        if(!['tamil nadu','tamilnadu','tn'].includes(state)||!/^[a-z][a-z .'-]{1,99}$/.test(district)||
+           !/^[56]\d{5}$/.test(pincode)||fullName.length<2||fullName.length>140||
            street.length<5||street.length>500||city.length<2||city.length>100||
            String(address.phone||'').trim()!==phone)
-            return res.status(400).json({success:false,message:'Complete Indian address and verified mobile are required.'});
+            return res.status(400).json({success:false,message:'Complete Tamil Nadu address and verified mobile are required.'});
         const quantities=new Map();
         for(const item of items){
             const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);
@@ -9430,14 +9418,13 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
         }
         const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
-          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
-        const nationwideFee = renewedNationwideFee();
-        if(!rates.length && nationwideFee === null){const e=Error('Delivery rate unavailable for this destination.');e.status=409;throw e;}
-        const fee=nationwideFee !== null ? nationwideFee : Number(rates[0].fee),total=subtotal+fee;
+          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if(!rates.length){const e=Error('Delivery rate unavailable for this district.');e.status=409;throw e;}
+        const fee=Number(rates[0].fee),total=subtotal+fee;
         if(!Number.isSafeInteger(fee)||fee<0||!Number.isSafeInteger(total)||total<1||total>10000000)throw Error('Invalid order total.');
         const id=crypto.randomUUID();
         const savedAddress={full_name:fullName,street,area:String(address.area||'').trim().slice(0,200),
-          city,district,state:String(address.state||'').trim(),pincode};
+          city,district,state:'Tamil Nadu',pincode};
         await client.query(`INSERT INTO public.renewed_orders
           (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
            subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,cod_request_id)
@@ -9500,10 +9487,11 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         const fullName = String(address.full_name || address.name || '').trim();
         const street = String(address.street || address.address || '').trim();
         const city = String(address.city || '').trim();
-        if (!renewedIndiaAddressValid(state,district,pincode) ||
+        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
+            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
             fullName.length < 2 || fullName.length > 140 ||
             street.length < 5 || street.length > 500 || city.length < 2 || city.length > 100)
-            return res.status(400).json({success:false,message:'Complete Indian delivery address required.'});
+            return res.status(400).json({success:false,message:'Complete Tamil Nadu delivery address required.'});
         const quantities = new Map();
         for (const item of items) {
             const id = String(item?.product_id || '').trim();
@@ -9538,15 +9526,14 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         }
         const rates = await client.query(
             `SELECT fee FROM public.renewed_delivery_rates
-             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
-        const nationwideFee = renewedNationwideFee();
-        if (!rates.length && nationwideFee === null) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
-        const fee = nationwideFee !== null ? nationwideFee : Number(rates[0].fee), total = subtotal + fee;
+             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
+        if (!rates.length) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
+        const fee = Number(rates[0].fee), total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) ||
             total < 1 || total > 10000000) throw Error('Invalid payment amount.');
         const orderId = crypto.randomUUID();
         const savedAddress = {
-            full_name:fullName,street,city,district,state:String(address.state||'').trim(),pincode,
+            full_name:fullName,street,city,district,state:'Tamil Nadu',pincode,
             area:String(address.area || '').trim().slice(0,200)
         };
         await client.query(
@@ -9681,7 +9668,7 @@ app.get('/api/admin/renewed/orders', async (req,res) => {
     res.set('Cache-Control','no-store');
     try {
         const orders = await renewedQuery(`SELECT id,customer_name,customer_phone,customer_email,
-          delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,
+          delivery_address,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,
           delivered_at,razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
           FROM public.renewed_orders ORDER BY created_at DESC LIMIT 300`);
         const ids = orders.map(o=>o.id);
@@ -9701,7 +9688,10 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
         if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id) || !renewedDeliveryStages.includes(next))
             return res.status(400).json({success:false,message:'Invalid order ID or delivery status.'});
         const rows=await renewedQuery(`UPDATE public.renewed_orders
-          SET delivery_status=?,delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at,NOW()) ELSE delivered_at END,updated_at=NOW()
+          SET delivery_status=?,delivered_at=CASE WHEN ?='delivered' THEN COALESCE(delivered_at,NOW()) ELSE delivered_at END,
+          status_timestamps=CASE WHEN delivery_status IS DISTINCT FROM ?
+            THEN jsonb_set(COALESCE(status_timestamps,'{}'::jsonb),ARRAY[?]::text[],to_jsonb(NOW()),true)
+            ELSE COALESCE(status_timestamps,'{}'::jsonb) END,updated_at=NOW()
           WHERE id=? AND (status='paid' OR (status='processing' AND payment_method='cod')) AND
           (delivery_status IS NULL OR delivery_status IN ('confirmed','packing','packed','shipped','out_for_delivery','delivered'))
           AND (CASE COALESCE(delivery_status,'confirmed')
@@ -9709,7 +9699,7 @@ app.patch('/api/admin/renewed/orders/:id/delivery-status', async(req,res)=>{
             WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE 99 END)
           <= (CASE ? WHEN 'confirmed' THEN 0 WHEN 'packing' THEN 1 WHEN 'packed' THEN 2
             WHEN 'shipped' THEN 3 WHEN 'out_for_delivery' THEN 4 WHEN 'delivered' THEN 5 ELSE -1 END)
-          RETURNING id,status,delivery_status,delivered_at,updated_at`,[next,next,id,next]);
+          RETURNING id,status,delivery_status,status_timestamps,delivered_at,updated_at`,[next,next,next,next,id,next]);
         if(!rows.length)return res.status(409).json({success:false,message:'Only paid online or confirmed COD orders can advance; status cannot move backward. Refresh orders.'});
         return res.json({success:true,order:rows[0]});
     } catch(e){console.error('Renewed delivery update:',e.message);
@@ -9727,7 +9717,7 @@ app.post('/api/renewed/device-orders',async(req,res)=>{
   try{
     const orders=[];
     for(const entry of entries){
-      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,created_at,updated_at
+      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,created_at,updated_at
         FROM public.renewed_orders WHERE id=? AND cod_request_id=? AND payment_method='cod' LIMIT 1`,[entry.id,entry.request_id]);
       if(!rows.length)continue;
       const items=await renewedQuery(`SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase
@@ -9798,7 +9788,7 @@ app.post('/api/renewed/claim-guest-orders',renewedCustomerSession,async(req,res)
 app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
 app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
-  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
+  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
     const ids=orders.map(o=>o.id);
     const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
     const byId=new Map();for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item)}
@@ -9808,7 +9798,7 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
 app.get('/api/renewed/customer-order/:id',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
   const id=String(req.params.id||'');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Invalid order ID.'});
-  try{const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_id=? LIMIT 1`,[id,req.renewedCustomerId]);
+  try{const rows=await renewedQuery(`SELECT id,status,delivery_status,status_timestamps,payment_method,total,currency,created_at,paid_at,updated_at FROM public.renewed_orders WHERE id=? AND customer_id=? LIMIT 1`,[id,req.renewedCustomerId]);
     if(!rows.length)return res.status(404).json({success:false,message:'Order not found for this account.'});return res.json({success:true,order:rows[0]});
   }catch(e){console.error('Renewed customer tracking:',e.message);return res.status(503).json({success:false,message:'Order status temporarily unavailable.'});}
 });
@@ -9824,7 +9814,7 @@ app.post('/api/renewed/my-orders', async (req,res)=>{
         if(String(verified?.type||'').toLowerCase()!=='success')return res.status(401).json({success:false,message:'Mobile verification expired.'});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
         if(!/^[6-9]\d{9}$/.test(phone))return res.status(401).json({success:false,message:'Verified phone not available.'});
-        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,delivered_at,
+        const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,
             paid_at,created_at,updated_at FROM public.renewed_orders
             WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[phone]);
         const ids=orders.map(o=>o.id);
@@ -9879,7 +9869,7 @@ app.post('/api/renewed/order-status',async(req,res)=>{
         const verified=await verifyMsg91AccessToken(token);
         if (String(verified?.type||'').toLowerCase()!=='success') return res.status(401).json({success:false});
         const phone=extractVerifiedPhoneFromMsg91(verified,token);
-        const rows=await renewedQuery(`SELECT id,status,delivery_status,payment_method,total,currency,created_at,paid_at,updated_at
+        const rows=await renewedQuery(`SELECT id,status,delivery_status,status_timestamps,payment_method,total,currency,created_at,paid_at,updated_at
           FROM public.renewed_orders WHERE id=? AND customer_phone=? LIMIT 1`,[orderId,phone]);
         if (!rows.length) return res.status(404).json({success:false});
         return res.json({success:true,order:rows[0]});
