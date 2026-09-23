@@ -41,8 +41,9 @@ app.use(cors({
     credentials: true
 }));
 
-// Razorpay webhook requires the ORIGINAL bytes, before JSON parsing.
+// Razorpay webhook signatures require ORIGINAL bytes; both routes MUST precede express.json().
 app.use('/api/renewed/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
+app.use('/api/cosmetics/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use(express.json());
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
