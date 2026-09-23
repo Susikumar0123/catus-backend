@@ -9955,3 +9955,93 @@ renewedExpiryTimer.unref();
 // Those must authenticate the customer and verify payment server-side first.
 
 initDatabase();
+
+// =============================================================
+// CEROOD COSMETICS — PHASE 1: SAFE PRODUCT INVENTORY
+// Uses the existing admin middleware and the existing db adapter.
+// No live payment/order routes are enabled in this phase.
+// =============================================================
+const cosmeticsDb = (sql, values=[]) => new Promise((resolve,reject)=>
+    db.query(sql,values,(error,rows)=>error?reject(error):resolve(rows||[])));
+const cosmeticsFields = `id,name,category,brand,description,variant,shade,net_quantity,
+ ingredients,directions,warnings,batch_number,manufacture_date,expiry_date,
+ price,compare_price,stock,image_url,video_url,manufacturer,importer,status,created_at,updated_at`;
+const cosmeticsIdOk = id => /^[a-zA-Z0-9_-]{1,80}$/.test(String(id||''));
+function cosmeticsClean(b){
+    const str=(k,n)=>String(b[k]??'').trim().slice(0,n);
+    const name=str('name',140),category=str('category',80),price=Number(b.price),stock=Number(b.stock);
+    const compare_price=b.compare_price==null||b.compare_price===''?null:Number(b.compare_price);
+    const status=str('status',20)||'draft';
+    if(!name||!category||!Number.isFinite(price)||price<=0||price>10000000||
+       !Number.isSafeInteger(stock)||stock<0||stock>1000000||
+       (compare_price!==null&&(!Number.isFinite(compare_price)||compare_price<0))||
+       !['draft','published'].includes(status))
+       throw Object.assign(new Error('Enter a valid name, category, price, stock and status.'),{status:400});
+    const image_url=str('image_url',2048),video_url=str('video_url',2048);
+    for(const u of [image_url,video_url]) if(u&&(!/^https:\/\//i.test(u)||!URL.canParse(u)))
+       throw Object.assign(new Error('Product media URLs must use HTTPS.'),{status:400});
+    const expiry_date=str('expiry_date',10)||null,manufacture_date=str('manufacture_date',10)||null;
+    for(const d of [expiry_date,manufacture_date]) if(d&&(!/^\d{4}-\d{2}-\d{2}$/.test(d)||Number.isNaN(Date.parse(d))))
+       throw Object.assign(new Error('Use YYYY-MM-DD for dates.'),{status:400});
+    if(expiry_date&&manufacture_date&&expiry_date<manufacture_date)
+       throw Object.assign(new Error('Expiry must follow manufacture date.'),{status:400});
+    if(status==='published'&&(!image_url||!str('brand',100)||!str('net_quantity',100)||!expiry_date))
+       throw Object.assign(new Error('Publish requires image, brand, net quantity and expiry date.'),{status:400});
+    return {name,category,brand:str('brand',100),description:str('description',5000),
+      variant:str('variant',100),shade:str('shade',100),net_quantity:str('net_quantity',100),
+      ingredients:str('ingredients',5000),directions:str('directions',5000),warnings:str('warnings',5000),
+      batch_number:str('batch_number',100),manufacture_date,expiry_date,price,compare_price,stock,
+      image_url,video_url,manufacturer:str('manufacturer',250),importer:str('importer',250),status};
+}
+function cosmeticsFail(res,e){console.error('Cosmetics inventory:',e.message);
+  return res.status(e.status||503).json({success:false,message:e.status?e.message:'Cosmetics inventory is unavailable.'});}
+app.get('/api/cosmetics/products',async(req,res)=>{
+  try {const rows=await cosmeticsDb(`SELECT ${cosmeticsFields} FROM public.cosmetics_products
+    WHERE status='published' AND (expiry_date IS NULL OR expiry_date>=CURRENT_DATE)
+    ORDER BY created_at DESC LIMIT 250`);
+    return res.json({success:true,products:rows.map(p=>({...p,image:p.image_url,media:[p.image_url&&{type:'image',url:p.image_url},p.video_url&&{type:'video',url:p.video_url}].filter(Boolean)}))});
+  }catch(e){return cosmeticsFail(res,e);}
+});
+app.get('/api/cosmetics/products/:id',async(req,res)=>{
+  if(!cosmeticsIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid ID.'});
+  try {const rows=await cosmeticsDb(`SELECT ${cosmeticsFields} FROM public.cosmetics_products
+    WHERE id=? AND status='published' AND (expiry_date IS NULL OR expiry_date>=CURRENT_DATE) LIMIT 1`,[req.params.id]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Product not found.'});
+    const p=rows[0];return res.json({success:true,product:{...p,image:p.image_url,media:[p.image_url&&{type:'image',url:p.image_url},p.video_url&&{type:'video',url:p.video_url}].filter(Boolean)}});
+  }catch(e){return cosmeticsFail(res,e);}
+});
+// Admin endpoints are BELOW app.use('/api/admin', requireAdminAuth).
+app.get('/api/admin/cosmetics/products',async(req,res)=>{
+  try{return res.json({success:true,products:await cosmeticsDb(`SELECT ${cosmeticsFields} FROM public.cosmetics_products ORDER BY updated_at DESC LIMIT 500`)});}
+  catch(e){return cosmeticsFail(res,e);}
+});
+app.get('/api/admin/cosmetics/test-preview/:id',async(req,res)=>{
+  if(!cosmeticsIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid ID.'});
+  try{const rows=await cosmeticsDb(`SELECT ${cosmeticsFields} FROM public.cosmetics_products WHERE id=? LIMIT 1`,[req.params.id]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Product not found.'});
+    return res.json({success:true,test_only:true,payment_created:false,product:rows[0]});}
+  catch(e){return cosmeticsFail(res,e);}
+});
+app.post('/api/admin/cosmetics/products',async(req,res)=>{
+  try{const p=cosmeticsClean(req.body||{}),keys=Object.keys(p),id=crypto.randomUUID();
+    const rows=await cosmeticsDb(`INSERT INTO public.cosmetics_products (id,${keys.join(',')}) VALUES (?,${keys.map(()=>'?').join(',')}) RETURNING ${cosmeticsFields}`,[id,...Object.values(p)]);
+    return res.status(201).json({success:true,product:rows[0]});}
+  catch(e){return cosmeticsFail(res,e);}
+});
+app.put('/api/admin/cosmetics/products/:id',async(req,res)=>{
+  if(!cosmeticsIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid ID.'});
+  try{const p=cosmeticsClean(req.body||{}),keys=Object.keys(p);
+    const rows=await cosmeticsDb(`UPDATE public.cosmetics_products SET ${keys.map(k=>k+'=?').join(',')},updated_at=NOW() WHERE id=? RETURNING ${cosmeticsFields}`,[...Object.values(p),req.params.id]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Product not found.'});
+    return res.json({success:true,product:rows[0]});}
+  catch(e){return cosmeticsFail(res,e);}
+});
+app.delete('/api/admin/cosmetics/products/:id',async(req,res)=>{
+  if(!cosmeticsIdOk(req.params.id))return res.status(400).json({success:false,message:'Invalid ID.'});
+  try{const rows=await cosmeticsDb('DELETE FROM public.cosmetics_products WHERE id=? RETURNING id',[req.params.id]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Product not found.'});
+    return res.json({success:true,deleted_id:rows[0].id});}
+  catch(e){return cosmeticsFail(res,e);}
+});
+// Phase 1 checkout intentionally blocked; never simulate an accepted order.
+app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:false,online_enabled:false,delivery_fee:79,live_checkout:false}));
