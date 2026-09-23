@@ -10094,6 +10094,22 @@ app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  await client.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...totals,message:'Beauty COD order confirmed.'});
  }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}finally{if(client)client.release();}
 });
+// Device receipt lookup: UUID + delivery phone are both required. No public order listing.
+app.post('/api/cosmetics/device-orders',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const input=req.body?.receipts;
+  if(!Array.isArray(input)||input.length>30)return res.status(400).json({success:false,message:'Invalid order receipts.'});
+  const keys=[];
+  for(const x of input){const id=String(x?.id||'');const phone=String(x?.phone||'');if(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)&&/^[6-9]\d{9}$/.test(phone))keys.push({id,phone});}
+  if(!keys.length)return res.json({success:true,orders:[]});
+  const ids=[...new Set(keys.map(x=>x.id))];
+  const rows=await cosmeticsDb(`SELECT o.id,o.customer_name,o.customer_phone,o.delivery_address,o.subtotal,o.delivery_fee,o.total,o.payment_method,o.payment_status,o.status,o.tracking_number,o.courier_name,o.tracking_url,o.created_at,o.updated_at FROM public.cosmetics_orders o WHERE o.id IN (${ids.map(()=>'?').join(',')})`,ids);
+  const safe=rows.filter(o=>keys.some(k=>k.id===o.id&&k.phone===o.customer_phone));
+  for(const o of safe){o.delivery_status=o.status;o.items=await cosmeticsDb(`SELECT i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price AS line_total,p.image_url FROM public.cosmetics_order_items i LEFT JOIN public.cosmetics_products p ON p.id=i.product_id WHERE i.order_id=?`,[o.id]);}
+  return res.json({success:true,orders:safe});
+ }catch(e){return beautyErr(res,e);}
+});
 app.get('/api/admin/cosmetics/orders',async(req,res)=>{
  try{const rows=await cosmeticsDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at FROM public.cosmetics_orders ORDER BY created_at DESC LIMIT 200`);return res.json({success:true,orders:rows});}catch(e){return beautyErr(res,e);}
 });
