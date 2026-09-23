@@ -10426,3 +10426,32 @@ app.get('/api/admin/clothing/orders',async(req,res)=>{try{const rows=await cloth
 app.patch('/api/admin/clothing/orders/:id/tracking',async(req,res)=>{try{if(!fashionUUID(req.params.id))fashionBad('Invalid Fashion order ID.');const status=String(req.body?.status||''),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))fashionBad('Invalid delivery status.');const courier=String(req.body?.courier_name||'').trim().slice(0,100),tracking=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))fashionBad('Tracking URL must use HTTPS.');const rows=await clothingDb(`UPDATE public.clothing_orders SET status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') RETURNING id,status,tracking_number,courier_name,tracking_url`,[status,courier,tracking,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){fashionFail(res,e);}});
 
 
+
+
+// CEROOD FASHION — receipt-bound customer tracking (separate from other stores).
+// A checkout receipt contains an unpredictable order UUID and the checkout phone.
+// Never accept a phone-only lookup or return other customers' orders.
+app.post('/api/clothing/device-orders',async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const receipts=req.body?.receipts;
+  if(!Array.isArray(receipts)||receipts.length>30)return res.status(400).json({success:false,message:'Invalid Fashion receipts.'});
+  const valid=new Map();
+  for(const x of receipts){
+   const id=String(x?.id||''),request=String(x?.request_id||''),phone=String(x?.phone||'');
+   if(fashionUUID(id)&&id===request&&/^[6-9]\d{9}$/.test(phone))valid.set(id,phone);
+  }
+  if(!valid.size)return res.json({success:true,orders:[]});
+  const ids=[...valid.keys()];
+  const rows=await clothingDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,courier_name,tracking_number,tracking_url,created_at,updated_at FROM public.clothing_orders WHERE id=ANY(?::uuid[]) ORDER BY created_at DESC LIMIT 30`,[ids]);
+  const allowed=rows.filter(o=>valid.get(o.id)===o.customer_phone);
+  if(!allowed.length)return res.json({success:true,orders:[]});
+  const items=await clothingDb(`SELECT i.order_id,i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price,p.image_url FROM public.clothing_order_items i LEFT JOIN public.clothing_products p ON p.id=i.product_id WHERE i.order_id=ANY(?::uuid[]) ORDER BY i.id`,[allowed.map(o=>o.id)]);
+  const grouped=new Map();for(const item of items){if(!grouped.has(item.order_id))grouped.set(item.order_id,[]);grouped.get(item.order_id).push({...item,line_total:Number(item.total_price)});}
+  return res.json({success:true,orders:allowed.map(o=>({
+   ...o,status:o.payment_method==='cod'?'pending':o.payment_status,
+   delivery_status:o.status,items:grouped.get(o.id)||[],
+   status_timestamps:{confirmed:o.created_at,...(o.status==='delivered'?{delivered:o.updated_at}:{})}
+  }))});
+ }catch(e){return fashionFail(res,e);}
+});
