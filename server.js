@@ -7783,8 +7783,13 @@ app.get('/api/sitemap/:page', (req, res) => {
 
 // Static pages only in sitemap-1
 if (page === 1) {
+    // Common Cerood homepage and separate Home Services homepage.
     urls.push(
         `${frontendBase}/`
+    );
+
+    urls.push(
+        `${frontendBase}/home-services.html`
     );
 
     urls.push(
@@ -10443,10 +10448,10 @@ app.post('/api/clothing/device-orders',async(req,res)=>{
   }
   if(!valid.size)return res.json({success:true,orders:[]});
   const ids=[...valid.keys()];
-  const rows=await clothingDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,courier_name,tracking_number,tracking_url,created_at,updated_at FROM public.clothing_orders WHERE id=ANY(?::text[]) ORDER BY created_at DESC LIMIT 30`,[ids]);
+  const rows=await clothingDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,courier_name,tracking_number,tracking_url,created_at,updated_at FROM public.clothing_orders WHERE id=ANY(?::uuid[]) ORDER BY created_at DESC LIMIT 30`,[ids]);
   const allowed=rows.filter(o=>valid.get(o.id)===o.customer_phone);
   if(!allowed.length)return res.json({success:true,orders:[]});
-  const items=await clothingDb(`SELECT i.order_id,i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price,p.image_url FROM public.clothing_order_items i LEFT JOIN public.clothing_products p ON p.id=i.product_id WHERE i.order_id=ANY(?::text[]) ORDER BY i.id`,[allowed.map(o=>o.id)]);
+  const items=await clothingDb(`SELECT i.order_id,i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price,p.image_url FROM public.clothing_order_items i LEFT JOIN public.clothing_products p ON p.id=i.product_id WHERE i.order_id=ANY(?::uuid[]) ORDER BY i.id`,[allowed.map(o=>o.id)]);
   const grouped=new Map();for(const item of items){if(!grouped.has(item.order_id))grouped.set(item.order_id,[]);grouped.get(item.order_id).push({...item,line_total:Number(item.total_price)});}
   return res.json({success:true,orders:allowed.map(o=>({
    ...o,status:o.payment_method==='cod'?'pending':o.payment_status,
