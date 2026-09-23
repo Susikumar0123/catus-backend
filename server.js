@@ -10095,6 +10095,68 @@ app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  await client.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...totals,message:'Beauty COD order confirmed.'});
  }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}finally{if(client)client.release();}
 });
+// CEROOD BEAUTY — Razorpay order creation (preparation stage).
+// Keep COSMETICS_ONLINE_ENABLED unset/false until verification, recovery and
+// webhook finalisation are deployed. This endpoint cannot mark an order paid.
+const beautyOnlineOn = () => process.env.COSMETICS_ONLINE_ENABLED === 'true'
+    && process.env.COSMETICS_LIVE_CHECKOUT_ENABLED === 'true';
+app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
+ res.set('Cache-Control', 'no-store');
+ if (!beautyOnlineOn()) return res.status(503).json({success:false,message:'Beauty online payment is not enabled yet.'});
+ let client;
+ try {
+  const {address,counts}=beautyRequest(req.body||{});
+  const id=String(req.body?.request_id||'').trim();
+  if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))
+   return res.status(400).json({success:false,message:'Valid checkout request ID required.'});
+  if(process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true') {
+   const token=String(req.body?.accessToken||'').trim();
+   if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile OTP before ordering.'});
+   const verified=await verifyMsg91AccessToken(token);
+   if(String(verified?.type||'').toLowerCase()!=='success'||extractVerifiedPhoneFromMsg91(verified,token)!==address.phone)
+    return res.status(401).json({success:false,message:'Verified mobile does not match delivery address.'});
+  }
+  client=await db.getClient();await client.query('BEGIN');
+  await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);
+  const existing=await client.query(`SELECT id,customer_phone,total,payment_method,payment_status,razorpay_order_id
+    FROM public.cosmetics_orders WHERE id=$1 FOR UPDATE`,[id]);
+  if(existing.length){
+   const o=existing[0];await client.query('COMMIT');
+   if(o.customer_phone!==address.phone||o.payment_method!=='razorpay')
+    return res.status(409).json({success:false,message:'Checkout request ID already belongs to another order.'});
+   if(o.payment_status==='paid')return res.json({success:true,already_paid:true,order_id:id,total:Number(o.total)});
+   if(!o.razorpay_order_id)return res.status(409).json({success:false,message:'Payment preparation incomplete; contact support.'});
+   return res.json({success:true,already_created:true,order_id:id,razorpay_order_id:o.razorpay_order_id,
+    key_id:process.env.RAZORPAY_KEY_ID,amount:Math.round(Number(o.total)*100),currency:'INR',total:Number(o.total)});
+  }
+  const ids=[...counts.keys()];
+  const products=await client.query(`SELECT id,name,variant,price,stock,status,expiry_date
+    FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
+  const totals=beautyTotals(products,counts);
+  const amount=totals.total*100;
+  if(!Number.isSafeInteger(amount)||amount<100)return res.status(400).json({success:false,message:'Invalid online payment amount.'});
+  // Razorpay order amount is computed on the server, never trusted from browser.
+  const razorpayOrder=await razorpayInstance.orders.create({amount,currency:'INR',receipt:id,
+    notes:{store:'cerood_beauty',beauty_order_id:id}});
+  if(!razorpayOrder?.id||Number(razorpayOrder.amount)!==amount)
+   throw new Error('Razorpay returned an invalid order.');
+  await client.query(`INSERT INTO public.cosmetics_orders
+    (id,customer_name,customer_phone,customer_email,delivery_address,subtotal,delivery_fee,discount,total,
+     payment_method,payment_status,status,razorpay_order_id)
+    VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'razorpay','pending','pending',$10)`,
+    [id,address.full_name,address.phone,null,JSON.stringify(address),totals.subtotal,totals.delivery_fee,
+     totals.discount,totals.total,razorpayOrder.id]);
+  for(const line of totals.items)await client.query(`INSERT INTO public.cosmetics_order_items
+    (order_id,product_id,product_name,variant,quantity,unit_price,total_price)
+    VALUES ($1,$2,$3,$4,$5,$6,$7)`,
+    [id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);
+  await client.query('COMMIT');
+  return res.status(201).json({success:true,order_id:id,razorpay_order_id:razorpayOrder.id,
+    key_id:process.env.RAZORPAY_KEY_ID,amount,currency:'INR',total:totals.total});
+ }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}
+ finally{if(client)client.release();}
+});
+
 // Device receipt lookup: UUID + delivery phone are both required. No public order listing.
 app.post('/api/cosmetics/device-orders',async(req,res)=>{
  res.set('Cache-Control','no-store');
