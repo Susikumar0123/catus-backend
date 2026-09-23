@@ -9108,6 +9108,21 @@ app.post('/api/renewed/quote', async (req, res) => {
 });
 
 
+
+// Renewed Store only: India-wide address validation. Courier coverage must be
+// independently confirmed before enabling a nationwide shipping rate.
+function renewedIndiaAddressValid(state, district, pincode) {
+    return /^[A-Za-z][A-Za-z .,'()&/-]{1,99}$/.test(String(state || '').trim()) &&
+        /^[A-Za-z][A-Za-z .,'()&/-]{1,99}$/.test(String(district || '').trim()) &&
+        /^[1-9]\d{5}$/.test(String(pincode || '').trim());
+}
+function renewedNationwideFee() {
+    const value = String(process.env.RENEWED_INDIA_DELIVERY_FEE ?? '').trim();
+    if (!/^\d+$/.test(value)) return null;
+    const fee = Number(value);
+    return Number.isSafeInteger(fee) && fee >= 0 ? fee : null;
+}
+
 // ==========================================
 // CEROOD RENEWED — PHASE 5E: DESTINATION DISTRICT DELIVERY QUOTE
 // Price and stock rechecked server-side. No order, reservation or payment.
@@ -9122,11 +9137,8 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
         const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
         const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
         const pincode = String(address.pincode || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) || !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^\d{6}$/.test(pincode))
-            return res.status(400).json({success:false,message:'Enter a valid Tamil Nadu district and six-digit pincode.'});
-        // TN PIN prefixes are a preliminary input check, not a deliverability guarantee.
-        if (!/^[56]\d{5}$/.test(pincode))
-            return res.status(400).json({success:false,message:'Enter a Tamil Nadu pincode.'});
+        if (!renewedIndiaAddressValid(state,district,pincode))
+            return res.status(400).json({success:false,message:'Enter a valid Indian state, district and six-digit PIN code.'});
         const quantities = new Map();
         for (const item of items) {
             const id = String(item && item.product_id || '').trim();
@@ -9149,10 +9161,11 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
             if (!Number.isSafeInteger(subtotal) || subtotal < 1)
                 throw new Error('Invalid stored quote price.');
         }
-        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if (!rates.length) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
-            delivery_status:'pending',checkout_enabled:false,message:'Tamil Nadu delivery requested. Cerood has not configured/confirmed a delivery rate for this district.'});
-        const fee = Number(rates[0].fee);
+        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
+        const nationwideFee = renewedNationwideFee();
+        if (!rates.length && nationwideFee === null) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
+            delivery_status:'pending',checkout_enabled:false,message:'India delivery requested. Cerood has not configured a shipping rate for this destination.'});
+        const fee = rates.length ? Number(rates[0].fee) : nationwideFee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(subtotal+fee)) throw new Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:fee,total:subtotal+fee,
             delivery_status:'rate_configured',checkout_enabled:false,
@@ -9200,11 +9213,10 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
         const fullName = String(address.full_name || address.name || '').trim();
         const street = String(address.street || address.address || '').trim();
         const city = String(address.city || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
-            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
+        if (!renewedIndiaAddressValid(state,district,pincode) ||
             fullName.length < 2 || fullName.length > 140 || street.length < 5 || street.length > 500 ||
             city.length < 2 || city.length > 100) {
-            return res.status(400).json({success:false,message:'Enter a complete Tamil Nadu delivery address.'});
+            return res.status(400).json({success:false,message:'Enter a complete Indian delivery address.'});
         }
         const quantities = new Map();
         for (const item of items) {
@@ -9236,9 +9248,10 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
         }
         const rates = await renewedQuery(
             'SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1',
-            [district]);
-        if (!rates.length) return res.status(409).json({success:false,message:'Delivery rate not configured for this district.'});
-        const fee = Number(rates[0].fee), total = subtotal + fee;
+            [(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
+        const nationwideFee = renewedNationwideFee();
+        if (!rates.length && nationwideFee === null) return res.status(409).json({success:false,message:'Delivery rate not configured for this destination.'});
+        const fee = rates.length ? Number(rates[0].fee) : nationwideFee, total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) || total < 1) throw Error('Invalid delivery amount.');
         return res.json({success:true,currency:'INR',items:quoteItems,subtotal,delivery_fee:fee,total,
             district,pincode,customer_verified:true,checkout_enabled:false,payment_enabled:false,
@@ -9380,11 +9393,10 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         const fullName=String(address.full_name||'').trim();
         const street=String(address.street||'').trim();
         const city=String(address.city||'').trim();
-        if(!['tamil nadu','tamilnadu','tn'].includes(state)||!/^[a-z][a-z .'-]{1,99}$/.test(district)||
-           !/^[56]\d{5}$/.test(pincode)||fullName.length<2||fullName.length>140||
+        if(!renewedIndiaAddressValid(state,district,pincode)||fullName.length<2||fullName.length>140||
            street.length<5||street.length>500||city.length<2||city.length>100||
            String(address.phone||'').trim()!==phone)
-            return res.status(400).json({success:false,message:'Complete Tamil Nadu address and verified mobile are required.'});
+            return res.status(400).json({success:false,message:'Complete Indian address and verified mobile are required.'});
         const quantities=new Map();
         for(const item of items){
             const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);
@@ -9418,13 +9430,14 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
         }
         const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
-          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if(!rates.length){const e=Error('Delivery rate unavailable for this district.');e.status=409;throw e;}
-        const fee=Number(rates[0].fee),total=subtotal+fee;
+          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
+        const nationwideFee = renewedNationwideFee();
+        if(!rates.length && nationwideFee === null){const e=Error('Delivery rate unavailable for this destination.');e.status=409;throw e;}
+        const fee=rates.length ? Number(rates[0].fee) : nationwideFee,total=subtotal+fee;
         if(!Number.isSafeInteger(fee)||fee<0||!Number.isSafeInteger(total)||total<1||total>10000000)throw Error('Invalid order total.');
         const id=crypto.randomUUID();
         const savedAddress={full_name:fullName,street,area:String(address.area||'').trim().slice(0,200),
-          city,district,state:'Tamil Nadu',pincode};
+          city,district,state:String(address.state||'').trim(),pincode};
         await client.query(`INSERT INTO public.renewed_orders
           (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
            subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,cod_request_id)
@@ -9487,11 +9500,10 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         const fullName = String(address.full_name || address.name || '').trim();
         const street = String(address.street || address.address || '').trim();
         const city = String(address.city || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
-            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
+        if (!renewedIndiaAddressValid(state,district,pincode) ||
             fullName.length < 2 || fullName.length > 140 ||
             street.length < 5 || street.length > 500 || city.length < 2 || city.length > 100)
-            return res.status(400).json({success:false,message:'Complete Tamil Nadu delivery address required.'});
+            return res.status(400).json({success:false,message:'Complete Indian delivery address required.'});
         const quantities = new Map();
         for (const item of items) {
             const id = String(item?.product_id || '').trim();
@@ -9526,14 +9538,15 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         }
         const rates = await client.query(
             `SELECT fee FROM public.renewed_delivery_rates
-             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if (!rates.length) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
-        const fee = Number(rates[0].fee), total = subtotal + fee;
+             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[(['tamil nadu','tamilnadu','tn'].includes(state) ? district : '__nationwide_only__')]);
+        const nationwideFee = renewedNationwideFee();
+        if (!rates.length && nationwideFee === null) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
+        const fee = rates.length ? Number(rates[0].fee) : nationwideFee, total = subtotal + fee;
         if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) ||
             total < 1 || total > 10000000) throw Error('Invalid payment amount.');
         const orderId = crypto.randomUUID();
         const savedAddress = {
-            full_name:fullName,street,city,district,state:'Tamil Nadu',pincode,
+            full_name:fullName,street,city,district,state:String(address.state||'').trim(),pincode,
             area:String(address.area || '').trim().slice(0,200)
         };
         await client.query(
