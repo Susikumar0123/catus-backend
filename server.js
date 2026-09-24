@@ -7460,6 +7460,73 @@ function sitemapEscapeXml(value) {
 
 
 // ==========================================
+// CEROOD STORES — DATABASE-DRIVEN PRODUCT SITEMAPS
+// Existing Home Services sitemap routes remain unchanged.
+// ==========================================
+const CEROOD_STORE_SITEMAP_PAGE_SIZE = 10000;
+const CEROOD_STORE_SITEMAPS = Object.freeze({
+    renewed: {
+        table: 'public.renewed_products',
+        filter: "status = 'published'",
+        productPath: '/renewed-product.html'
+    },
+    beauty: {
+        table: 'public.cosmetics_products',
+        filter: "status = 'published' AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE)",
+        productPath: '/cosmetics-product.html'
+    },
+    fashion: {
+        table: 'public.clothing_products',
+        filter: "status = 'published'",
+        productPath: '/clothing-product.html'
+    }
+});
+const ceroodSitemapQuery = (sql, params = []) => new Promise((resolve, reject) => {
+    db.query(sql, params, (error, rows) => error ? reject(error) : resolve(rows || []));
+});
+
+app.get('/api/sitemaps/:division/:page.xml', async (req, res) => {
+    const cfg = CEROOD_STORE_SITEMAPS[req.params.division];
+    const rawPage = String(req.params.page || '');
+    if (!cfg || !/^[1-9]\d{0,7}$/.test(rawPage)) {
+        return res.status(404).type('text/plain').send('Sitemap not found');
+    }
+    const page = Number(rawPage);
+    try {
+        const countRows = await ceroodSitemapQuery(
+            `SELECT COUNT(*)::int AS total FROM ${cfg.table} WHERE ${cfg.filter}`
+        );
+        const count = Number(countRows[0]?.total || 0);
+        if (page > Math.ceil(count / CEROOD_STORE_SITEMAP_PAGE_SIZE)) {
+            return res.status(404).type('text/plain').send('Sitemap not found');
+        }
+        const offset = (page - 1) * CEROOD_STORE_SITEMAP_PAGE_SIZE;
+        const products = await ceroodSitemapQuery(
+            `SELECT id, updated_at FROM ${cfg.table} WHERE ${cfg.filter}
+             ORDER BY id LIMIT ? OFFSET ?`,
+            [CEROOD_STORE_SITEMAP_PAGE_SIZE, offset]
+        );
+        const base = 'https://www.cerood.com';
+        const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
+            '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
+            products.map(p => {
+                const loc = `${base}${cfg.productPath}?id=${encodeURIComponent(String(p.id))}`;
+                const date = p.updated_at ? new Date(p.updated_at) : null;
+                const lastmod = date && !Number.isNaN(date.getTime())
+                    ? `\n    <lastmod>${date.toISOString()}</lastmod>` : '';
+                return `  <url>\n    <loc>${sitemapEscapeXml(loc)}</loc>${lastmod}\n  </url>`;
+            }).join('\n') + '\n</urlset>';
+        return res.status(200)
+            .set('Content-Type', 'application/xml; charset=utf-8')
+            .set('Cache-Control', 'public, max-age=0, s-maxage=300')
+            .send(xml);
+    } catch (error) {
+        console.error('Store product sitemap error:', error);
+        return res.status(503).type('text/plain').send('Unable to generate sitemap');
+    }
+});
+
+// ==========================================
 // MAIN SITEMAP INDEX
 // /api/sitemap.xml
 // ==========================================
@@ -7508,7 +7575,7 @@ app.get('/api/sitemap.xml', (req, res) => {
             db.query(
                 serviceCountQuery,
                 [],
-                (serviceErr, serviceRows) => {
+                async (serviceErr, serviceRows) => {
 
                     if (serviceErr) {
 
@@ -7567,6 +7634,27 @@ app.get('/api/sitemap.xml', (req, res) => {
                         sitemapUrls.push(
                             `${frontendBase}/sitemap-${page}.xml`
                         );
+                    }
+
+                    // Store sitemaps: include only existing published database products.
+                    // Do not alter the existing Home Services child sitemap calculation.
+                    try {
+                        const storeCounts = await Promise.all(
+                            Object.entries(CEROOD_STORE_SITEMAPS).map(async ([division, cfg]) => {
+                                const rows = await ceroodSitemapQuery(
+                                    `SELECT COUNT(*)::int AS total FROM ${cfg.table} WHERE ${cfg.filter}`
+                                );
+                                return [division, Number(rows[0]?.total || 0)];
+                            })
+                        );
+                        for (const [division, count] of storeCounts) {
+                            for (let page = 1; page <= Math.ceil(count / CEROOD_STORE_SITEMAP_PAGE_SIZE); page++) {
+                                sitemapUrls.push(`${frontendBase}/sitemaps/${division}/${page}.xml`);
+                            }
+                        }
+                    } catch (error) {
+                        console.error('Store sitemap index error:', error);
+                        return res.status(503).type('text/plain').send('Unable to generate sitemap index');
                     }
 
                     const xml =
