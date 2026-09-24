@@ -41,7 +41,7 @@ module.exports = function mountCeroodNotify(app, db, requireAdminAuth) {
     const result=await query('INSERT INTO public.cerood_push_campaigns(division,title,body,url,delivered,failed) VALUES (?,?,?,?,0,0) RETURNING id',[d,title,body,url]);
     const campaignId=result[0].id;let delivered=0,failed=0;
     for(const t of targets){try{
-      await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,url,tag:'cerood-campaign-'+campaignId}),{TTL:86400,urgency:'normal'});
+      await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,url,tag:'cerood-campaign-'+campaignId}),{TTL:86400,urgency:'high'});
       delivered++;
     }catch(e){failed++;if([404,410].includes(e.statusCode))await query('UPDATE public.cerood_push_subscriptions SET active=false WHERE endpoint=?',[t.endpoint]);}}
     await query('UPDATE public.cerood_push_campaigns SET delivered=?,failed=? WHERE id=?',[delivered,failed,campaignId]);
