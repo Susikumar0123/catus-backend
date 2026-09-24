@@ -3422,6 +3422,9 @@ function requireAdminAuth(req, res, next) {
 }
 
 
+// Cerood Notify Stage 1 — existing admin auth, no changes to order/payment handlers.
+require('./notify-routes')(app, db, requireAdminAuth);
+
 // CEROOD PARTNERSHIP LEADS — public intake; admin access protected by existing middleware.
 const partnerTypes = ['apartment', 'hotel', 'pg-hostel', 'other'];
 const partnerStatuses = ['New', 'Contacted', 'Follow-up', 'Partnered', 'Closed'];
