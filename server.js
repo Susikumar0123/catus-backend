@@ -10012,7 +10012,27 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
   try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
     const ids=orders.map(o=>o.id);
-    const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase FROM public.renewed_order_items i LEFT JOIN public.renewed_products p ON p.id=i.product_id WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
+    const items=ids.length?await renewedQuery(`SELECT
+    i.order_id,
+    i.product_id,
+    i.product_name,
+    i.unit_price,
+    i.quantity,
+    i.line_total,
+    i.seller_id,
+    COALESCE(i.seller_order_status,'new') AS seller_order_status,
+    i.seller_accepted_at,
+    i.seller_rejected_at,
+    i.seller_packed_at,
+    i.seller_shipped_at,
+    p.image_url,
+    p.condition,
+    p.warranty_days,
+    i.warranty_days_at_purchase
+    FROM public.renewed_order_items i
+    LEFT JOIN public.renewed_products p ON p.id=i.product_id
+    WHERE i.order_id IN (${ids.map(()=>'?').join(',')})
+    ORDER BY i.id`,ids):[];
     const byId=new Map();for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item)}
     return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
   }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
@@ -10040,10 +10060,27 @@ app.post('/api/renewed/my-orders', async (req,res)=>{
             paid_at,created_at,updated_at FROM public.renewed_orders
             WHERE customer_phone=? ORDER BY created_at DESC LIMIT 100`,[phone]);
         const ids=orders.map(o=>o.id);
-        const items=ids.length?await renewedQuery(`SELECT i.order_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,
-            p.image_url,p.condition,p.warranty_days,i.warranty_days_at_purchase FROM public.renewed_order_items i
-            LEFT JOIN public.renewed_products p ON p.id=i.product_id
-            WHERE i.order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY i.id`,ids):[];
+        const items=ids.length?await renewedQuery(`SELECT
+    i.order_id,
+    i.product_id,
+    i.product_name,
+    i.unit_price,
+    i.quantity,
+    i.line_total,
+    i.seller_id,
+    COALESCE(i.seller_order_status,'new') AS seller_order_status,
+    i.seller_accepted_at,
+    i.seller_rejected_at,
+    i.seller_packed_at,
+    i.seller_shipped_at,
+    p.image_url,
+    p.condition,
+    p.warranty_days,
+    i.warranty_days_at_purchase
+    FROM public.renewed_order_items i
+    LEFT JOIN public.renewed_products p ON p.id=i.product_id
+    WHERE i.order_id IN (${ids.map(()=>'?').join(',')})
+    ORDER BY i.id`,ids):[];
         const byId=new Map();
         for(const item of items){const id=String(item.order_id);if(!byId.has(id))byId.set(id,[]);byId.get(id).push(item);}
         return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
