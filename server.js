@@ -3421,6 +3421,14 @@ function requireAdminAuth(req, res, next) {
     next();
 }
 
+// CEROOD SELLER MARKETPLACE — PHASE 2
+require('./cerood-seller-routes')(
+    app,
+    db,
+    requireAdminAuth,
+    verifyMsg91AccessToken,
+    extractVerifiedPhoneFromMsg91
+);
 
 // Cerood Notify Stage 1 — existing admin auth, no changes to order/payment handlers.
 require('./notify-routes')(app, db, requireAdminAuth);
@@ -9111,14 +9119,14 @@ function renewedError(res,error) {
 }
 app.get('/api/renewed/products', async (req,res) => {
     try {
-        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE status = 'published' ORDER BY created_at DESC LIMIT 250`);
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE status = 'published' AND (seller_id IS NULL OR approval_status = 'approved') ORDER BY created_at DESC LIMIT 250`);
         res.json({success:true,products:rows.map(renewedPublicProduct)});
     } catch(error) { renewedError(res,error); }
 });
 app.get('/api/renewed/products/:id', async (req,res) => {
     try {
         if(!/^[a-zA-Z0-9_-]{1,80}$/.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid product ID.'});
-        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE id = ? AND status = 'published' LIMIT 1`,[req.params.id]);
+        const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE id = ? AND status = 'published' AND (seller_id IS NULL OR approval_status = 'approved') LIMIT 1`,[req.params.id]);
         if(!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
         res.json({success:true,product:renewedPublicProduct(rows[0])});
     } catch(error) { renewedError(res,error); }
