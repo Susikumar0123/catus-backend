@@ -3421,14 +3421,38 @@ function requireAdminAuth(req, res, next) {
     next();
 }
 
+
 // CEROOD SELLER MARKETPLACE — PHASE 2
-require('./cerood-seller-routes')(
+
+const { requireSellerAuth } = require('./cerood-seller-routes')(
     app,
     db,
     requireAdminAuth,
     verifyMsg91AccessToken,
     extractVerifiedPhoneFromMsg91
 );
+
+
+// CEROOD SELLER PRODUCT MANAGEMENT
+
+require('./cerood-seller-products')(
+    app,
+    db,
+    requireSellerAuth,
+    requireAdminAuth
+);
+
+
+// ==========================================
+// CEROOD SELLER MEDIA UPLOAD
+// ==========================================
+
+require('./cerood-seller-upload')(
+    app,
+    requireSellerAuth
+);
+
+
 
 // Cerood Notify Stage 1 — existing admin auth, no changes to order/payment handlers.
 require('./notify-routes')(app, db, requireAdminAuth);
