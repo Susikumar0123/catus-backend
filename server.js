@@ -9536,8 +9536,14 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         }
         const users=guestCheckout?[]:await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
         if(!guestCheckout&&!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
-        const products=await client.query(`SELECT id,name,price,stock,status,warranty_days FROM public.renewed_products
-          WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
+        const products=await client.query(
+  `SELECT id,name,price,stock,status,warranty_days,seller_id
+   FROM public.renewed_products
+   WHERE id=ANY($1::text[])
+   ORDER BY id
+   FOR UPDATE`,
+  [ids]
+);
         const byId=new Map(products.map(p=>[String(p.id),p]));
         let subtotal=0;const orderItems=[];
         for(const id of ids){
@@ -9545,7 +9551,15 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             if(!p||p.status!=='published'||Number(p.stock)<qty){const e=Error('Product unavailable or sold out.');e.status=409;throw e;}
             const unit=Number(p.price),line=unit*qty;subtotal+=line;
             if(!Number.isSafeInteger(unit)||unit<1||!Number.isSafeInteger(line)||!Number.isSafeInteger(subtotal))throw Error('Invalid price.');
-            orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
+            orderItems.push({
+    id,
+    name: p.name,
+    qty,
+    unit,
+    line,
+    warranty_days: Number(p.warranty_days || 0),
+    seller_id: p.seller_id || null
+});
         }
         const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
           WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
@@ -9564,9 +9578,30 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
             const reduced=await client.query(`UPDATE public.renewed_products SET stock=stock-$1,updated_at=NOW()
               WHERE id=$2 AND status='published' AND stock >= $1 RETURNING id`,[item.qty,item.id]);
             if(!reduced.length){const e=Error('Product sold out.');e.status=409;throw e;}
-            await client.query(`INSERT INTO public.renewed_order_items
-              (order_id,product_id,product_name,unit_price,quantity,line_total,warranty_days_at_purchase)
-              VALUES ($1,$2,$3,$4,$5,$6,$7)`,[id,item.id,item.name,item.unit,item.qty,item.line,item.warranty_days]);
+            await client.query(
+    `INSERT INTO public.renewed_order_items
+    (
+        order_id,
+        product_id,
+        product_name,
+        unit_price,
+        quantity,
+        line_total,
+        warranty_days_at_purchase,
+        seller_id
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+        id,
+        item.id,
+        item.name,
+        item.unit,
+        item.qty,
+        item.line,
+        item.warranty_days,
+        item.seller_id
+    ]
+);
         }
         await client.query('COMMIT');
         return res.status(201).json({success:true,order_id:id,total,payment_method:'cod',payment_due:total,
@@ -9638,8 +9673,13 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
         await renewedReleaseExpired(client);
         const products = await client.query(
-            `SELECT id,name,price,stock,status,warranty_days FROM public.renewed_products
-             WHERE id = ANY($1::text[]) ORDER BY id FOR UPDATE`,[sortedIds]);
+    `SELECT id,name,price,stock,status,warranty_days,seller_id
+     FROM public.renewed_products
+     WHERE id = ANY($1::text[])
+     ORDER BY id
+     FOR UPDATE`,
+    [sortedIds]
+);
         const byId = new Map(products.map(p => [String(p.id),p]));
         let subtotal = 0;
         const orderItems = [];
@@ -9652,7 +9692,15 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             if (!Number.isSafeInteger(unit) || unit < 1 || !Number.isSafeInteger(line)) throw Error('Invalid product price.');
             subtotal += line;
             if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
-            orderItems.push({id,name:p.name,qty,unit,line,warranty_days:Number(p.warranty_days||0)});
+            orderItems.push({
+    id,
+    name: p.name,
+    qty,
+    unit,
+    line,
+    warranty_days: Number(p.warranty_days || 0),
+    seller_id: p.seller_id || null
+});
         }
         const rates = await client.query(
             `SELECT fee FROM public.renewed_delivery_rates
@@ -9681,10 +9729,29 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
                 [item.qty,item.id]);
             if (!reduced.length) {const e=new Error('Product sold out.');e.status=409;throw e;}
             await client.query(
-                `INSERT INTO public.renewed_order_items
-                 (order_id,product_id,product_name,unit_price,quantity,line_total,warranty_days_at_purchase)
-                 VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-                [orderId,item.id,item.name,item.unit,item.qty,item.line,item.warranty_days]);
+    `INSERT INTO public.renewed_order_items
+    (
+        order_id,
+        product_id,
+        product_name,
+        unit_price,
+        quantity,
+        line_total,
+        warranty_days_at_purchase,
+        seller_id
+    )
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    [
+        orderId,
+        item.id,
+        item.name,
+        item.unit,
+        item.qty,
+        item.line,
+        item.warranty_days,
+        item.seller_id
+    ]
+);
         }
         await client.query('COMMIT');
         client.release(); client = null;
