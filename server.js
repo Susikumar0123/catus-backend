@@ -3442,6 +3442,16 @@ require('./cerood-seller-products')(
     requireAdminAuth
 );
 
+// ==========================================
+// CEROOD SELLER ORDERS
+// ==========================================
+
+require('./cerood-seller-orders')(
+    app,
+    db,
+    requireSellerAuth
+);
+
 
 // ==========================================
 // CEROOD SELLER MEDIA UPLOAD
