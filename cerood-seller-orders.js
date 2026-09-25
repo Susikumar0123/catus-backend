@@ -1,6 +1,9 @@
+'use strict';
+
 // ==========================================
 // CEROOD SELLER ORDERS
-// Seller-specific, read-only order listing
+// 1. View seller's confirmed orders
+// 2. Accept / Reject own order items
 // ==========================================
 
 module.exports = function (
@@ -9,8 +12,10 @@ module.exports = function (
     requireSellerAuth
 ) {
 
-    // Convert existing callback-style db.query
-    // into a Promise for async/await.
+    // ==========================================
+    // DATABASE QUERY HELPER
+    // ==========================================
+
     function query(sql, params = []) {
 
         return new Promise((resolve, reject) => {
@@ -35,7 +40,7 @@ module.exports = function (
 
 
     // ==========================================
-    // GET LOGGED-IN SELLER ORDERS
+    // 1. GET SELLER ORDERS
     // ==========================================
 
     app.get(
@@ -47,8 +52,8 @@ module.exports = function (
 
             try {
 
-                // Never accept seller_id from browser.
-                // Seller identity comes from verified JWT.
+                // Seller ID must come from
+                // authenticated seller session.
                 const sellerId = req.seller.id;
 
                 const orders = await query(
@@ -124,7 +129,8 @@ module.exports = function (
                         OR
 
                         (
-                            o.status = 'paid'
+                            o.payment_method <> 'cod'
+                            AND o.status = 'paid'
                         )
 
                     )
@@ -161,6 +167,193 @@ module.exports = function (
 
                     message:
                         'Unable to load seller orders.'
+
+                });
+
+            }
+
+        }
+    );
+
+
+    // ==========================================
+    // 2. SELLER ACCEPT / REJECT ORDER
+    // ==========================================
+
+    app.patch(
+        '/api/seller/orders/:orderItemId/decision',
+        requireSellerAuth,
+        async (req, res) => {
+
+            res.set('Cache-Control', 'no-store');
+
+            const itemId = Number(
+                req.params.orderItemId
+            );
+
+            const decision = String(
+                req.body?.decision || ''
+            )
+                .trim()
+                .toLowerCase();
+
+
+            // ==================================
+            // VALIDATE INPUT
+            // ==================================
+
+            if (
+                !Number.isSafeInteger(itemId) ||
+                itemId < 1 ||
+                !['accepted', 'rejected'].includes(
+                    decision
+                )
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        'Valid order item and decision required.'
+
+                });
+
+            }
+
+
+            try {
+
+                // ==================================
+                // UPDATE ONLY LOGGED-IN
+                // SELLER'S OWN ORDER ITEM
+                // ==================================
+
+                const sql = `
+                    UPDATE public.renewed_order_items AS oi
+
+                    SET
+
+                        seller_order_status = ?,
+
+                        seller_accepted_at =
+                            CASE
+                                WHEN ? = 'accepted'
+                                THEN NOW()
+                                ELSE seller_accepted_at
+                            END,
+
+                        seller_rejected_at =
+                            CASE
+                                WHEN ? = 'rejected'
+                                THEN NOW()
+                                ELSE seller_rejected_at
+                            END
+
+                    FROM public.renewed_orders AS o
+
+                    WHERE oi.order_id = o.id
+
+                      AND oi.id = ?
+
+                      AND oi.seller_id = ?
+
+                      AND (
+                          oi.seller_order_status IS NULL
+                          OR oi.seller_order_status = 'new'
+                      )
+
+                      AND (
+
+                          (
+                              o.payment_method = 'cod'
+                              AND o.status = 'processing'
+                          )
+
+                          OR
+
+                          (
+                              o.payment_method <> 'cod'
+                              AND o.status = 'paid'
+                          )
+
+                      )
+
+                    RETURNING
+
+                        oi.id AS order_item_id,
+
+                        oi.order_id,
+
+                        oi.seller_order_status,
+
+                        oi.seller_accepted_at,
+
+                        oi.seller_rejected_at
+                `;
+
+
+                const rows = await query(
+                    sql,
+                    [
+                        decision,
+                        decision,
+                        decision,
+                        itemId,
+                        req.seller.id
+                    ]
+                );
+
+
+                // ==================================
+                // NO MATCHING ORDER ITEM
+                // ==================================
+
+                if (!rows.length) {
+
+                    return res.status(409).json({
+
+                        success: false,
+
+                        message:
+                            'Order unavailable, not yours, not confirmed, or already decided. Refresh orders.'
+
+                    });
+
+                }
+
+
+                // ==================================
+                // SUCCESS RESPONSE
+                // ==================================
+
+                return res.json({
+
+                    success: true,
+
+                    message:
+                        decision === 'accepted'
+                            ? 'Order accepted.'
+                            : 'Order rejected. Cerood admin must resolve fulfilment/refund.',
+
+                    order: rows[0]
+
+                });
+
+
+            } catch (error) {
+
+                console.error(
+                    'Seller order decision error:',
+                    error
+                );
+
+                return res.status(500).json({
+
+                    success: false,
+
+                    message:
+                        'Unable to update seller order.'
 
                 });
 
