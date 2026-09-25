@@ -9879,8 +9879,23 @@ app.get('/api/admin/renewed/orders', async (req,res) => {
           delivered_at,razorpay_order_id,razorpay_payment_id,paid_at,created_at,updated_at
           FROM public.renewed_orders ORDER BY created_at DESC LIMIT 300`);
         const ids = orders.map(o=>o.id);
-        const items = ids.length ? await renewedQuery(`SELECT order_id,product_id,product_name,unit_price,quantity,line_total
-          FROM public.renewed_order_items WHERE order_id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`,ids) : [];
+        const items = ids.length ? await renewedQuery(`SELECT
+          order_id,
+          product_id,
+          product_name,
+          unit_price,
+          quantity,
+          line_total,
+          seller_id,
+          COALESCE(seller_order_status,'new') AS seller_order_status,
+          seller_accepted_at,
+          seller_rejected_at,
+          seller_packed_at,
+          seller_shipped_at,
+          seller_order_note
+          FROM public.renewed_order_items
+          WHERE order_id IN (${ids.map(()=>'?').join(',')})
+          ORDER BY id`,ids) : [];
         const byOrder = new Map();
         for(const item of items){const k=String(item.order_id);if(!byOrder.has(k))byOrder.set(k,[]);byOrder.get(k).push(item);}
         return res.json({success:true,orders:orders.map(o=>({...o,items:byOrder.get(String(o.id))||[]}))});
