@@ -2,8 +2,11 @@
 
 // ==========================================
 // CEROOD SELLER ORDERS
+//
 // 1. View seller's confirmed orders
 // 2. Accept / Reject own order items
+// 3. Mark accepted orders as Packed
+// 4. Mark packed orders as Shipped
 // ==========================================
 
 module.exports = function (
@@ -52,8 +55,7 @@ module.exports = function (
 
             try {
 
-                // Seller ID must come from
-                // authenticated seller session.
+                // Seller ID comes from authenticated session.
                 const sellerId = req.seller.id;
 
                 const orders = await query(
@@ -305,10 +307,6 @@ module.exports = function (
                 );
 
 
-                // ==================================
-                // NO MATCHING ORDER ITEM
-                // ==================================
-
                 if (!rows.length) {
 
                     return res.status(409).json({
@@ -322,10 +320,6 @@ module.exports = function (
 
                 }
 
-
-                // ==================================
-                // SUCCESS RESPONSE
-                // ==================================
 
                 return res.json({
 
@@ -354,6 +348,206 @@ module.exports = function (
 
                     message:
                         'Unable to update seller order.'
+
+                });
+
+            }
+
+        }
+    );
+
+
+    // ==========================================
+    // 3. SELLER PACKED / SHIPPED ORDER
+    // ==========================================
+
+    app.patch(
+        '/api/seller/orders/:orderItemId/fulfilment',
+        requireSellerAuth,
+        async (req, res) => {
+
+            res.set('Cache-Control', 'no-store');
+
+            const itemId = Number(
+                req.params.orderItemId
+            );
+
+            const nextStatus = String(
+                req.body?.status || ''
+            )
+                .trim()
+                .toLowerCase();
+
+
+            // ==================================
+            // VALIDATE INPUT
+            // ==================================
+
+            if (
+                !Number.isSafeInteger(itemId) ||
+                itemId < 1 ||
+                !['packed', 'shipped'].includes(
+                    nextStatus
+                )
+            ) {
+
+                return res.status(400).json({
+
+                    success: false,
+
+                    message:
+                        'Valid order item and fulfilment status required.'
+
+                });
+
+            }
+
+
+            // ==================================
+            // ALLOWED STATUS FLOW
+            //
+            // accepted -> packed -> shipped
+            //
+            // Seller cannot skip or reverse stages.
+            // ==================================
+
+            const previousStatus =
+                nextStatus === 'packed'
+                    ? 'accepted'
+                    : 'packed';
+
+
+            try {
+
+                // ==================================
+                // UPDATE ONLY THIS SELLER'S ITEM
+                // ==================================
+
+                const sql = `
+                    UPDATE public.renewed_order_items AS oi
+
+                    SET
+
+                        seller_order_status = ?,
+
+                        seller_packed_at =
+                            CASE
+                                WHEN ? = 'packed'
+                                THEN NOW()
+                                ELSE seller_packed_at
+                            END,
+
+                        seller_shipped_at =
+                            CASE
+                                WHEN ? = 'shipped'
+                                THEN NOW()
+                                ELSE seller_shipped_at
+                            END
+
+                    FROM public.renewed_orders AS o
+
+                    WHERE oi.order_id = o.id
+
+                      AND oi.id = ?
+
+                      AND oi.seller_id = ?
+
+                      AND oi.seller_order_status = ?
+
+                      AND (
+
+                          (
+                              o.payment_method = 'cod'
+                              AND o.status = 'processing'
+                          )
+
+                          OR
+
+                          (
+                              o.payment_method <> 'cod'
+                              AND o.status = 'paid'
+                          )
+
+                      )
+
+                    RETURNING
+
+                        oi.id AS order_item_id,
+
+                        oi.order_id,
+
+                        oi.seller_order_status,
+
+                        oi.seller_accepted_at,
+
+                        oi.seller_packed_at,
+
+                        oi.seller_shipped_at
+                `;
+
+
+                const rows = await query(
+                    sql,
+                    [
+                        nextStatus,
+                        nextStatus,
+                        nextStatus,
+                        itemId,
+                        req.seller.id,
+                        previousStatus
+                    ]
+                );
+
+
+                // ==================================
+                // INVALID ORDER / STATUS TRANSITION
+                // ==================================
+
+                if (!rows.length) {
+
+                    return res.status(409).json({
+
+                        success: false,
+
+                        message:
+                            'Order unavailable or invalid status transition. Refresh orders.'
+
+                    });
+
+                }
+
+
+                // ==================================
+                // SUCCESS RESPONSE
+                // ==================================
+
+                return res.json({
+
+                    success: true,
+
+                    message:
+                        nextStatus === 'packed'
+                            ? 'Order marked as packed.'
+                            : 'Order marked as shipped.',
+
+                    order: rows[0]
+
+                });
+
+
+            } catch (error) {
+
+                console.error(
+                    'Seller fulfilment error:',
+                    error
+                );
+
+                return res.status(500).json({
+
+                    success: false,
+
+                    message:
+                        'Unable to update order fulfilment.'
 
                 });
 
