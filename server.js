@@ -3453,6 +3453,9 @@ require('./cerood-marketplace-catalog')(
     requireAdminAuth
 );
 
+// Read-only common e-commerce homepage feed (Home Services untouched).
+require('./cerood-common-marketplace')(app, db);
+
 // ==========================================
 // CEROOD SELLER ORDERS
 // ==========================================
