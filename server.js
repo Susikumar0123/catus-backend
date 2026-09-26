@@ -10315,7 +10315,66 @@ app.delete('/api/admin/cosmetics/products/:id',async(req,res)=>{
 });
 // Phase 1 checkout intentionally blocked; never simulate an accepted order.
 
+// =============================================================
+// CEROOD COSMETICS + FASHION — ORDER SELLER OWNERSHIP
+// Resolve seller from the approved catalog's published product.
+// Never trust seller_id sent by the customer/browser.
+// =============================================================
 
+async function ceroodFindMarketplaceSeller(
+    client,
+    marketplace,
+    productId
+) {
+
+    if (
+        !['cosmetics', 'clothing'].includes(marketplace)
+    ) {
+        throw new Error(
+            'Invalid marketplace for seller lookup.'
+        );
+    }
+
+    const rows = await client.query(
+        `
+        SELECT DISTINCT
+            c.seller_id
+
+        FROM public.cerood_seller_catalog_submissions c
+
+        INNER JOIN public.cerood_sellers s
+            ON s.id = c.seller_id
+
+        WHERE c.marketplace = $1
+
+          AND c.published_product_id::text = $2
+
+AND c.approval_status = 'approved'
+
+          AND s.status = 'approved'
+
+        LIMIT 2
+        `,
+        [
+            marketplace,
+            String(productId)
+        ]
+    );
+
+    // Admin-created products may legitimately have no seller.
+    if (rows.length === 0) {
+        return null;
+    }
+
+    // Never assign an order to an ambiguous seller.
+    if (rows.length > 1) {
+        throw new Error(
+            'Multiple sellers found for one published product.'
+        );
+    }
+
+    return rows[0].seller_id;
+}
 
 // CEROOD BEAUTY — Phase 2: server-priced quote and atomic COD checkout.
 // Online payments remain OFF until a dedicated, verified Razorpay flow is tested.
@@ -10360,7 +10419,64 @@ app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  const ids=[...counts.keys()];const products=await client.query(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
  const totals=beautyTotals(products,counts);
  await client.query(`INSERT INTO public.cosmetics_orders (id,customer_name,customer_phone,customer_email,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status) VALUES ($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'cod','pending','confirmed')`,[id,address.full_name,address.phone,null,JSON.stringify(address),totals.subtotal,totals.delivery_fee,0,totals.total]);
- for(const line of totals.items){await client.query(`UPDATE public.cosmetics_products SET stock=stock-$1,updated_at=NOW() WHERE id=$2`,[line.quantity,line.product_id]);await client.query(`INSERT INTO public.cosmetics_order_items(order_id,product_id,product_name,variant,quantity,unit_price,total_price) VALUES ($1,$2,$3,$4,$5,$6,$7)`,[id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);}
+ for (const line of totals.items) {
+
+    const sellerId =
+        await ceroodFindMarketplaceSeller(
+            client,
+            'cosmetics',
+            line.product_id
+        );
+
+    await client.query(
+        `
+        UPDATE public.cosmetics_products
+
+        SET
+            stock = stock - $1,
+            updated_at = NOW()
+
+        WHERE id = $2
+        `,
+        [
+            line.quantity,
+            line.product_id
+        ]
+    );
+
+    await client.query(
+        `
+        INSERT INTO public.cosmetics_order_items
+        (
+            order_id,
+            product_id,
+            product_name,
+            variant,
+            quantity,
+            unit_price,
+            total_price,
+            seller_id
+        )
+
+        VALUES
+        (
+            $1, $2, $3, $4,
+            $5, $6, $7, $8
+        )
+        `,
+        [
+            id,
+            line.product_id,
+            line.product_name,
+            line.variant,
+            line.quantity,
+            line.unit_price,
+            line.total_price,
+            sellerId
+        ]
+    );
+
+}
  await client.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...totals,message:'Beauty COD order confirmed.'});
  }catch(e){if(client)await client.query('ROLLBACK').catch(()=>{});return beautyErr(res,e);}finally{if(client)client.release();}
 });
@@ -10424,10 +10540,44 @@ app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
    const changed=await client.query(`UPDATE public.cosmetics_products SET stock=stock-$1,updated_at=NOW()
      WHERE id=$2 AND stock >= $1 RETURNING id`,[line.quantity,line.product_id]);
    if(!changed.length)throw Object.assign(new Error('Product stock changed. Refresh your cart.'),{httpStatus:409});
-   await client.query(`INSERT INTO public.cosmetics_order_items
-    (order_id,product_id,product_name,variant,quantity,unit_price,total_price)
-    VALUES ($1,$2,$3,$4,$5,$6,$7)`,
-    [id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);
+   const sellerId =
+    await ceroodFindMarketplaceSeller(
+        client,
+        'cosmetics',
+        line.product_id
+    );
+
+await client.query(
+    `
+    INSERT INTO public.cosmetics_order_items
+    (
+        order_id,
+        product_id,
+        product_name,
+        variant,
+        quantity,
+        unit_price,
+        total_price,
+        seller_id
+    )
+
+    VALUES
+    (
+        $1, $2, $3, $4,
+        $5, $6, $7, $8
+    )
+    `,
+    [
+        id,
+        line.product_id,
+        line.product_name,
+        line.variant,
+        line.quantity,
+        line.unit_price,
+        line.total_price,
+        sellerId
+    ]
+);
   }
   await client.query('COMMIT');
   return res.status(201).json({success:true,order_id:id,razorpay_order_id:razorpayOrder.id,
@@ -10662,7 +10812,64 @@ app.post('/api/clothing/place-cod-order',async(req,res)=>{
  c=await db.getClient();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await c.query('SELECT id,customer_phone,total,payment_method FROM public.clothing_orders WHERE id=$1',[id]);if(existing.length){await c.query('COMMIT');if(existing[0].customer_phone!==address.phone||existing[0].payment_method!=='cod')fashionBad('Checkout request conflict.',409);return res.json({success:true,order_id:id,total:Number(existing[0].total),already_created:true});}
  const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);
  await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,0,$8,'cod','pending','confirmed')`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.total]);
- for(const line of t.items){await c.query('UPDATE public.clothing_products SET stock=stock-$1,updated_at=NOW() WHERE id=$2',[line.quantity,line.product_id]);await c.query('INSERT INTO public.clothing_order_items(order_id,product_id,product_name,variant,quantity,unit_price,total_price) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);}
+ for (const line of t.items) {
+
+    const sellerId =
+        await ceroodFindMarketplaceSeller(
+            c,
+            'clothing',
+            line.product_id
+        );
+
+    await c.query(
+        `
+        UPDATE public.clothing_products
+
+        SET
+            stock = stock - $1,
+            updated_at = NOW()
+
+        WHERE id = $2
+        `,
+        [
+            line.quantity,
+            line.product_id
+        ]
+    );
+
+    await c.query(
+        `
+        INSERT INTO public.clothing_order_items
+        (
+            order_id,
+            product_id,
+            product_name,
+            variant,
+            quantity,
+            unit_price,
+            total_price,
+            seller_id
+        )
+
+        VALUES
+        (
+            $1, $2, $3, $4,
+            $5, $6, $7, $8
+        )
+        `,
+        [
+            id,
+            line.product_id,
+            line.product_name,
+            line.variant,
+            line.quantity,
+            line.unit_price,
+            line.total_price,
+            sellerId
+        ]
+    );
+
+}
  await c.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...t});
  }catch(e){if(c)await c.query('ROLLBACK').catch(()=>{});return fashionFail(res,e);}finally{if(c)c.release();}
 });
@@ -10674,7 +10881,48 @@ app.post('/api/clothing/create-razorpay-order',async(req,res)=>{
  const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);
  const r=await fashionRazorpay().orders.create({amount:Math.round(t.total*100),currency:'INR',receipt:id,notes:{business:'cerood_fashion',fashion_order_id:id}});
  await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,razorpay_order_id) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,0,$8,'razorpay','pending','pending',$9)`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.total,r.id]);
- for(const line of t.items)await c.query('INSERT INTO public.clothing_order_items(order_id,product_id,product_name,variant,quantity,unit_price,total_price) VALUES($1,$2,$3,$4,$5,$6,$7)',[id,line.product_id,line.product_name,line.variant,line.quantity,line.unit_price,line.total_price]);
+ for (const line of t.items) {
+
+    const sellerId =
+        await ceroodFindMarketplaceSeller(
+            c,
+            'clothing',
+            line.product_id
+        );
+
+    await c.query(
+        `
+        INSERT INTO public.clothing_order_items
+        (
+            order_id,
+            product_id,
+            product_name,
+            variant,
+            quantity,
+            unit_price,
+            total_price,
+            seller_id
+        )
+
+        VALUES
+        (
+            $1, $2, $3, $4,
+            $5, $6, $7, $8
+        )
+        `,
+        [
+            id,
+            line.product_id,
+            line.product_name,
+            line.variant,
+            line.quantity,
+            line.unit_price,
+            line.total_price,
+            sellerId
+        ]
+    );
+
+}
  await c.query('COMMIT');return res.status(201).json({success:true,order_id:id,razorpay_order_id:r.id,key_id:process.env.RAZORPAY_KEY_ID,amount:Math.round(t.total*100),currency:'INR',total:t.total});
  }catch(e){if(c)await c.query('ROLLBACK').catch(()=>{});return fashionFail(res,e);}finally{if(c)c.release();}
 });
