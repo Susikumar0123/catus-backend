@@ -3443,6 +3443,17 @@ require('./cerood-seller-products')(
 );
 
 // ==========================================
+// CEROOD COSMETICS + FASHION SELLER CATALOG
+// ==========================================
+
+require('./cerood-marketplace-catalog')(
+    app,
+    db,
+    requireSellerAuth,
+    requireAdminAuth
+);
+
+// ==========================================
 // CEROOD SELLER ORDERS
 // ==========================================
 
