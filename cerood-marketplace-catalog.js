@@ -1,10 +1,9 @@
 
 'use strict';
 
-// Cosmetics and Fashion seller submissions.
-// Existing Renewed routes remain untouched.
-
-const crypto = require('crypto');
+// CEROOD Marketplace Catalog
+// Cosmetics + Fashion seller products.
+// Existing Renewed and Home Services routes are untouched.
 
 module.exports = function (
   app,
@@ -13,19 +12,24 @@ module.exports = function (
   requireAdminAuth
 ) {
 
-  const query = (sql, args = []) =>
-    new Promise((resolve, reject) =>
-      db.query(sql, args, (error, rows) =>
-        error ? reject(error) : resolve(rows || [])
-      )
-    );
+  // ============================================
+  // DATABASE HELPER
+  // ============================================
 
-  const uuid = value =>
+  const query = (sql, args = []) =>
+    new Promise((resolve, reject) => {
+      db.query(sql, args, (error, rows) => {
+        if (error) return reject(error);
+        resolve(rows || []);
+      });
+    });
+
+  const isUUID = value =>
     /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(
       String(value || '')
     );
 
-  const allowed = new Set([
+  const marketplaces = new Set([
     'cosmetics',
     'clothing'
   ]);
@@ -53,23 +57,59 @@ module.exports = function (
     'importer'
   ];
 
-  const fail = (res, error) => {
-    console.error('Marketplace catalog:', error);
-
-    res.status(error.httpStatus || 503).json({
-      success: false,
-      message: error.httpStatus
-        ? error.message
-        : 'Catalog service unavailable. Check database migration and logs.'
-    });
-  };
-
-  const bad = message =>
+  const badRequest = message =>
     Object.assign(new Error(message), {
       httpStatus: 400
     });
 
-  function validate(marketplace, body) {
+  function handleError(res, error) {
+
+    console.error(
+      'Marketplace catalog:',
+      error
+    );
+
+    res.status(
+      error.httpStatus || 503
+    ).json({
+      success: false,
+      message: error.httpStatus
+        ? error.message
+        : 'Catalog service unavailable. Check database migration and Render logs.'
+    });
+
+  }
+
+  function getProductTable(marketplace) {
+
+    if (marketplace === 'cosmetics') {
+      return 'cosmetics_products';
+    }
+
+    if (marketplace === 'clothing') {
+      return 'clothing_products';
+    }
+
+    throw badRequest(
+      'Invalid marketplace.'
+    );
+
+  }
+
+  // ============================================
+  // PRODUCT VALIDATION
+  // ============================================
+
+  function validateProduct(
+    marketplace,
+    body
+  ) {
+
+    if (!marketplaces.has(marketplace)) {
+      throw badRequest(
+        'Choose Cosmetics or Fashion.'
+      );
+    }
 
     const product = {};
 
@@ -77,96 +117,148 @@ module.exports = function (
       product[key] = body[key] ?? '';
     }
 
-    for (
-      const key of fields.filter(
-        key => ![
-          'price',
-          'compare_price',
-          'stock'
-        ].includes(key)
-      )
-    ) {
+    for (const key of fields) {
 
-      product[key] = String(product[key])
+      if (
+        key === 'price' ||
+        key === 'compare_price' ||
+        key === 'stock'
+      ) {
+        continue;
+      }
+
+      const maxLength = [
+        'description',
+        'ingredients',
+        'directions',
+        'warnings'
+      ].includes(key)
+        ? 5000
+        : key.endsWith('_url')
+          ? 2048
+          : 250;
+
+      product[key] = String(
+        product[key]
+      )
         .trim()
-        .slice(
-          0,
-          [
-            'description',
-            'ingredients',
-            'directions',
-            'warnings'
-          ].includes(key)
-            ? 5000
-            : key.endsWith('_url')
-              ? 2048
-              : 250
-        );
+        .slice(0, maxLength);
+
     }
 
-    product.price = Number(product.price);
+    product.price = Number(
+      product.price
+    );
 
-    product.stock = Number(product.stock);
+    product.stock = Number(
+      product.stock
+    );
 
     product.compare_price =
       product.compare_price === ''
         ? null
-        : Number(product.compare_price);
+        : Number(
+            product.compare_price
+          );
 
     if (
       !product.name ||
       !product.category ||
       !product.brand ||
-      !product.image_url ||
-      !Number.isFinite(product.price) ||
-      product.price <= 0 ||
-      product.price > 10000000 ||
-      !Number.isSafeInteger(product.stock) ||
-      product.stock < 0 ||
-      product.stock > 1000000 ||
-      (
-        product.compare_price !== null &&
-        (
-          !Number.isFinite(product.compare_price) ||
-          product.compare_price < 0
-        )
-      )
+      !product.image_url
     ) {
-
-      throw bad(
-        'Name, category, brand, image, price and valid stock are required.'
+      throw badRequest(
+        'Product name, category, brand and image are required.'
       );
     }
 
     if (
-      !/^https:\/\//i.test(product.image_url) ||
-      (
-        product.video_url &&
-        !/^https:\/\//i.test(product.video_url)
-      )
+      !Number.isFinite(
+        product.price
+      ) ||
+      product.price <= 0 ||
+      product.price > 10000000
     ) {
-
-      throw bad(
-        'Product media must use HTTPS.'
+      throw badRequest(
+        'Enter a valid product price.'
       );
     }
 
-    if (marketplace === 'cosmetics') {
+    if (
+      !Number.isSafeInteger(
+        product.stock
+      ) ||
+      product.stock < 0 ||
+      product.stock > 1000000
+    ) {
+      throw badRequest(
+        'Enter a valid stock quantity.'
+      );
+    }
+
+    if (
+      product.compare_price !== null &&
+      (
+        !Number.isFinite(
+          product.compare_price
+        ) ||
+        product.compare_price < 0
+      )
+    ) {
+      throw badRequest(
+        'Enter a valid compare price.'
+      );
+    }
+
+    if (
+      !/^https:\/\//i.test(
+        product.image_url
+      )
+    ) {
+      throw badRequest(
+        'Product image must use HTTPS.'
+      );
+    }
+
+    if (
+      product.video_url &&
+      !/^https:\/\//i.test(
+        product.video_url
+      )
+    ) {
+      throw badRequest(
+        'Product video must use HTTPS.'
+      );
+    }
+
+    if (
+      marketplace === 'cosmetics'
+    ) {
 
       if (
-        !product.net_quantity ||
+        !product.net_quantity
+      ) {
+        throw badRequest(
+          'Cosmetics net quantity is required.'
+        );
+      }
+
+      if (
         !/^\d{4}-\d\d-\d\d$/.test(
           product.expiry_date
         ) ||
         Number.isNaN(
-          Date.parse(product.expiry_date)
+          Date.parse(
+            product.expiry_date
+          )
         ) ||
         product.expiry_date <
-          new Date().toISOString().slice(0, 10)
+          new Date()
+            .toISOString()
+            .slice(0, 10)
       ) {
-
-        throw bad(
-          'Cosmetics require net quantity and a valid future expiry date.'
+        throw badRequest(
+          'Enter a valid future expiry date.'
         );
       }
 
@@ -176,8 +268,7 @@ module.exports = function (
           product.manufacture_date
         )
       ) {
-
-        throw bad(
+        throw badRequest(
           'Invalid manufacture date.'
         );
       }
@@ -187,26 +278,25 @@ module.exports = function (
         product.manufacture_date >
           product.expiry_date
       ) {
-
-        throw bad(
-          'Expiry must follow manufacture date.'
+        throw badRequest(
+          'Expiry date must follow manufacture date.'
         );
       }
 
     } else {
 
       product.manufacture_date = null;
-
       product.expiry_date = null;
 
     }
 
     return product;
+
   }
 
-  // ==================================================
-  // SELLER: GET COSMETICS + FASHION SUBMISSIONS
-  // ==================================================
+  // ============================================
+  // SELLER: GET ALL SUBMISSIONS
+  // ============================================
 
   app.get(
     '/api/sellers/catalog-submissions',
@@ -223,7 +313,9 @@ module.exports = function (
           ORDER BY created_at DESC
           LIMIT 250
           `,
-          [req.seller.id]
+          [
+            req.seller.id
+          ]
         );
 
         res.json({
@@ -233,16 +325,19 @@ module.exports = function (
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
     }
   );
 
-  // ==================================================
-  // SELLER: SUBMIT NEW COSMETICS / FASHION PRODUCT
-  // ==================================================
+  // ============================================
+  // SELLER: ADD NEW PRODUCT
+  // ============================================
 
   app.post(
     '/api/sellers/catalog-submissions',
@@ -255,15 +350,17 @@ module.exports = function (
           req.body?.marketplace || ''
         );
 
-        if (!allowed.has(marketplace)) {
-
-          throw bad(
+        if (
+          !marketplaces.has(
+            marketplace
+          )
+        ) {
+          throw badRequest(
             'Choose Cosmetics or Fashion.'
           );
-
         }
 
-        const product = validate(
+        const product = validateProduct(
           marketplace,
           req.body?.product || {}
         );
@@ -272,23 +369,24 @@ module.exports = function (
           `
           INSERT INTO
             public.cerood_seller_catalog_submissions
-            (
-              seller_id,
-              marketplace,
-              product_data
-            )
-          VALUES
-            (
-              ?,
-              ?,
-              ?::jsonb
-            )
+          (
+            seller_id,
+            marketplace,
+            product_data
+          )
+          VALUES (
+            ?,
+            ?,
+            ?::jsonb
+          )
           RETURNING *
           `,
           [
             req.seller.id,
             marketplace,
-            JSON.stringify(product)
+            JSON.stringify(
+              product
+            )
           ]
         );
 
@@ -299,16 +397,19 @@ module.exports = function (
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
     }
   );
 
-  // ==================================================
-  // SELLER: EDIT COSMETICS / FASHION PRODUCT
-  // ==================================================
+  // ============================================
+  // SELLER: EDIT PRODUCT
+  // ============================================
 
   app.patch(
     '/api/sellers/catalog-submissions/:id',
@@ -317,12 +418,14 @@ module.exports = function (
 
       try {
 
-        if (!uuid(req.params.id)) {
-
-          throw bad(
+        if (
+          !isUUID(
+            req.params.id
+          )
+        ) {
+          throw badRequest(
             'Invalid submission ID.'
           );
-
         }
 
         const rows = await query(
@@ -353,30 +456,38 @@ module.exports = function (
           submission.approval_status ===
           'withdrawn'
         ) {
-
-          throw bad(
+          throw badRequest(
             'Withdrawn product cannot be edited.'
           );
-
         }
 
-        const product = validate(
+        const product = validateProduct(
           submission.marketplace,
           req.body?.product || {}
         );
 
-        const target =
-          submission.marketplace === 'cosmetics'
-            ? 'cosmetics_products'
-            : 'clothing_products';
+        const target = getProductTable(
+          submission.marketplace
+        );
 
-        // Approved product:
-        // Unpublish before sending for re-approval.
+        // ==================================
+        // EDIT ALREADY APPROVED PRODUCT
+        // ==================================
 
         if (
           submission.approval_status ===
           'approved'
         ) {
+
+          if (
+            !submission.published_product_id
+          ) {
+            return res.status(409).json({
+              success: false,
+              message:
+                'Published product link missing. Contact admin.'
+            });
+          }
 
           const changed = await query(
             `
@@ -402,7 +513,6 @@ module.exports = function (
                 product_data = ?::jsonb,
                 approval_status = 'pending',
                 rejection_reason = NULL,
-                published_product_id = NULL,
                 updated_at = NOW()
 
               WHERE id = ?
@@ -422,21 +532,25 @@ module.exports = function (
             FROM changed
             `,
             [
-              submission.published_product_id,
-              JSON.stringify(product),
+              String(
+                submission.published_product_id
+              ),
+              JSON.stringify(
+                product
+              ),
               submission.id,
               req.seller.id
             ]
           );
 
-          if (!changed.length) {
-
+          if (
+            !changed.length
+          ) {
             return res.status(409).json({
               success: false,
               message:
-                'Live listing changed; refresh before editing.'
+                'Live listing changed. Refresh before editing.'
             });
-
           }
 
           return res.json({
@@ -446,8 +560,9 @@ module.exports = function (
 
         }
 
-        // Pending / Rejected product:
-        // Save and send to admin review.
+        // ==================================
+        // EDIT PENDING / REJECTED PRODUCT
+        // ==================================
 
         const changed = await query(
           `
@@ -470,20 +585,22 @@ module.exports = function (
           RETURNING *
           `,
           [
-            JSON.stringify(product),
+            JSON.stringify(
+              product
+            ),
             submission.id,
             req.seller.id
           ]
         );
 
-        if (!changed.length) {
-
+        if (
+          !changed.length
+        ) {
           return res.status(409).json({
             success: false,
             message:
-              'Product changed; refresh.'
+              'Product changed. Refresh and retry.'
           });
-
         }
 
         res.json({
@@ -493,16 +610,19 @@ module.exports = function (
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
     }
   );
 
-  // ==================================================
-  // SELLER: WITHDRAW COSMETICS / FASHION PRODUCT
-  // ==================================================
+  // ============================================
+  // SELLER: WITHDRAW PRODUCT
+  // ============================================
 
   app.delete(
     '/api/sellers/catalog-submissions/:id',
@@ -511,19 +631,20 @@ module.exports = function (
 
       try {
 
-        if (!uuid(req.params.id)) {
-
-          throw bad(
+        if (
+          !isUUID(
+            req.params.id
+          )
+        ) {
+          throw badRequest(
             'Invalid submission ID.'
           );
-
         }
 
         const rows = await query(
           `
           SELECT *
           FROM public.cerood_seller_catalog_submissions
-
           WHERE id = ?
             AND seller_id = ?
           `,
@@ -555,18 +676,18 @@ module.exports = function (
 
         }
 
-        // Approved product:
-        // Remove from public storefront.
+        // ==================================
+        // WITHDRAW APPROVED PRODUCT
+        // ==================================
 
         if (
           submission.approval_status ===
           'approved'
         ) {
 
-          const target =
-            submission.marketplace === 'cosmetics'
-              ? 'cosmetics_products'
-              : 'clothing_products';
+          const target = getProductTable(
+            submission.marketplace
+          );
 
           const changed = await query(
             `
@@ -609,20 +730,22 @@ module.exports = function (
             FROM changed
             `,
             [
-              submission.published_product_id,
+              String(
+                submission.published_product_id
+              ),
               submission.id,
               req.seller.id
             ]
           );
 
-          if (!changed.length) {
-
+          if (
+            !changed.length
+          ) {
             return res.status(409).json({
               success: false,
               message:
-                'Live listing changed; refresh before withdrawing.'
+                'Live listing changed. Refresh before withdrawing.'
             });
-
           }
 
           return res.json({
@@ -632,8 +755,9 @@ module.exports = function (
 
         }
 
-        // Pending / Rejected product:
-        // Mark withdrawn.
+        // ==================================
+        // WITHDRAW PENDING / REJECTED
+        // ==================================
 
         const changed = await query(
           `
@@ -659,14 +783,14 @@ module.exports = function (
           ]
         );
 
-        if (!changed.length) {
-
+        if (
+          !changed.length
+        ) {
           return res.status(409).json({
             success: false,
             message:
-              'Product changed; refresh.'
+              'Product changed. Refresh.'
           });
-
         }
 
         res.json({
@@ -676,16 +800,19 @@ module.exports = function (
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
     }
   );
 
-  // ==================================================
-  // ADMIN: GET COSMETICS / FASHION APPROVAL QUEUE
-  // ==================================================
+  // ============================================
+  // ADMIN: GET APPROVAL QUEUE
+  // ============================================
 
   app.get(
     '/api/admin/catalog-submissions',
@@ -698,12 +825,14 @@ module.exports = function (
           req.query.marketplace || ''
         );
 
-        if (!allowed.has(marketplace)) {
-
-          throw bad(
-            'Choose cosmetics or clothing marketplace.'
+        if (
+          !marketplaces.has(
+            marketplace
+          )
+        ) {
+          throw badRequest(
+            'Choose Cosmetics or Fashion marketplace.'
           );
-
         }
 
         const products = await query(
@@ -731,7 +860,9 @@ module.exports = function (
 
           LIMIT 500
           `,
-          [marketplace]
+          [
+            marketplace
+          ]
         );
 
         res.json({
@@ -741,16 +872,19 @@ module.exports = function (
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
     }
   );
 
-  // ==================================================
-  // ADMIN: APPROVE / REJECT SUBMISSION
-  // ==================================================
+  // ============================================
+  // ADMIN: APPROVE / REJECT
+  // ============================================
 
   app.patch(
     '/api/admin/catalog-submissions/:id/approval',
@@ -759,15 +893,17 @@ module.exports = function (
 
       try {
 
-        if (!uuid(req.params.id)) {
-
-          throw bad(
+        if (
+          !isUUID(
+            req.params.id
+          )
+        ) {
+          throw badRequest(
             'Invalid submission ID.'
           );
-
         }
 
-        const state = String(
+        const action = String(
           req.body?.approval_status || ''
         );
 
@@ -775,13 +911,11 @@ module.exports = function (
           ![
             'approved',
             'rejected'
-          ].includes(state)
+          ].includes(action)
         ) {
-
-          throw bad(
+          throw badRequest(
             'Invalid approval action.'
           );
-
         }
 
         const rows = await query(
@@ -802,7 +936,9 @@ module.exports = function (
           WHERE
             c.id = ?
           `,
-          [req.params.id]
+          [
+            req.params.id
+          ]
         );
 
         const submission = rows[0];
@@ -825,28 +961,18 @@ module.exports = function (
           return res.status(409).json({
             success: false,
             message:
-              'This submission was already reviewed. Refresh the page.'
+              'Submission already reviewed. Refresh the page.'
           });
 
         }
 
-        if (
-          state === 'approved' &&
-          submission.seller_status !==
-          'approved'
-        ) {
-
-          throw bad(
-            'Seller account must be approved first.'
-          );
-
-        }
-
-        // -------------------------------
+        // ==================================
         // REJECT
-        // -------------------------------
+        // ==================================
 
-        if (state === 'rejected') {
+        if (
+          action === 'rejected'
+        ) {
 
           const reason = String(
             req.body?.rejection_reason || ''
@@ -871,11 +997,13 @@ module.exports = function (
             `,
             [
               reason,
-              req.params.id
+              submission.id
             ]
           );
 
-          if (!changed.length) {
+          if (
+            !changed.length
+          ) {
 
             return res.status(409).json({
               success: false,
@@ -892,98 +1020,334 @@ module.exports = function (
 
         }
 
-        // -------------------------------
-        // APPROVE + PUBLISH
-        // -------------------------------
+        // ==================================
+        // APPROVE: SELLER CHECK
+        // ==================================
 
-        const product = validate(
+        if (
+          submission.seller_status !==
+          'approved'
+        ) {
+
+          throw badRequest(
+            'Seller account must be approved first.'
+          );
+
+        }
+
+        const product = validateProduct(
           submission.marketplace,
           submission.product_data
         );
 
-        const columns = fields.join(',');
+        const target = getProductTable(
+          submission.marketplace
+        );
 
-        const values = fields
-          .map(() => '?')
-          .join(',');
+        // Submission ID is UUID.
+        // Product table ID is TEXT.
 
-        const target =
-          submission.marketplace ===
-          'cosmetics'
-            ? 'cosmetics_products'
-            : 'clothing_products';
+        const productId = String(
+          submission.published_product_id ||
+          submission.id
+        );
 
-        const sql = `
-          WITH claim AS (
+        // ==================================
+        // CHECK EXISTING PRODUCT
+        // ==================================
 
-            UPDATE
-              public.cerood_seller_catalog_submissions
+        const existing = await query(
+          `
+          SELECT
+            id,
+            name,
+            image_url,
+            status
 
-            SET
-              approval_status = 'approved',
-              published_product_id = id,
-              updated_at = NOW()
+          FROM public.${target}
 
-            WHERE id = ?
-              AND approval_status = 'pending'
+          WHERE id = ?
+          `,
+          [
+            productId
+          ]
+        );
 
-            RETURNING id
+        let published = [];
 
-          ),
+        // ==================================
+        // CASE 1: PRODUCT ALREADY EXISTS
+        // ==================================
 
-          inserted AS (
+        if (
+          existing.length
+        ) {
 
-            INSERT INTO
-              public.${target}
+          const old = existing[0];
+
+          const linked =
+            String(
+              submission.published_product_id || ''
+            ) === String(
+              old.id
+            );
+
+          // Recovery for an older edit that
+          // accidentally removed the product link.
+
+          const legacyMatch =
+            !submission.published_product_id &&
+            String(
+              submission.id
+            ) === String(
+              old.id
+            ) &&
+            old.name === product.name &&
+            old.image_url === product.image_url;
+
+          if (
+            old.status !== 'draft' ||
+            (
+              !linked &&
+              !legacyMatch
+            )
+          ) {
+
+            return res.status(409).json({
+              success: false,
+              message:
+                'Existing product ID conflicts with this submission. Contact admin.'
+            });
+
+          }
+
+          // Check whether another submission
+          // already owns the product.
+
+          const owners = await query(
+            `
+            SELECT id
+            FROM public.cerood_seller_catalog_submissions
+
+            WHERE published_product_id = ?
+              AND id <> ?
+
+            LIMIT 1
+            `,
+            [
+              productId,
+              submission.id
+            ]
+          );
+
+          if (
+            owners.length
+          ) {
+
+            return res.status(409).json({
+              success: false,
+              message:
+                'Product is linked to another submission.'
+            });
+
+          }
+
+          // Build update fields.
+
+          const assignments = fields
+            .map(
+              key => `${key} = ?`
+            )
+            .join(', ');
+
+          // Update existing draft and approve
+          // submission in one SQL statement.
+
+          published = await query(
+            `
+            WITH changed_product AS (
+
+              UPDATE public.${target}
+
+              SET
+                ${assignments},
+                status = 'published'
+
+              WHERE id = ?
+                AND status = 'draft'
+
+                AND EXISTS (
+
+                  SELECT 1
+
+                  FROM
+                    public.cerood_seller_catalog_submissions
+
+                  WHERE id = ?
+                    AND approval_status = 'pending'
+
+                )
+
+                AND NOT EXISTS (
+
+                  SELECT 1
+
+                  FROM
+                    public.cerood_seller_catalog_submissions
+
+                  WHERE published_product_id = ?
+                    AND id <> ?
+
+                )
+
+              RETURNING id
+
+            ),
+
+            approved AS (
+
+              UPDATE
+                public.cerood_seller_catalog_submissions
+
+              SET
+                approval_status = 'approved',
+                published_product_id = ?,
+                rejection_reason = NULL,
+                updated_at = NOW()
+
+              WHERE id = ?
+                AND approval_status = 'pending'
+
+                AND EXISTS (
+
+                  SELECT 1
+                  FROM changed_product
+
+                )
+
+              RETURNING published_product_id
+
+            )
+
+            SELECT
+              published_product_id AS id
+
+            FROM approved
+            `,
+            [
+              ...fields.map(
+                key => product[key]
+              ),
+
+              productId,
+              submission.id,
+
+              productId,
+              submission.id,
+
+              productId,
+              submission.id
+            ]
+          );
+
+        } else {
+
+          // ==================================
+          // CASE 2: BRAND-NEW PRODUCT
+          // ==================================
+
+          const columns = fields.join(
+            ', '
+          );
+
+          const values = fields
+            .map(
+              () => '?'
+            )
+            .join(', ');
+
+          published = await query(
+            `
+            WITH claim AS (
+
+              UPDATE
+                public.cerood_seller_catalog_submissions
+
+              SET
+                approval_status = 'approved',
+                published_product_id = id,
+                rejection_reason = NULL,
+                updated_at = NOW()
+
+              WHERE id = ?
+                AND approval_status = 'pending'
+
+              RETURNING id
+
+            ),
+
+            inserted AS (
+
+              INSERT INTO
+                public.${target}
               (
                 id,
                 ${columns},
                 status
               )
 
-            SELECT
-              claim.id,
-              ${values},
-              'published'
+              SELECT
+                claim.id::text,
+                ${values},
+                'published'
 
-            FROM claim
+              FROM claim
 
-            RETURNING id
+              RETURNING id
 
-          )
-
-          SELECT id
-          FROM inserted
-        `;
-
-        const published = await query(
-          sql,
-          [
-            submission.id,
-            ...fields.map(
-              key => product[key]
             )
-          ]
-        );
 
-        if (!published.length) {
+            SELECT id
+            FROM inserted
+            `,
+            [
+              submission.id,
+              ...fields.map(
+                key => product[key]
+              )
+            ]
+          );
+
+        }
+
+        // ==================================
+        // APPROVAL RESULT
+        // ==================================
+
+        if (
+          !published.length
+        ) {
 
           return res.status(409).json({
             success: false,
             message:
-              'Already reviewed.'
+              'Product changed during approval. Refresh and retry.'
           });
 
         }
 
-        res.json({
+        return res.json({
           success: true,
-          product_id: published[0].id
+          product_id:
+            published[0].id
         });
 
       } catch (error) {
 
-        fail(res, error);
+        handleError(
+          res,
+          error
+        );
 
       }
 
