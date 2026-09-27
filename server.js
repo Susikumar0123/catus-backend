@@ -3480,6 +3480,17 @@ require('./cerood-marketplace-catalog')(
     requireAdminAuth
 );
 
+
+// ==========================================
+// CEROOD DYNAMIC CATEGORY MANAGEMENT
+// ==========================================
+
+require('./cerood-category-management')(
+    app,
+    db,
+    requireAdminAuth
+);
+
 // Read-only common e-commerce homepage feed (Home Services untouched).
 require('./cerood-common-marketplace')(app, db);
 
@@ -9430,14 +9441,28 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
         const address = req.body && req.body.address;
         if (!Array.isArray(items) || items.length < 1 || items.length > 20 || !address || typeof address !== 'object' || Array.isArray(address))
             return res.status(400).json({success:false,message:'Items and delivery address are required.'});
-        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const pincode = String(address.pincode || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) || !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^\d{6}$/.test(pincode))
-            return res.status(400).json({success:false,message:'Enter a valid Tamil Nadu district and six-digit pincode.'});
-        // TN PIN prefixes are a preliminary input check, not a deliverability guarantee.
-        if (!/^[56]\d{5}$/.test(pincode))
-            return res.status(400).json({success:false,message:'Enter a Tamil Nadu pincode.'});
+        const state = String(address.state || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const district = String(address.district || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const pincode = String(address.pincode || '').trim();
+
+if (
+    state.length < 2 ||
+    state.length > 100 ||
+    district.length < 2 ||
+    district.length > 100 ||
+    !/^[1-9]\d{5}$/.test(pincode)
+) {
+    return res.status(400).json({
+        success: false,
+        message: 'Enter a valid Indian state, district and six-digit PIN code.'
+    });
+}
         const quantities = new Map();
         for (const item of items) {
             const id = String(item && item.product_id || '').trim();
@@ -9460,14 +9485,30 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
             if (!Number.isSafeInteger(subtotal) || subtotal < 1)
                 throw new Error('Invalid stored quote price.');
         }
-        const rates = await renewedQuery(`SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if (!rates.length) return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:null,total:null,
-            delivery_status:'pending',checkout_enabled:false,message:'Tamil Nadu delivery requested. Cerood has not configured/confirmed a delivery rate for this district.'});
-        const fee = Number(rates[0].fee);
-        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(subtotal+fee)) throw new Error('Invalid delivery amount.');
-        return res.json({success:true,currency:'INR',district,pincode,subtotal,delivery_fee:fee,total:subtotal+fee,
-            delivery_status:'rate_configured',checkout_enabled:false,
-            message:'Estimated total only. Final delivery availability and amount must be reconfirmed before payment.'});
+        const fee = ceroodShoppingDeliveryFee(subtotal);
+
+const total = subtotal + fee;
+
+if (
+    !Number.isSafeInteger(total) ||
+    total < 1
+) {
+    throw new Error('Invalid delivery amount.');
+}
+
+return res.json({
+    success: true,
+    currency: 'INR',
+    state,
+    district,
+    pincode,
+    subtotal,
+    delivery_fee: fee,
+    total,
+    delivery_status: 'rate_configured',
+    checkout_enabled: false,
+    message: 'Estimated India-wide delivery quote. Final availability and amount must be reconfirmed before payment.'
+});
     } catch(e) { renewedError(res,e); }
 });
 
@@ -9505,18 +9546,44 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
             !Array.isArray(items) || items.length < 1 || items.length > 20) {
             return res.status(400).json({success:false,message:'Delivery address and 1–20 items are required.'});
         }
-        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const pincode = String(address.pincode || '').trim();
-        const fullName = String(address.full_name || address.name || '').trim();
-        const street = String(address.street || address.address || '').trim();
-        const city = String(address.city || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
-            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
-            fullName.length < 2 || fullName.length > 140 || street.length < 5 || street.length > 500 ||
-            city.length < 2 || city.length > 100) {
-            return res.status(400).json({success:false,message:'Enter a complete Tamil Nadu delivery address.'});
-        }
+        const state = String(address.state || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const district = String(address.district || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const pincode = String(address.pincode || '').trim();
+
+const fullName = String(
+    address.full_name || address.name || ''
+).trim();
+
+const street = String(
+    address.street || address.address || ''
+).trim();
+
+const city = String(address.city || '').trim();
+
+if (
+    state.length < 2 ||
+    state.length > 100 ||
+    district.length < 2 ||
+    district.length > 100 ||
+    !/^[1-9]\d{5}$/.test(pincode) ||
+    fullName.length < 2 ||
+    fullName.length > 140 ||
+    street.length < 5 ||
+    street.length > 500 ||
+    city.length < 2 ||
+    city.length > 100
+) {
+    return res.status(400).json({
+        success: false,
+        message: 'Enter a complete Indian delivery address.'
+    });
+}
         const quantities = new Map();
         for (const item of items) {
             const id = String(item?.product_id || '').trim();
@@ -9545,15 +9612,32 @@ app.post('/api/renewed/secure-quote', async (req, res) => {
             if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
             quoteItems.push({product_id:id,name:p.name,quantity:qty,unit_price:unit,line_total:line});
         }
-        const rates = await renewedQuery(
-            'SELECT fee FROM public.renewed_delivery_rates WHERE LOWER(TRIM(district)) = ? AND active = TRUE AND fee IS NOT NULL LIMIT 1',
-            [district]);
-        if (!rates.length) return res.status(409).json({success:false,message:'Delivery rate not configured for this district.'});
-        const fee = Number(rates[0].fee), total = subtotal + fee;
-        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) || total < 1) throw Error('Invalid delivery amount.');
-        return res.json({success:true,currency:'INR',items:quoteItems,subtotal,delivery_fee:fee,total,
-            district,pincode,customer_verified:true,checkout_enabled:false,payment_enabled:false,
-            message:'Verified quote only. No order, reservation or payment created.'});
+        const fee = ceroodShoppingDeliveryFee(subtotal);
+
+const total = subtotal + fee;
+
+if (
+    !Number.isSafeInteger(total) ||
+    total < 1
+) {
+    throw new Error('Invalid delivery amount.');
+}
+
+return res.json({
+    success: true,
+    currency: 'INR',
+    items: quoteItems,
+    subtotal,
+    delivery_fee: fee,
+    total,
+    state,
+    district,
+    pincode,
+    customer_verified: true,
+    checkout_enabled: false,
+    payment_enabled: false,
+    message: 'Verified quote only. No order, reservation or payment created.'
+});
     } catch (e) { return renewedError(res,e); }
 });
 
@@ -9685,17 +9769,41 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         const address=req.body?.address, items=req.body?.items;
         if(!address||typeof address!=='object'||Array.isArray(address)||!Array.isArray(items)||items.length<1||items.length>20)
             return res.status(400).json({success:false,message:'Address and 1–20 products required.'});
-        const state=String(address.state||'').trim().replace(/\s+/g,' ').toLowerCase();
-        const district=String(address.district||'').trim().replace(/\s+/g,' ').toLowerCase();
-        const pincode=String(address.pincode||'').trim();
-        const fullName=String(address.full_name||'').trim();
-        const street=String(address.street||'').trim();
-        const city=String(address.city||'').trim();
-        if(!['tamil nadu','tamilnadu','tn'].includes(state)||!/^[a-z][a-z .'-]{1,99}$/.test(district)||
-           !/^[56]\d{5}$/.test(pincode)||fullName.length<2||fullName.length>140||
-           street.length<5||street.length>500||city.length<2||city.length>100||
-           String(address.phone||'').trim()!==phone)
-            return res.status(400).json({success:false,message:'Complete Tamil Nadu address and verified mobile are required.'});
+        const state = String(address.state || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const district = String(address.district || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const pincode = String(address.pincode || '').trim();
+
+const fullName = String(address.full_name || '').trim();
+
+const street = String(address.street || '').trim();
+
+const city = String(address.city || '').trim();
+
+if (
+    state.length < 2 ||
+    state.length > 100 ||
+    district.length < 2 ||
+    district.length > 100 ||
+    !/^[1-9]\d{5}$/.test(pincode) ||
+    fullName.length < 2 ||
+    fullName.length > 140 ||
+    street.length < 5 ||
+    street.length > 500 ||
+    city.length < 2 ||
+    city.length > 100 ||
+    String(address.phone || '').trim() !== phone
+) {
+    return res.status(400).json({
+        success: false,
+        message: 'Complete Indian delivery address and verified mobile are required.'
+    });
+}
         const quantities=new Map();
         for(const item of items){
             const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);
@@ -9742,14 +9850,27 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
     seller_id: p.seller_id || null
 });
         }
-        const rates=await client.query(`SELECT fee FROM public.renewed_delivery_rates
-          WHERE LOWER(TRIM(district))=$1 AND active=TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if(!rates.length){const e=Error('Delivery rate unavailable for this district.');e.status=409;throw e;}
-        const fee=Number(rates[0].fee),total=subtotal+fee;
-        if(!Number.isSafeInteger(fee)||fee<0||!Number.isSafeInteger(total)||total<1||total>10000000)throw Error('Invalid order total.');
+        const fee = ceroodShoppingDeliveryFee(subtotal);
+
+const total = subtotal + fee;
+
+if (
+    !Number.isSafeInteger(total) ||
+    total < 1 ||
+    total > 10000000
+) {
+    throw new Error('Invalid order total.');
+}
         const id=crypto.randomUUID();
-        const savedAddress={full_name:fullName,street,area:String(address.area||'').trim().slice(0,200),
-          city,district,state:'Tamil Nadu',pincode};
+        const savedAddress = {
+    full_name: fullName,
+    street,
+    area: String(address.area || '').trim().slice(0, 200),
+    city,
+    district,
+    state,
+    pincode
+};
         await client.query(`INSERT INTO public.renewed_orders
           (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
            subtotal,delivery_fee,total,currency,status,delivery_status,payment_method,cod_request_id)
@@ -9827,17 +9948,40 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
         if (!address || typeof address !== 'object' || Array.isArray(address) ||
             !Array.isArray(items) || items.length < 1 || items.length > 20)
             return res.status(400).json({success:false,message:'Address and 1–20 items required.'});
-        const state = String(address.state || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const district = String(address.district || '').trim().replace(/\s+/g,' ').toLowerCase();
-        const pincode = String(address.pincode || '').trim();
-        const fullName = String(address.full_name || address.name || '').trim();
-        const street = String(address.street || address.address || '').trim();
-        const city = String(address.city || '').trim();
-        if (!['tamil nadu','tamilnadu','tn'].includes(state) ||
-            !/^[a-z][a-z .'-]{1,99}$/.test(district) || !/^[56]\d{5}$/.test(pincode) ||
-            fullName.length < 2 || fullName.length > 140 ||
-            street.length < 5 || street.length > 500 || city.length < 2 || city.length > 100)
-            return res.status(400).json({success:false,message:'Complete Tamil Nadu delivery address required.'});
+        const state = String(address.state || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const district = String(address.district || '')
+    .trim()
+    .replace(/\s+/g, ' ');
+
+const pincode = String(address.pincode || '').trim();
+
+const fullName = String(address.full_name || address.name || '').trim();
+
+const street = String(address.street || address.address || '').trim();
+
+const city = String(address.city || '').trim();
+
+if (
+    state.length < 2 ||
+    state.length > 100 ||
+    district.length < 2 ||
+    district.length > 100 ||
+    !/^[1-9]\d{5}$/.test(pincode) ||
+    fullName.length < 2 ||
+    fullName.length > 140 ||
+    street.length < 5 ||
+    street.length > 500 ||
+    city.length < 2 ||
+    city.length > 100
+) {
+    return res.status(400).json({
+        success: false,
+        message: 'Complete Indian delivery address required.'
+    });
+}
         const quantities = new Map();
         for (const item of items) {
             const id = String(item?.product_id || '').trim();
@@ -9883,18 +10027,27 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
     seller_id: p.seller_id || null
 });
         }
-        const rates = await client.query(
-            `SELECT fee FROM public.renewed_delivery_rates
-             WHERE LOWER(TRIM(district)) = $1 AND active = TRUE AND fee IS NOT NULL LIMIT 1`,[district]);
-        if (!rates.length) {const e=new Error('Delivery rate not configured.');e.status=409;throw e;}
-        const fee = Number(rates[0].fee), total = subtotal + fee;
-        if (!Number.isSafeInteger(fee) || fee < 0 || !Number.isSafeInteger(total) ||
-            total < 1 || total > 10000000) throw Error('Invalid payment amount.');
+        const fee = ceroodShoppingDeliveryFee(subtotal);
+
+const total = subtotal + fee;
+
+if (
+    !Number.isSafeInteger(total) ||
+    total < 1 ||
+    total > 10000000
+) {
+    throw new Error('Invalid payment amount.');
+}
         const orderId = crypto.randomUUID();
         const savedAddress = {
-            full_name:fullName,street,city,district,state:'Tamil Nadu',pincode,
-            area:String(address.area || '').trim().slice(0,200)
-        };
+    full_name: fullName,
+    street,
+    city,
+    district,
+    state,
+    pincode,
+    area: String(address.area || '').trim().slice(0, 200)
+};
         await client.query(
             `INSERT INTO public.renewed_orders
              (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
@@ -10943,7 +11096,14 @@ function beautyTotals(products,counts){
  lines.push({product_id:id,product_name:p.name,variant:p.variant||null,quantity:qty,unit_price:price,total_price:line});}
  const delivery_fee=ceroodShoppingDeliveryFee(subtotal);return {items:lines,subtotal,delivery_fee,discount:0,total:subtotal+delivery_fee,currency:'INR'};
 }
-app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn(),delivery_fee:beautyFee(),live_checkout:beautyCodOn()||beautyOnlineOn()}));
+app.get('/api/cosmetics/checkout-status', (req, res) => res.json({
+    success: true,
+    cod_enabled: beautyCodOn(),
+    online_enabled: beautyOnlineOn(),
+    delivery_fee: SHOPPING_DELIVERY_CHARGE,
+    free_delivery_minimum: SHOPPING_FREE_DELIVERY_MINIMUM,
+    live_checkout: beautyCodOn() || beautyOnlineOn()
+}));
 app.post('/api/cosmetics/quote',async(req,res)=>{
  res.set('Cache-Control','no-store');try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);return res.json({success:true,...beautyTotals(products,counts),cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn()});}catch(e){return beautyErr(res,e);}
 });
@@ -11358,7 +11518,14 @@ async function fashionVerifiedCustomer(body,address){
  }
 }
 const fashionRazorpay=()=>new Razorpay({key_id:process.env.RAZORPAY_KEY_ID,key_secret:process.env.RAZORPAY_KEY_SECRET});
-app.get('/api/clothing/checkout-status',(req,res)=>res.json({success:true,cod_enabled:fashionCodOn(),online_enabled:fashionOnlineOn(),live_checkout:fashionCodOn()||fashionOnlineOn(),delivery_fee:fashionFee()}));
+app.get('/api/clothing/checkout-status', (req, res) => res.json({
+    success: true,
+    cod_enabled: fashionCodOn(),
+    online_enabled: fashionOnlineOn(),
+    live_checkout: fashionCodOn() || fashionOnlineOn(),
+    delivery_fee: SHOPPING_DELIVERY_CHARGE,
+    free_delivery_minimum: SHOPPING_FREE_DELIVERY_MINIMUM
+}));
 app.post('/api/clothing/quote',async(req,res)=>{res.set('Cache-Control','no-store');try{const {counts}=fashionRequest(req.body||{}),ids=[...counts.keys()];const rows=await clothingDb(`SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);res.json({success:true,...fashionTotals(rows,counts),cod_enabled:fashionCodOn(),online_enabled:fashionOnlineOn()});}catch(e){fashionFail(res,e);}});
 app.post('/api/clothing/place-cod-order',async(req,res)=>{
  res.set('Cache-Control','no-store');if(!fashionCodOn())return res.status(503).json({success:false,message:'Fashion COD is not enabled yet.'});let c;
