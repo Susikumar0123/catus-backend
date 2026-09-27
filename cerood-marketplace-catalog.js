@@ -810,6 +810,64 @@ module.exports = function (
     }
   );
 
+  
+  // ============================================
+  // COMMON ADMIN: ALL CATALOG SUBMISSIONS
+  // ============================================
+
+  // Read-only queue across every catalog marketplace.
+  // New marketplace publishing is not enabled here.
+  // Existing approval validation remains unchanged.
+
+  app.get(
+    '/api/admin/catalog-submissions-all',
+    requireAdminAuth,
+    async (req, res) => {
+
+      try {
+
+        const products = await query(
+          `
+          SELECT
+            c.*,
+            s.shop_name,
+            s.owner_name,
+            s.phone AS seller_phone
+
+          FROM
+            public.cerood_seller_catalog_submissions c
+
+          JOIN
+            public.cerood_sellers s
+
+          ON
+            s.id = c.seller_id
+
+          ORDER BY
+            c.created_at DESC
+
+          LIMIT 1000
+          `
+        );
+
+        return res.json({
+          success: true,
+          products
+        });
+
+      } catch (error) {
+
+        return handleError(
+          res,
+          error
+        );
+
+      }
+
+    }
+  );
+
+
   // ============================================
   // ADMIN: GET APPROVAL QUEUE
   // ============================================
