@@ -11,6 +11,33 @@ const db = require('./db');
 const axios = require('axios');
 require('dotenv').config();
 
+// ==========================================
+// CEROOD SHOPPING — COMMON INDIA DELIVERY
+// Renewed + Fashion + Beauty only
+// Does NOT affect Home Services
+// ==========================================
+
+const SHOPPING_DELIVERY_CHARGE = 79;
+const SHOPPING_FREE_DELIVERY_MINIMUM = 500;
+
+function ceroodShoppingDeliveryFee(subtotal) {
+
+    const amount = Number(subtotal);
+
+    if (
+        !Number.isFinite(amount) ||
+        amount < 0
+    ) {
+        throw new Error(
+            'Invalid shopping subtotal.'
+        );
+    }
+
+    return amount >= SHOPPING_FREE_DELIVERY_MINIMUM
+        ? 0
+        : SHOPPING_DELIVERY_CHARGE;
+}
+
 const app = express();
 const PORT = process.env.PORT || 10000;
 
@@ -10914,7 +10941,7 @@ function beautyTotals(products,counts){
  for(const [id,qty] of counts){const p=map.get(id);if(!p||p.status!=='published'||(p.expiry_date&&new Date(p.expiry_date).getTime()<Date.now()-86400000)||Number(p.stock)<qty)throw Object.assign(new Error('Product unavailable, expired or insufficient stock. Refresh your cart.'),{httpStatus:409});
  const price=Number(p.price),line=price*qty;if(!Number.isSafeInteger(price)||price<=0||!Number.isSafeInteger(line))throw Object.assign(new Error('Invalid product price.'),{httpStatus:409});subtotal+=line;if(!Number.isSafeInteger(subtotal)||subtotal>10000000)throw Object.assign(new Error('Order amount exceeds limit.'),{httpStatus:400});
  lines.push({product_id:id,product_name:p.name,variant:p.variant||null,quantity:qty,unit_price:price,total_price:line});}
- const delivery_fee=beautyFee();return {items:lines,subtotal,delivery_fee,discount:0,total:subtotal+delivery_fee,currency:'INR'};
+ const delivery_fee=ceroodShoppingDeliveryFee(subtotal);return {items:lines,subtotal,delivery_fee,discount:0,total:subtotal+delivery_fee,currency:'INR'};
 }
 app.get('/api/cosmetics/checkout-status',(req,res)=>res.json({success:true,cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn(),delivery_fee:beautyFee(),live_checkout:beautyCodOn()||beautyOnlineOn()}));
 app.post('/api/cosmetics/quote',async(req,res)=>{
@@ -11312,7 +11339,16 @@ function fashionTotals(products,counts){
  for(const [id,qty] of counts){const p=map.get(id);if(!p||p.status!=='published'||Number(p.stock)<qty)fashionBad('Product unavailable or insufficient stock. Refresh your Fashion cart.',409);
  const price=Number(p.price),amount=price*qty;if(!Number.isSafeInteger(price)||price<=0||!Number.isSafeInteger(amount))fashionBad('Invalid Fashion product price.',409);
  subtotal+=amount;if(!Number.isSafeInteger(subtotal)||subtotal>10000000)fashionBad('Fashion order exceeds amount limit.');lines.push({product_id:id,product_name:p.name,variant:p.variant||null,quantity:qty,unit_price:price,total_price:amount});}
- return {items:lines,subtotal,delivery_fee:fashionFee(),discount:0,total:subtotal+fashionFee(),currency:'INR'};
+ const delivery_fee = ceroodShoppingDeliveryFee(subtotal);
+
+return {
+    items: lines,
+    subtotal,
+    delivery_fee,
+    discount: 0,
+    total: subtotal + delivery_fee,
+    currency: 'INR'
+};
 }
 async function fashionVerifiedCustomer(body,address){
  // Checkout is guest-compatible like current Fashion UI. Enable OTP gate once frontend sends accessToken.
