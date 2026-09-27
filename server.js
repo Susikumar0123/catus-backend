@@ -3520,6 +3520,129 @@ app.post('/api/partnership-leads', async (req, res) => {
 app.use('/api/admin', requireAdminAuth);
 
 // ==========================================
+// CEROOD RENEWED - ADMIN REVIEW MODERATION
+// ==========================================
+
+// 1. LOAD ALL CUSTOMER REVIEWS
+app.get('/api/admin/renewed/reviews', async (req, res) => {
+
+    res.set('Cache-Control', 'no-store');
+
+    try {
+
+        const reviews = await renewedQuery(
+            `SELECT
+                r.id,
+                r.order_id,
+                r.product_id,
+                r.customer_name,
+                r.rating,
+                r.comment,
+                r.image_urls,
+                r.status,
+                r.created_at,
+                r.updated_at,
+                p.name AS product_name
+             FROM public.renewed_product_reviews r
+             LEFT JOIN public.renewed_products p
+               ON p.id::text = r.product_id
+             ORDER BY
+                CASE
+                    WHEN r.status = 'pending' THEN 0
+                    ELSE 1
+                END,
+                r.created_at DESC
+             LIMIT 500`
+        );
+
+        return res.json({
+            success: true,
+            reviews
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Renewed admin reviews list:',
+            error.message
+        );
+
+        return res.status(503).json({
+            success: false,
+            message: 'Unable to load customer reviews.'
+        });
+
+    }
+
+});
+
+
+// 2. APPROVE / REJECT CUSTOMER REVIEW
+app.patch('/api/admin/renewed/reviews/:id/status', async (req, res) => {
+
+    res.set('Cache-Control', 'no-store');
+
+    const id = String(req.params.id || '');
+
+    const status = String(
+        req.body?.status || ''
+    ).trim();
+
+    if (
+        !/^[1-9]\d*$/.test(id) ||
+        !['approved', 'rejected'].includes(status)
+    ) {
+
+        return res.status(400).json({
+            success: false,
+            message: 'Valid review ID and approved/rejected status required.'
+        });
+
+    }
+
+    try {
+
+        const updated = await renewedQuery(
+            `UPDATE public.renewed_product_reviews
+             SET
+                status = ?,
+                updated_at = NOW()
+             WHERE id = ?::bigint
+             RETURNING id, status, updated_at`,
+            [status, id]
+        );
+
+        if (!updated.length) {
+
+            return res.status(404).json({
+                success: false,
+                message: 'Review not found.'
+            });
+
+        }
+
+        return res.json({
+            success: true,
+            review: updated[0]
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Renewed admin review moderation:',
+            error.message
+        );
+
+        return res.status(503).json({
+            success: false,
+            message: 'Unable to update customer review.'
+        });
+
+    }
+
+});
+
+// ==========================================
 
 // CEROOD PARTNERSHIP LEADS — these routes inherit requireAdminAuth.
 app.get('/api/admin/partnership-leads', (req, res) => {
@@ -9108,17 +9231,24 @@ app.get('/api/admin/renewed/test-preview/:id', async (req,res) => {
         return res.json({success:true,test_only:true,payment_created:false,reservation_created:false,
             product:{id:p.id,name:p.name,price:Number(p.price),stock:Number(p.stock),status:p.status,
                      condition:p.condition,warranty_days:Number(p.warranty_days)},
-            message:'Admin preview only. No Razorpay order or payment is created.'});
-    } catch(e) {console.error('Renewed admin test preview:',e.message);
-        return res.status(503).json({success:false,message:'Test preview unavailable.'});}
-});
+                       message:'Admin preview only. No Razorpay order or payment is created.'});
 
-// ==========================================
-// CEROOD RENEWED STORE — PHASE 4
-// Requires cerood_renewed_phase4.sql to be run in Supabase first.
-// Admin routes inherit /api/admin authentication middleware above.
-// ==========================================
-const renewedQuery = (sql, params = []) => new Promise((resolve, reject) => {
+    } catch (error) {
+
+        console.error(
+            'Renewed admin test preview:',
+            error.message
+        );
+
+        return res.status(503).json({
+            success: false,
+            message: 'Test preview unavailable.'
+        });
+
+    }
+
+});
+    const renewedQuery = (sql, params = []) => new Promise((resolve, reject) => {
     db.query(sql, params, (error, rows) => error ? reject(error) : resolve(rows || []));
 });
 const renewedAllowedCategories = new Set(['tv', 'refrigerator', 'washing-machine', 'ac', 'laptop', 'other']);
@@ -10051,6 +10181,391 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
     return res.json({success:true,orders:orders.map(o=>({...o,items:byId.get(String(o.id))||[]}))});
   }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
 });
+
+// ==========================================
+// CEROOD RENEWED — CUSTOMER PRODUCT REVIEWS
+// ==========================================
+
+const renewedReviewUpload = multer({
+    storage: multer.memoryStorage(),
+
+    limits: {
+        fileSize: 5 * 1024 * 1024,
+        files: 3
+    },
+
+    fileFilter: (req, file, cb) => {
+        cb(
+            null,
+            [
+                'image/jpeg',
+                'image/png',
+                'image/webp'
+            ].includes(file.mimetype)
+        );
+    }
+});
+
+
+// ==========================================
+// 1. CUSTOMER'S OWN REVIEWS
+// ==========================================
+
+app.get(
+    '/api/renewed/my-reviews',
+    renewedCustomerSession,
+    async (req, res) => {
+
+        res.set('Cache-Control', 'no-store');
+
+        try {
+
+            const reviews = await renewedQuery(
+                `SELECT
+                    id,
+                    order_id,
+                    product_id,
+                    rating,
+                    comment,
+                    image_urls,
+                    status,
+                    created_at
+                 FROM public.renewed_product_reviews
+                 WHERE customer_phone = ?
+                 ORDER BY created_at DESC`,
+                [req.renewedCustomerPhone]
+            );
+
+            return res.json({
+                success: true,
+                reviews
+            });
+
+        } catch (e) {
+
+            console.error(
+                'Renewed reviews list:',
+                e.message
+            );
+
+            return res.status(503).json({
+                success: false,
+                message: 'Reviews temporarily unavailable.'
+            });
+
+        }
+    }
+);
+
+
+// ==========================================
+// 2. SUBMIT CUSTOMER REVIEW
+// ==========================================
+
+app.post(
+    '/api/renewed/reviews',
+
+    renewedCustomerSession,
+
+    (req, res, next) => {
+
+        renewedReviewUpload.array(
+            'photos',
+            3
+        )(req, res, e => {
+
+            if (e) {
+
+                return res.status(400).json({
+                    success: false,
+                    message: e.message
+                });
+
+            }
+
+            next();
+
+        });
+
+    },
+
+    async (req, res) => {
+
+        const orderId =
+            String(req.body.order_id || '');
+
+        const productId =
+            String(req.body.product_id || '');
+
+        const rating =
+            Number(req.body.rating);
+
+        const comment =
+            String(req.body.comment || '').trim();
+
+        if (
+            !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(orderId) ||
+            !productId ||
+            productId.length > 120 ||
+            !Number.isInteger(rating) ||
+            rating < 1 ||
+            rating > 5 ||
+            comment.length < 10 ||
+            comment.length > 1000
+        ) {
+
+            return res.status(400).json({
+                success: false,
+                message:
+                    'Enter a valid delivered order, rating and review (10–1000 characters).'
+            });
+
+        }
+
+        try {
+
+            // Verify that this customer purchased
+            // this product and the order was delivered.
+
+            const verified = await renewedQuery(
+                `SELECT o.customer_name
+                 FROM public.renewed_orders o
+                 JOIN public.renewed_order_items i
+                   ON i.order_id = o.id
+                 WHERE o.id = ?
+                   AND o.customer_id = ?
+                   AND o.delivery_status = 'delivered'
+                   AND i.product_id = ?
+                 LIMIT 1`,
+                [
+                    orderId,
+                    req.renewedCustomerId,
+                    productId
+                ]
+            );
+
+            if (!verified.length) {
+
+                return res.status(403).json({
+                    success: false,
+                    message:
+                        'Only your delivered purchased product can be reviewed. Sign in and link any guest order first.'
+                });
+
+            }
+
+            // Prevent duplicate reviews.
+
+            const existing = await renewedQuery(
+                `SELECT id
+                 FROM public.renewed_product_reviews
+                 WHERE order_id = ?
+                   AND product_id = ?
+                   AND customer_phone = ?
+                 LIMIT 1`,
+                [
+                    orderId,
+                    productId,
+                    req.renewedCustomerPhone
+                ]
+            );
+
+            if (existing.length) {
+
+                return res.status(409).json({
+                    success: false,
+                    message:
+                        'A review has already been submitted for this purchase.'
+                });
+
+            }
+
+            // Supabase Storage configuration.
+
+            const base = String(
+                process.env.SUPABASE_URL ||
+                process.env.PROJECT_URL ||
+                ''
+            ).replace(/\/rest\/v1\/?$/, '');
+
+            const secret =
+                process.env.SUPABASE_SECRET_KEY ||
+                process.env.SUPABASE_SERVICE_ROLE_KEY ||
+                process.env.SUPABASE_SERVICE_KEY ||
+                '';
+
+            if (
+                (req.files || []).length &&
+                (!base || !secret)
+            ) {
+
+                return res.status(503).json({
+                    success: false,
+                    message:
+                        'Photo storage is not configured.'
+                });
+
+            }
+
+            const urls = [];
+
+            // Upload up to 3 review photos.
+
+            for (const f of req.files || []) {
+
+                const objectPath =
+                    `renewed-reviews/${orderId}/${crypto.randomUUID()}.webp`;
+
+                const buf = await sharp(f.buffer)
+                    .rotate()
+                    .resize({
+                        width: 1200,
+                        height: 1200,
+                        fit: 'inside',
+                        withoutEnlargement: true
+                    })
+                    .webp({
+                        quality: 82
+                    })
+                    .toBuffer();
+
+                await axios.post(
+                    `${base}/storage/v1/object/catus-images/${objectPath}`,
+                    buf,
+                    {
+                        headers: {
+                            Authorization: `Bearer ${secret}`,
+                            apikey: secret,
+                            'Content-Type': 'image/webp'
+                        },
+                        maxBodyLength: Infinity
+                    }
+                );
+
+                urls.push(
+                    `${base}/storage/v1/object/public/catus-images/${objectPath}`
+                );
+
+            }
+
+            // Save review for admin approval.
+
+           const rows = await renewedQuery(
+    `INSERT INTO public.renewed_product_reviews
+     (
+        order_id,
+        product_id,
+        customer_phone,
+        customer_name,
+        rating,
+        comment,
+        image_urls,
+        status
+     )
+     VALUES
+     (
+        ?, ?, ?, ?, ?, ?, ?::text[], 'pending'
+     )
+     RETURNING id, status`,
+    [
+        orderId,
+        productId,
+        req.renewedCustomerPhone,
+        String(
+            verified[0].customer_name ||
+            'Cerood customer'
+        ).slice(0, 100),
+        rating,
+        comment,
+        urls
+    ]
+);
+
+            return res.status(201).json({
+                success: true,
+                review: rows[0],
+                message:
+                    'Review submitted for moderation.'
+            });
+
+        } catch (e) {
+
+            console.error(
+                'Renewed review submit:',
+                e.message
+            );
+
+            return res.status(
+                e.code === '23505' ? 409 : 503
+            ).json({
+                success: false,
+                message:
+                    e.code === '23505'
+                        ? 'Review already submitted.'
+                        : 'Could not submit review. Please retry.'
+            });
+
+        }
+
+    }
+);
+
+
+// ==========================================
+// 3. PUBLIC APPROVED PRODUCT REVIEWS
+// ==========================================
+
+app.get(
+    '/api/renewed/products/:id/reviews',
+    async (req, res) => {
+
+        const id =
+            String(req.params.id || '');
+
+        if (!id || id.length > 120) {
+
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid product.'
+            });
+
+        }
+
+        try {
+
+            const reviews = await renewedQuery(
+                `SELECT
+                    customer_name,
+                    rating,
+                    comment,
+                    image_urls,
+                    created_at
+                 FROM public.renewed_product_reviews
+                 WHERE product_id = ?
+                   AND status = 'approved'
+                 ORDER BY created_at DESC
+                 LIMIT 60`,
+                [id]
+            );
+
+            return res.json({
+                success: true,
+                reviews
+            });
+
+        } catch (e) {
+
+            return res.status(503).json({
+                success: false,
+                message:
+                    'Reviews temporarily unavailable.'
+            });
+
+        }
+
+    }
+);
+
 app.get('/api/renewed/customer-order/:id',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
   const id=String(req.params.id||'');if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Invalid order ID.'});
