@@ -11112,9 +11112,11 @@ app.post('/api/renewed/customer-returns', renewedCustomerSession, async (req, re
                     i.product_id,i.product_name,i.quantity AS purchased_quantity,i.seller_id
              FROM public.renewed_orders o
              JOIN public.renewed_order_items i ON i.order_id = o.id
-             WHERE o.id = ? AND o.customer_id = ? AND i.product_id = ?
+             WHERE o.id = ?
+               AND (o.customer_id = ? OR o.customer_phone = ?)
+               AND i.product_id::text = ?::text
              LIMIT 1`,
-            [orderId, req.renewedCustomerId, productId]
+            [orderId, req.renewedCustomerId, req.renewedCustomerPhone, productId]
         );
 
         if (!purchased.length) {
