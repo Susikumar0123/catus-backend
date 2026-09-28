@@ -10299,9 +10299,11 @@ if (
         quantity,
         line_total,
         warranty_days_at_purchase,
-        seller_id
+        seller_id,
+        prepaid_discount_at_purchase,
+        discounted_line_total
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [
         id,
         item.id,
@@ -10310,7 +10312,9 @@ if (
         item.qty,
         item.line,
         item.warranty_days,
-        item.seller_id
+        item.seller_id,
+        0,
+        item.line
     ]
 );
         }
