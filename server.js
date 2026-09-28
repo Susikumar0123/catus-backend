@@ -11736,6 +11736,35 @@ AND c.approval_status = 'approved'
     return rows[0].seller_id;
 }
 
+// CEROOD SELLER PREPAID DISCOUNT — shared by Beauty + Fashion online checkout.
+// Seller ownership is resolved on the server. Browser-supplied discount values are never trusted.
+async function ceroodApplyMarketplacePrepaidDiscount(client, marketplace, totals) {
+    if (!client || !['cosmetics', 'clothing'].includes(marketplace)) return totals;
+    let discount = 0;
+    for (const line of totals.items || []) {
+        const sellerId = await ceroodFindMarketplaceSeller(client, marketplace, line.product_id);
+        if (!sellerId) continue;
+        const rows = await client.query(
+            `SELECT prepaid_discount
+             FROM public.cerood_seller_rto_discounts
+             WHERE seller_id = $1
+               AND marketplace = $2
+               AND product_id = $3
+               AND is_active = true
+             LIMIT 1`,
+            [sellerId, marketplace, String(line.product_id)]
+        );
+        const raw = Number(rows[0]?.prepaid_discount || 0);
+        const perUnit = Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0;
+        const safePerUnit = Math.min(perUnit, Math.max(0, Number(line.unit_price) - 1));
+        discount += safePerUnit * Number(line.quantity || 0);
+    }
+    if (!Number.isSafeInteger(discount) || discount < 0 || discount >= Number(totals.subtotal)) {
+        if (discount !== 0) throw new Error('Invalid prepaid discount.');
+    }
+    return {...totals, discount, total: Number(totals.subtotal) - discount + Number(totals.delivery_fee)};
+}
+
 // CEROOD BEAUTY — Phase 2: server-priced quote and atomic COD checkout.
 // Online payments remain OFF until a dedicated, verified Razorpay flow is tested.
 const beautyFee = () => { const n=Number(process.env.COSMETICS_INDIA_DELIVERY_FEE ?? 79); return Number.isSafeInteger(n)&&n>=0&&n<=10000?n:79; };
@@ -11767,7 +11796,7 @@ app.get('/api/cosmetics/checkout-status', (req, res) => res.json({
     live_checkout: beautyCodOn() || beautyOnlineOn()
 }));
 app.post('/api/cosmetics/quote',async(req,res)=>{
- res.set('Cache-Control','no-store');try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);return res.json({success:true,...beautyTotals(products,counts),cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn()});}catch(e){return beautyErr(res,e);}
+ res.set('Cache-Control','no-store');let client;try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);let totals=beautyTotals(products,counts);if(String(req.body?.payment_method||'cod').toLowerCase()==='online'){client=await db.getClient();totals=await ceroodApplyMarketplacePrepaidDiscount(client,'cosmetics',totals);}return res.json({success:true,...totals,cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn()});}catch(e){return beautyErr(res,e);}finally{if(client)client.release();}
 });
 app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
  res.set('Cache-Control','no-store');if(!beautyCodOn())return res.status(503).json({success:false,message:'Beauty checkout is not live yet.'});
@@ -11887,7 +11916,8 @@ app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
   const ids=[...counts.keys()];
   const products=await client.query(`SELECT id,name,variant,price,stock,status,expiry_date
     FROM public.cosmetics_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE`,[ids]);
-  const totals=beautyTotals(products,counts);
+  let totals=beautyTotals(products,counts);
+  totals=await ceroodApplyMarketplacePrepaidDiscount(client,'cosmetics',totals);
   const amount=totals.total*100;
   if(!Number.isSafeInteger(amount)||amount<100)throw Object.assign(new Error('Invalid online payment amount.'),{httpStatus:400});
   // Razorpay order amount is computed on the server, never trusted from browser.
@@ -12188,7 +12218,7 @@ app.get('/api/clothing/checkout-status', (req, res) => res.json({
     delivery_fee: SHOPPING_DELIVERY_CHARGE,
     free_delivery_minimum: SHOPPING_FREE_DELIVERY_MINIMUM
 }));
-app.post('/api/clothing/quote',async(req,res)=>{res.set('Cache-Control','no-store');try{const {counts}=fashionRequest(req.body||{}),ids=[...counts.keys()];const rows=await clothingDb(`SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);res.json({success:true,...fashionTotals(rows,counts),cod_enabled:fashionCodOn(),online_enabled:fashionOnlineOn()});}catch(e){fashionFail(res,e);}});
+app.post('/api/clothing/quote',async(req,res)=>{res.set('Cache-Control','no-store');let c;try{const {counts}=fashionRequest(req.body||{}),ids=[...counts.keys()];const rows=await clothingDb(`SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);let totals=fashionTotals(rows,counts);if(String(req.body?.payment_method||'cod').toLowerCase()==='online'){c=await db.getClient();totals=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',totals);}res.json({success:true,...totals,cod_enabled:fashionCodOn(),online_enabled:fashionOnlineOn()});}catch(e){fashionFail(res,e);}finally{if(c)c.release();}});
 app.post('/api/clothing/place-cod-order',async(req,res)=>{
  res.set('Cache-Control','no-store');if(!fashionCodOn())return res.status(503).json({success:false,message:'Fashion COD is not enabled yet.'});let c;
  try{const {address,counts}=fashionRequest(req.body||{}),id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address);
@@ -12261,9 +12291,9 @@ app.post('/api/clothing/create-razorpay-order',async(req,res)=>{
  try{const {address,counts}=fashionRequest(req.body||{}),id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address);
  c=await db.getClient();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await c.query('SELECT id,customer_phone,payment_method,payment_status,razorpay_order_id,total FROM public.clothing_orders WHERE id=$1 FOR UPDATE',[id]);
  if(existing.length){const o=existing[0];await c.query('COMMIT');if(o.customer_phone!==address.phone||o.payment_method!=='razorpay')fashionBad('Checkout request conflict.',409);if(o.payment_status==='paid')return res.json({success:true,already_paid:true,order_id:id,total:Number(o.total)});if(o.payment_status==='payment_review'||!o.razorpay_order_id)fashionBad('Payment requires support review.',409);return res.json({success:true,order_id:id,razorpay_order_id:o.razorpay_order_id,key_id:process.env.RAZORPAY_KEY_ID,amount:Math.round(Number(o.total)*100),currency:'INR',total:Number(o.total)});}
- const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);
+ const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);t=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',t);
  const r=await fashionRazorpay().orders.create({amount:Math.round(t.total*100),currency:'INR',receipt:id,notes:{business:'cerood_fashion',fashion_order_id:id}});
- await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,razorpay_order_id) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,0,$8,'razorpay','pending','pending',$9)`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.total,r.id]);
+ await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,razorpay_order_id) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'razorpay','pending','pending',$10)`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.discount,t.total,r.id]);
  for (const line of t.items) {
 
     const sellerId =
