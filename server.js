@@ -10057,6 +10057,30 @@ return res.json({
 const RENEWED_RESERVE_LOCK = 51029019;
 const RENEWED_RESERVE_MINUTES = 15;
 
+// RENEWED PAYMENT AUDIT: one immutable Cerood transaction ID per Razorpay attempt.
+// renewed_orders remains the source of truth for fulfilment/order state.
+function renewedPaymentTransactionId() {
+    return `CRPAY-${Date.now()}-${crypto.randomBytes(5).toString('hex').toUpperCase()}`;
+}
+
+async function renewedSetPaymentTransaction(client, razorpayOrderId, values = {}) {
+    if (!razorpayOrderId) return [];
+    const status = String(values.status || '').trim();
+    if (!['created','pending','success','failed','cancelled'].includes(status)) return [];
+    return client.query(
+        `UPDATE public.renewed_payment_transactions
+         SET status=$2,
+             razorpay_payment_id=COALESCE($3,razorpay_payment_id),
+             failure_code=$4,
+             failure_reason=$5,
+             updated_at=NOW()
+         WHERE razorpay_order_id=$1
+           AND status <> 'success'
+         RETURNING transaction_id,status,razorpay_order_id,razorpay_payment_id,amount,currency,created_at,updated_at`,
+        [razorpayOrderId,status,values.paymentId || null,values.failureCode || null,values.failureReason || null]
+    );
+}
+
 // Lock + release is performed in one transaction, serializing reserve/release.
 // Payment finalization is idempotent and must run under the global advisory lock.
 async function renewedFinalizePayment(client, orderId, razorpayOrderId, paymentId) {
@@ -10089,6 +10113,11 @@ async function renewedVerifyAndFinalize(razorpayOrderId,paymentId) {
         await client.query('BEGIN');
         await client.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
         const outcome = await renewedFinalizePayment(client,rows[0].id,razorpayOrderId,paymentId);
+        // A captured Razorpay payment is a successful payment transaction even if
+        // the order itself needs manual reconciliation (payment_review).
+        await renewedSetPaymentTransaction(client,razorpayOrderId,{
+            status:'success', paymentId
+        });
         await client.query('COMMIT');
         return outcome;
     } catch(e) {await client.query('ROLLBACK').catch(()=>{});throw e;}
@@ -10550,9 +10579,17 @@ if (
         committedOrderId = orderId;
 
         // Network call is OUTSIDE the DB transaction; ambiguous failures require review, never blind stock release.
+        const transactionId = renewedPaymentTransactionId();
+        await renewedQuery(
+            `INSERT INTO public.renewed_payment_transactions
+             (order_id,transaction_id,amount,currency,status)
+             VALUES (?,?,?,?,?)`,
+            [orderId,transactionId,total,'INR','created']
+        );
+
         const razorpayOrder = await razorpayInstance.orders.create({
             amount:total * 100,currency:'INR',receipt:`renewed_${orderId.slice(0,24)}`,
-            notes:{renewed_order_id:orderId}
+            notes:{renewed_order_id:orderId,cerood_transaction_id:transactionId}
         });
         const updated = await renewedQuery(
     `UPDATE public.renewed_orders
@@ -10569,6 +10606,13 @@ if (
             console.error('RENEWED_ORDER_LINK_REVIEW:', orderId, razorpayOrder.id);
             return res.status(503).json({success:false,message:'Payment preparation needs support review. Do not retry payment.'});
         }
+        await renewedQuery(
+            `UPDATE public.renewed_payment_transactions
+             SET razorpay_order_id=?,status='pending',updated_at=NOW()
+             WHERE transaction_id=? AND order_id=? AND status='created'`,
+            [razorpayOrder.id,transactionId,orderId]
+        );
+
         if (new Date(updated[0].reserved_until).getTime() <= Date.now()) {
             // Keep the Razorpay link for reconciliation, but never offer expired checkout.
             return res.status(409).json({success:false,message:'Reservation timed out. Contact support before retrying.'});
@@ -10580,6 +10624,7 @@ if (
             scope:'renewed_payment_status'},recoverySecret,
             {algorithm:'HS256',expiresIn:'30d',issuer:'cerood-renewed-recovery'});
         return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
+            transaction_id:transactionId,
             amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
             subtotal,delivery_fee:fee,prepaid_discount:prepaidDiscount,total,
             reserved_until:updated[0].reserved_until,recovery_token:recoveryToken});
@@ -10609,6 +10654,48 @@ if (
 // implementation by flipping an environment variable on a LIVE Razorpay account.
 // Future replacement must atomically verify identity, delivery amount, stock,
 // Razorpay order creation and webhook reconciliation before opening checkout.
+// Browser-side audit signal for Razorpay failure or modal dismissal.
+// This NEVER marks an order paid/cancelled and therefore cannot alter stock or fulfilment.
+app.post('/api/renewed/payment-event', async (req,res)=>{
+    res.set('Cache-Control','no-store');
+    try {
+        const transactionId=String(req.body?.transaction_id||'').trim();
+        const razorpayOrderId=String(req.body?.razorpay_order_id||'').trim();
+        const paymentId=String(req.body?.razorpay_payment_id||'').trim() || null;
+        const status=String(req.body?.status||'').trim().toLowerCase();
+        const failureCode=String(req.body?.failure_code||'').trim().slice(0,200) || null;
+        const failureReason=String(req.body?.failure_reason||'').trim().slice(0,1000) || null;
+        if (!/^CRPAY-[A-Za-z0-9-]{10,80}$/.test(transactionId) ||
+            !/^order_[A-Za-z0-9]+$/.test(razorpayOrderId) ||
+            !['failed','cancelled'].includes(status))
+            return res.status(400).json({success:false,message:'Invalid payment event.'});
+
+        const rows=await renewedQuery(
+            `UPDATE public.renewed_payment_transactions
+             SET status=?,razorpay_payment_id=COALESCE(?,razorpay_payment_id),
+                 failure_code=?,failure_reason=?,updated_at=NOW()
+             WHERE transaction_id=? AND razorpay_order_id=? AND status <> 'success'
+             RETURNING transaction_id,status,razorpay_order_id,razorpay_payment_id,amount,currency,created_at,updated_at`,
+            [status,paymentId,failureCode,failureReason,transactionId,razorpayOrderId]
+        );
+        if(!rows.length) {
+            const existing=await renewedQuery(
+                `SELECT transaction_id,status,razorpay_order_id,razorpay_payment_id,amount,currency,created_at,updated_at
+                 FROM public.renewed_payment_transactions
+                 WHERE transaction_id=? AND razorpay_order_id=? LIMIT 1`,
+                [transactionId,razorpayOrderId]
+            );
+            if(existing.length && existing[0].status==='success')
+                return res.json({success:true,transaction:existing[0],ignored:true});
+            return res.status(404).json({success:false,message:'Payment transaction not found.'});
+        }
+        return res.json({success:true,transaction:rows[0]});
+    } catch(e) {
+        console.error('Renewed payment event:',e.message);
+        return res.status(503).json({success:false,message:'Unable to record payment event.'});
+    }
+});
+
 // Customer callback: signature plus server-side payment fetch; never trust client success alone.
 app.post('/api/renewed/verify-payment',async(req,res)=>{
     res.set('Cache-Control','no-store');
@@ -10622,7 +10709,13 @@ app.post('/api/renewed/verify-payment',async(req,res)=>{
             !crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))
             return res.status(401).json({success:false,message:'Invalid payment signature.'});
         const result=await renewedVerifyAndFinalize(orderId,paymentId);
+        const txRows=await renewedQuery(
+            `SELECT transaction_id,status,razorpay_order_id,razorpay_payment_id,amount,currency,created_at,updated_at
+             FROM public.renewed_payment_transactions WHERE razorpay_order_id=? ORDER BY created_at DESC LIMIT 1`,
+            [orderId]
+        );
         return res.status(result==='paid'?200:409).json({success:result==='paid',status:result,
+            transaction:txRows[0] || null,
             message:result==='paid'?'Payment verified.': 'Payment requires reconciliation; contact support if debited.'});
     }catch(e){console.error('Renewed payment verification:',e.message);
         return res.status(503).json({success:false,message:'Verification pending. If debited, do not pay again; contact support.'});}
@@ -10641,8 +10734,28 @@ app.post('/api/renewed/razorpay-webhook',async(req,res)=>{
         if (!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(sig,'hex')))
             return res.status(401).json({success:false});
         const event=JSON.parse(req.body.toString('utf8'));
-        if (event.event !== 'payment.captured') return res.json({success:true,ignored:true});
         const payment=event.payload?.payment?.entity;
+
+        if (event.event === 'payment.failed') {
+            if (!payment?.order_id) return res.json({success:true,ignored:true});
+            const client=await db.getClient();
+            try {
+                await client.query('BEGIN');
+                await renewedSetPaymentTransaction(client,payment.order_id,{
+                    status:'failed',
+                    paymentId:payment.id || null,
+                    failureCode:payment.error_code || null,
+                    failureReason:payment.error_description || payment.error_reason || 'Razorpay payment failed'
+                });
+                await client.query('COMMIT');
+            } catch(err) {
+                await client.query('ROLLBACK').catch(()=>{});
+                throw err;
+            } finally { client.release(); }
+            return res.json({success:true,status:'failed'});
+        }
+
+        if (event.event !== 'payment.captured') return res.json({success:true,ignored:true});
         if (!payment?.id || !payment?.order_id) return res.status(400).json({success:false});
         const result=await renewedVerifyAndFinalize(payment.order_id,payment.id);
         // Unknown orders may belong to Doorstep checkout: ignore.
