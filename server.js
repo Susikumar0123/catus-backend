@@ -3505,6 +3505,368 @@ require('./cerood-seller-orders')(
 );
 
 
+
+// ==========================================
+// CEROOD SELLER RTO DISCOUNTS
+// Permanent DB-backed seller discounts.
+// ==========================================
+
+// Get all saved RTO / prepaid discounts for the logged-in seller.
+app.get('/api/sellers/rto-discounts', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    try {
+        const sellerId = String(
+            req.seller?.id ||
+            req.seller?.seller_id ||
+            ''
+        ).trim();
+
+        if (!sellerId) {
+            return res.status(401).json({
+                success: false,
+                message: 'Seller authentication required.'
+            });
+        }
+
+        const rows = await db.query(
+            `
+            SELECT
+                id,
+                seller_id,
+                product_id,
+                marketplace,
+                prepaid_discount,
+                return_prevention_offer,
+                is_active,
+                created_at,
+                updated_at
+            FROM public.cerood_seller_rto_discounts
+            WHERE seller_id::text = $1
+            ORDER BY updated_at DESC
+            `,
+            [sellerId]
+        );
+
+        return res.json({
+            success: true,
+            discounts: Array.isArray(rows) ? rows : []
+        });
+
+    } catch (error) {
+        console.error('Get Seller RTO Discounts Error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to load seller discounts.'
+        });
+    }
+});
+
+// Create or update one product discount.
+// The seller ID always comes from authentication, never from the request body.
+app.put('/api/sellers/rto-discounts/:productId', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    try {
+        const sellerId = String(
+            req.seller?.id ||
+            req.seller?.seller_id ||
+            ''
+        ).trim();
+
+        const productId = String(req.params.productId || '').trim();
+        const marketplace = String(req.body?.marketplace || '').trim().toLowerCase();
+
+        const prepaidDiscount = Number(req.body?.prepaid_discount ?? 0);
+        const returnOffer = Number(req.body?.return_prevention_offer ?? 0);
+        const isActive = req.body?.is_active !== false;
+
+        if (!sellerId) {
+            return res.status(401).json({
+                success: false,
+                message: 'Seller authentication required.'
+            });
+        }
+
+        if (!productId) {
+            return res.status(400).json({
+                success: false,
+                message: 'Product ID is required.'
+            });
+        }
+
+        if (!['renewed', 'cosmetics', 'clothing', 'general'].includes(marketplace)) {
+            return res.status(400).json({
+                success: false,
+                message: 'Invalid marketplace.'
+            });
+        }
+
+        if (
+            !Number.isFinite(prepaidDiscount) ||
+            !Number.isFinite(returnOffer) ||
+            prepaidDiscount < 0 ||
+            returnOffer < 0
+        ) {
+            return res.status(400).json({
+                success: false,
+                message: 'Discount amounts must be valid non-negative numbers.'
+            });
+        }
+
+        const rows = await db.query(
+            `
+            INSERT INTO public.cerood_seller_rto_discounts (
+                seller_id,
+                product_id,
+                marketplace,
+                prepaid_discount,
+                return_prevention_offer,
+                is_active,
+                created_at,
+                updated_at
+            )
+            VALUES ($1::uuid, $2, $3, $4, $5, $6, now(), now())
+            ON CONFLICT (seller_id, product_id, marketplace)
+            DO UPDATE SET
+                prepaid_discount = EXCLUDED.prepaid_discount,
+                return_prevention_offer = EXCLUDED.return_prevention_offer,
+                is_active = EXCLUDED.is_active,
+                updated_at = now()
+            RETURNING
+                id,
+                seller_id,
+                product_id,
+                marketplace,
+                prepaid_discount,
+                return_prevention_offer,
+                is_active,
+                created_at,
+                updated_at
+            `,
+            [
+                sellerId,
+                productId,
+                marketplace,
+                prepaidDiscount,
+                returnOffer,
+                isActive
+            ]
+        );
+
+        return res.json({
+            success: true,
+            message: 'Discount saved successfully.',
+            discount: rows?.[0] || null
+        });
+
+    } catch (error) {
+        console.error('Save Seller RTO Discount Error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to save seller discount.'
+        });
+    }
+});
+
+// Remove one seller discount.
+app.delete('/api/sellers/rto-discounts/:productId', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    try {
+        const sellerId = String(
+            req.seller?.id ||
+            req.seller?.seller_id ||
+            ''
+        ).trim();
+
+        const productId = String(req.params.productId || '').trim();
+        const marketplace = String(req.query?.marketplace || '').trim().toLowerCase();
+
+        if (!sellerId) {
+            return res.status(401).json({
+                success: false,
+                message: 'Seller authentication required.'
+            });
+        }
+
+        if (!productId || !marketplace) {
+            return res.status(400).json({
+                success: false,
+                message: 'Product ID and marketplace are required.'
+            });
+        }
+
+        const rows = await db.query(
+            `
+            DELETE FROM public.cerood_seller_rto_discounts
+            WHERE seller_id::text = $1
+              AND product_id = $2
+              AND marketplace = $3
+            RETURNING id
+            `,
+            [sellerId, productId, marketplace]
+        );
+
+        return res.json({
+            success: true,
+            removed: Array.isArray(rows) && rows.length > 0
+        });
+
+    } catch (error) {
+        console.error('Delete Seller RTO Discount Error:', error.message);
+
+        return res.status(500).json({
+            success: false,
+            message: 'Unable to remove seller discount.'
+        });
+    }
+});
+
+// ==========================================
+// CEROOD SELLER RTO / RETURN METRICS
+// Uses final fulfillment_outcome values from Renewed orders.
+// Percentages are calculated by the server; sellers cannot set them.
+// ==========================================
+app.get('/api/sellers/rto-metrics', requireSellerAuth, async (req, res) => {
+
+    res.set('Cache-Control', 'no-store');
+
+    let client;
+
+    try {
+
+        const sellerId = String(
+            req.seller?.id ||
+            req.seller?.seller_id ||
+            ''
+        ).trim();
+
+        if (!sellerId) {
+            return res.status(401).json({
+                success: false,
+                message: 'Seller authentication required.'
+            });
+        }
+
+        client = await db.getClient();
+
+        const rows = await client.query(
+            `
+            WITH seller_orders AS (
+                SELECT DISTINCT
+                    o.id,
+                    LOWER(COALESCE(o.payment_method, '')) AS payment_method,
+                    LOWER(COALESCE(o.fulfillment_outcome, '')) AS fulfillment_outcome
+                FROM public.renewed_orders o
+                INNER JOIN public.renewed_order_items i
+                    ON i.order_id = o.id
+                WHERE i.seller_id::text = $1
+                  AND LOWER(COALESCE(o.fulfillment_outcome, '')) IN (
+                      'delivered',
+                      'rto',
+                      'customer_returned'
+                  )
+            )
+            SELECT
+                COUNT(*) FILTER (
+                    WHERE payment_method = 'cod'
+                )::int AS cod_finalized_orders,
+
+                COUNT(*) FILTER (
+                    WHERE payment_method = 'cod'
+                      AND fulfillment_outcome = 'rto'
+                )::int AS cod_rto_orders,
+
+                COUNT(*) FILTER (
+                    WHERE payment_method <> 'cod'
+                )::int AS prepaid_finalized_orders,
+
+                COUNT(*) FILTER (
+                    WHERE payment_method <> 'cod'
+                      AND fulfillment_outcome = 'rto'
+                )::int AS prepaid_rto_orders,
+
+                COUNT(*) FILTER (
+                    WHERE fulfillment_outcome IN (
+                        'delivered',
+                        'customer_returned'
+                    )
+                )::int AS delivered_orders,
+
+                COUNT(*) FILTER (
+                    WHERE fulfillment_outcome = 'customer_returned'
+                )::int AS customer_returned_orders
+
+            FROM seller_orders
+            `,
+            [sellerId]
+        );
+
+        const m = rows?.[0] || {};
+
+        const codFinalized = Number(m.cod_finalized_orders) || 0;
+        const codRto = Number(m.cod_rto_orders) || 0;
+        const prepaidFinalized = Number(m.prepaid_finalized_orders) || 0;
+        const prepaidRto = Number(m.prepaid_rto_orders) || 0;
+        const delivered = Number(m.delivered_orders) || 0;
+        const customerReturned = Number(m.customer_returned_orders) || 0;
+
+        const pct = (part, total) =>
+            total > 0
+                ? Number(((part / total) * 100).toFixed(2))
+                : 0;
+
+        return res.json({
+            success: true,
+            scope: 'renewed',
+            metrics: {
+                cod_rto_rate: pct(codRto, codFinalized),
+                prepaid_rto_rate: pct(prepaidRto, prepaidFinalized),
+                customer_return_rate: pct(customerReturned, delivered)
+            },
+            counts: {
+                cod_finalized_orders: codFinalized,
+                cod_rto_orders: codRto,
+                prepaid_finalized_orders: prepaidFinalized,
+                prepaid_rto_orders: prepaidRto,
+                delivered_orders: delivered,
+                customer_returned_orders: customerReturned
+            },
+            calculation: {
+                cod_rto_rate:
+                    'COD RTO orders / finalized COD orders × 100',
+                prepaid_rto_rate:
+                    'Prepaid RTO orders / finalized prepaid orders × 100',
+                customer_return_rate:
+                    'Customer-returned orders / delivered outcomes × 100'
+            }
+        });
+
+    } catch (error) {
+
+        console.error(
+            'Seller RTO Metrics Error:',
+            error.message
+        );
+
+        return res.status(500).json({
+            success: false,
+            message:
+                'Unable to calculate seller RTO metrics.'
+        });
+
+    } finally {
+
+        if (client) {
+            client.release();
+        }
+    }
+});
+
+
 // ==========================================
 // CEROOD SELLER MEDIA UPLOAD
 // ==========================================
@@ -10027,17 +10389,58 @@ if (
     seller_id: p.seller_id || null
 });
         }
+        // ONLINE ONLY: apply the seller's active Renewed prepaid discount.
+        // Never trust a discount amount from the browser.
+        const discountRows = await client.query(
+            `SELECT seller_id::text AS seller_id, product_id, prepaid_discount
+             FROM public.cerood_seller_rto_discounts
+             WHERE marketplace = 'renewed'
+               AND is_active = true
+               AND product_id = ANY($1::text[])`,
+            [sortedIds]
+        );
+
+        const discountByProduct = new Map(
+            discountRows.map(row => [
+                `${String(row.seller_id || '')}:${String(row.product_id)}`,
+                Number(row.prepaid_discount || 0)
+            ])
+        );
+
+        let prepaidDiscount = 0;
+        for (const item of orderItems) {
+            const sellerKey = String(item.seller_id || '');
+            const rawDiscount = sellerKey
+                ? Number(discountByProduct.get(`${sellerKey}:${item.id}`) || 0)
+                : 0;
+
+            // Renewed prices are whole rupees. Keep discount whole-rupee too and
+            // never allow the discount to make an item free/negative.
+            const unitDiscount = Number.isFinite(rawDiscount)
+                ? Math.max(0, Math.floor(rawDiscount))
+                : 0;
+            const safeUnitDiscount = Math.min(unitDiscount, Math.max(0, item.unit - 1));
+
+            item.prepaid_discount_per_unit = safeUnitDiscount;
+            item.prepaid_discount_total = safeUnitDiscount * item.qty;
+            item.discounted_line_total = item.line - item.prepaid_discount_total;
+            prepaidDiscount += item.prepaid_discount_total;
+        }
+
+        if (!Number.isSafeInteger(prepaidDiscount) || prepaidDiscount < 0 || prepaidDiscount >= subtotal) {
+            if (prepaidDiscount !== 0) throw new Error('Invalid prepaid discount.');
+        }
+
         const fee = ceroodShoppingDeliveryFee(subtotal);
+        const total = subtotal - prepaidDiscount + fee;
 
-const total = subtotal + fee;
-
-if (
-    !Number.isSafeInteger(total) ||
-    total < 1 ||
-    total > 10000000
-) {
-    throw new Error('Invalid payment amount.');
-}
+        if (
+            !Number.isSafeInteger(total) ||
+            total < 1 ||
+            total > 10000000
+        ) {
+            throw new Error('Invalid payment amount.');
+        }
         const orderId = crypto.randomUUID();
         const savedAddress = {
     full_name: fullName,
@@ -10051,11 +10454,11 @@ if (
         await client.query(
             `INSERT INTO public.renewed_orders
              (id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
-              subtotal,delivery_fee,total,currency,status,reserved_until)
-             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','creating_order',
+              subtotal,delivery_fee,discount,total,currency,status,reserved_until)
+             VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,$10,'INR','creating_order',
         NOW() + INTERVAL '15 minutes')`,
             [orderId,guestCheckout?null:String(users[0].id),fullName,verifiedPhone,guestCheckout?null:(users[0].email || null),
-             JSON.stringify(savedAddress),subtotal,fee,total]);
+             JSON.stringify(savedAddress),subtotal,fee,prepaidDiscount,total]);
         for (const item of orderItems) {
             const reduced = await client.query(
                 `UPDATE public.renewed_products SET stock = stock - $1,updated_at = NOW()
@@ -10072,9 +10475,11 @@ if (
         quantity,
         line_total,
         warranty_days_at_purchase,
-        seller_id
+        seller_id,
+        prepaid_discount_at_purchase,
+        discounted_line_total
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8)`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
     [
         orderId,
         item.id,
@@ -10083,7 +10488,9 @@ if (
         item.qty,
         item.line,
         item.warranty_days,
-        item.seller_id
+        item.seller_id,
+        item.prepaid_discount_total || 0,
+        item.discounted_line_total ?? item.line
     ]
 );
         }
@@ -10123,6 +10530,7 @@ if (
             {algorithm:'HS256',expiresIn:'30d',issuer:'cerood-renewed-recovery'});
         return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
             amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
+            subtotal,delivery_fee:fee,prepaid_discount:prepaidDiscount,total,
             reserved_until:updated[0].reserved_until,recovery_token:recoveryToken});
     } catch (e) {
         if (client) {
