@@ -767,6 +767,50 @@ module.exports = function (
 
   // ============================================================
 
+  // SELLER: MAIN STORE CATEGORY SCHEMAS
+
+  // ============================================================
+
+  app.get(
+    '/api/sellers/shop-categories',
+    requireSellerAuth,
+    async (req, res) => {
+      try {
+        const marketplace = cleanText(req.query.marketplace || 'general', 50);
+
+        if (marketplace !== 'general') {
+          throw badRequest('This category endpoint currently supports Cerood Main Store only.');
+        }
+
+        const categories = await query(
+          `
+            SELECT
+              id, marketplace, parent_id, name, slug,
+              attribute_schema, sort_order
+            FROM public.cerood_shop_categories
+            WHERE marketplace = 'general'
+              AND is_active = true
+            ORDER BY sort_order ASC, name ASC
+          `
+        );
+
+        return res.json({
+          success: true,
+          categories: categories.map(category => ({
+            ...category,
+            attribute_schema: Array.isArray(category.attribute_schema)
+              ? category.attribute_schema
+              : []
+          }))
+        });
+      } catch (error) {
+        return handleError(res, error);
+      }
+    }
+  );
+
+  // ============================================================
+
   // SELLER: GET ALL SUBMISSIONS
 
   // ============================================================
