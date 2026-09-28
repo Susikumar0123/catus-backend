@@ -133,6 +133,171 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
     };
   }
 
+  // Dynamic Renewed category master for Seller Dashboard.
+  // Reads the relational category/attribute/image-slot tables created for CEROOD Renewed.
+  app.get('/api/sellers/renewed-categories',requireSellerAuth,async(req,res)=>{
+    try {
+      const categories = await query(
+        `SELECT id,marketplace,parent_id,name,slug,sort_order
+         FROM public.cerood_product_categories
+         WHERE marketplace='renewed' AND is_active=true
+         ORDER BY sort_order ASC,name ASC`
+      );
+
+      const attributes = await query(
+        `SELECT a.id,a.category_id,a.attribute_key,a.label,a.input_type,a.unit,
+                a.options,a.placeholder,a.is_required,a.is_variant,a.sort_order
+         FROM public.cerood_product_attributes a
+         JOIN public.cerood_product_categories c ON c.id=a.category_id
+         WHERE c.marketplace='renewed' AND c.is_active=true AND a.is_active=true
+         ORDER BY a.category_id,a.sort_order ASC,a.label ASC`
+      );
+
+      const imageSlots = await query(
+        `SELECT i.id,i.category_id,i.slot_key,i.label,i.description,
+                i.is_required,i.sort_order
+         FROM public.cerood_category_image_slots i
+         JOIN public.cerood_product_categories c ON c.id=i.category_id
+         WHERE c.marketplace='renewed' AND c.is_active=true AND i.is_active=true
+         ORDER BY i.category_id,i.sort_order ASC,i.label ASC`
+      );
+
+      const attrsByCategory = new Map();
+      for (const row of attributes) {
+        const key=String(row.category_id);
+        if (!attrsByCategory.has(key)) attrsByCategory.set(key,[]);
+        attrsByCategory.get(key).push(row);
+      }
+
+      const imagesByCategory = new Map();
+      for (const row of imageSlots) {
+        const key=String(row.category_id);
+        if (!imagesByCategory.has(key)) imagesByCategory.set(key,[]);
+        imagesByCategory.get(key).push(row);
+      }
+
+      const result = categories.map(category => ({
+        ...category,
+        attributes: attrsByCategory.get(String(category.id)) || [],
+        image_slots: imagesByCategory.get(String(category.id)) || []
+      }));
+
+      res.json({success:true,categories:result});
+    } catch(e) {
+      err(res,e);
+    }
+  });
+
+  // Validate and persist optional dynamic Renewed catalog data.
+  // Legacy seller forms can omit these fields and continue working unchanged.
+  async function prepareDynamicCatalog(body) {
+    const categoryId=String(body?.category_id||'').trim();
+    if (!categoryId) return null;
+    if (!uuid(categoryId)) throw bad('Invalid Renewed category ID.');
+
+    const categoryRows=await query(
+      `SELECT id,name,slug,parent_id
+       FROM public.cerood_product_categories
+       WHERE id=? AND marketplace='renewed' AND is_active=true
+       LIMIT 1`,
+      [categoryId]
+    );
+    if (!categoryRows.length) throw bad('Choose an active Renewed category.');
+
+    const category=categoryRows[0];
+    const attributeRows=await query(
+      `SELECT id,attribute_key,label,input_type,is_required,is_variant
+       FROM public.cerood_product_attributes
+       WHERE category_id=? AND is_active=true
+       ORDER BY sort_order ASC,label ASC`,
+      [categoryId]
+    );
+    const slotRows=await query(
+      `SELECT slot_key,label,is_required
+       FROM public.cerood_category_image_slots
+       WHERE category_id=? AND is_active=true
+       ORDER BY sort_order ASC,label ASC`,
+      [categoryId]
+    );
+
+    const rawAttrs=(body?.product_attributes && typeof body.product_attributes==='object' && !Array.isArray(body.product_attributes))
+      ? body.product_attributes : {};
+    const rawImages=(body?.product_images && typeof body.product_images==='object' && !Array.isArray(body.product_images))
+      ? body.product_images : {};
+    const rawVariants=Array.isArray(body?.product_variants) ? body.product_variants : [];
+
+    const attributes=[];
+    for (const a of attributeRows) {
+      const value=rawAttrs[a.attribute_key];
+      const empty=value===undefined || value===null || value==='' || (Array.isArray(value)&&!value.length);
+      if (a.is_required && empty) throw bad(`${a.label} is required.`);
+      if (!empty) attributes.push({attribute_id:a.id,value});
+    }
+
+    const allowedSlots=new Map(slotRows.map(x=>[String(x.slot_key),x]));
+    const images=[];
+    for (const slot of slotRows) {
+      const value=String(rawImages[slot.slot_key]||'').trim();
+      if (slot.is_required && !value) throw bad(`${slot.label} image is required.`);
+      if (value) {
+        if (!/^https:\/\//i.test(value)) throw bad(`${slot.label} image must use HTTPS.`);
+        images.push({slot_key:slot.slot_key,image_url:value});
+      }
+    }
+    // Ignore gallery here; gallery is not a configured category image slot.
+    for (const key of Object.keys(rawImages)) {
+      if (key==='gallery') continue;
+      if (!allowedSlots.has(key)) throw bad('Invalid Renewed product image slot.');
+    }
+
+    const variants=rawVariants.slice(0,250).map((v,index)=>{
+      const values=(v?.variant_values && typeof v.variant_values==='object' && !Array.isArray(v.variant_values)) ? v.variant_values : {};
+      const sku=String(v?.sku||'').trim().slice(0,120) || null;
+      const price=v?.price===''||v?.price==null ? null : Number(v.price);
+      const compare=v?.compare_price===''||v?.compare_price==null ? null : Number(v.compare_price);
+      const stock=Number(v?.stock??0);
+      if (price!==null && (!Number.isFinite(price)||price<0)) throw bad(`Invalid variant price at row ${index+1}.`);
+      if (compare!==null && (!Number.isFinite(compare)||compare<0)) throw bad(`Invalid variant compare price at row ${index+1}.`);
+      if (!Number.isSafeInteger(stock)||stock<0||stock>1000000) throw bad(`Invalid variant stock at row ${index+1}.`);
+      return {sku,variant_values:values,price,compare_price:compare,stock};
+    });
+
+    return {category,attributes,images,variants};
+  }
+
+  async function replaceDynamicCatalog(productId,dynamic) {
+    if (!dynamic) return;
+    await query(`DELETE FROM public.cerood_product_attribute_values WHERE marketplace='renewed' AND product_id=?`,[productId]);
+    await query(`DELETE FROM public.cerood_product_images WHERE marketplace='renewed' AND product_id=?`,[productId]);
+    await query(`DELETE FROM public.cerood_product_variants WHERE marketplace='renewed' AND product_id=?`,[productId]);
+
+    for (const a of dynamic.attributes) {
+      await query(
+        `INSERT INTO public.cerood_product_attribute_values
+         (marketplace,product_id,attribute_id,value)
+         VALUES ('renewed',?,?,?::jsonb)`,
+        [productId,a.attribute_id,JSON.stringify(a.value)]
+      );
+    }
+    for (let i=0;i<dynamic.images.length;i++) {
+      const img=dynamic.images[i];
+      await query(
+        `INSERT INTO public.cerood_product_images
+         (marketplace,product_id,slot_key,image_url,sort_order)
+         VALUES ('renewed',?,?,?,?)`,
+        [productId,img.slot_key,img.image_url,(i+1)*10]
+      );
+    }
+    for (const v of dynamic.variants) {
+      await query(
+        `INSERT INTO public.cerood_product_variants
+         (marketplace,product_id,sku,variant_values,price,compare_price,stock,is_active)
+         VALUES ('renewed',?,?,?::jsonb,?,?,?,true)`,
+        [productId,v.sku,JSON.stringify(v.variant_values),v.price,v.compare_price,v.stock]
+      );
+    }
+  }
+
   // Sellers can read ONLY their own inventory.
   app.get('/api/sellers/products',requireSellerAuth,async(req,res)=>{
     try {
@@ -154,7 +319,9 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
   // Create as DRAFT + PENDING, never immediately visible in customer store.
   app.post('/api/sellers/products',requireSellerAuth,async(req,res)=>{
     try {
+      const dynamic = await prepareDynamicCatalog(req.body || {});
       const p = clean(req.body || {}, req.seller.id);
+      if (dynamic) p.category = String(dynamic.category.slug || p.category).slice(0,40);
       const keys = Object.keys(p);
       const id = crypto.randomUUID();
 
@@ -166,6 +333,14 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
          RETURNING ${fields}`,
         [id,req.seller.id,...Object.values(p)]
       );
+
+      try {
+        await replaceDynamicCatalog(id,dynamic);
+      } catch (dynamicError) {
+        // Do not leave a half-created product when its dynamic catalog data fails.
+        await query(`DELETE FROM public.renewed_products WHERE id=? AND seller_id=?`,[id,req.seller.id]).catch(()=>{});
+        throw dynamicError;
+      }
 
       res.status(201).json({
         success:true,
@@ -183,7 +358,9 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
         throw bad('Invalid product ID.');
       }
 
+      const dynamic = await prepareDynamicCatalog(req.body || {});
       const p = clean(req.body || {}, req.seller.id);
+      if (dynamic) p.category = String(dynamic.category.slug || p.category).slice(0,40);
       const keys = Object.keys(p);
 
       const products = await query(
@@ -203,6 +380,8 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
           message:'Your product was not found.'
         });
       }
+
+      await replaceDynamicCatalog(req.params.id,dynamic);
 
       res.json({
         success:true,
