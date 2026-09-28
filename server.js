@@ -11474,12 +11474,13 @@ app.post('/api/renewed/guest-payment-status',async(req,res)=>{
             !/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(String(claim.order_id||'')) ||
             !/^order_[a-zA-Z0-9]+$/.test(String(claim.razorpay_order_id||'')))
             return res.status(401).json({success:false,message:'Invalid recovery authorization.'});
-        const rows=await renewedQuery(`SELECT id,status,total,currency,paid_at
+        const rows=await renewedQuery(`SELECT id,status,subtotal,delivery_fee,discount,total,currency,paid_at
             FROM public.renewed_orders WHERE id=? AND razorpay_order_id=? LIMIT 1`,
             [claim.order_id,claim.razorpay_order_id]);
         if(!rows.length)return res.status(404).json({success:false,message:'Order not found. Contact Cerood.'});
         const o=rows[0];
-        return res.json({success:true,order:{id:o.id,status:o.status,total:o.total,currency:o.currency,paid_at:o.paid_at}});
+        return res.json({success:true,order:{id:o.id,status:o.status,subtotal:o.subtotal,delivery_fee:o.delivery_fee,
+            prepaid_discount:o.discount,total:o.total,currency:o.currency,paid_at:o.paid_at}});
     }catch(e){
         if(e.name==='JsonWebTokenError'||e.name==='TokenExpiredError'||e.name==='NotBeforeError')
             return res.status(401).json({success:false,message:'Recovery authorization expired or invalid. Contact Cerood with the order ID.'});
