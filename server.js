@@ -3511,6 +3511,13 @@ require('./cerood-seller-orders')(
 // Permanent DB-backed seller discounts.
 // ==========================================
 
+// Promise wrapper for the existing callback-based DB adapter.
+// IMPORTANT: db.query() itself is not Promise-based in this project, so
+// `await db.query(...)` can return before rows are available.
+const sellerRtoQuery = (sql, params = []) => new Promise((resolve, reject) => {
+    db.query(sql, params, (error, rows) => error ? reject(error) : resolve(rows || []));
+});
+
 // Get all saved RTO / prepaid discounts for the logged-in seller.
 app.get('/api/sellers/rto-discounts', requireSellerAuth, async (req, res) => {
     res.set('Cache-Control', 'no-store');
@@ -3529,7 +3536,7 @@ app.get('/api/sellers/rto-discounts', requireSellerAuth, async (req, res) => {
             });
         }
 
-        const rows = await db.query(
+        const rows = await sellerRtoQuery(
             `
             SELECT
                 id,
@@ -3615,7 +3622,7 @@ app.put('/api/sellers/rto-discounts/:productId', requireSellerAuth, async (req, 
             });
         }
 
-        const rows = await db.query(
+        const rows = await sellerRtoQuery(
             `
             INSERT INTO public.cerood_seller_rto_discounts (
                 seller_id,
@@ -3699,7 +3706,7 @@ app.delete('/api/sellers/rto-discounts/:productId', requireSellerAuth, async (re
             });
         }
 
-        const rows = await db.query(
+        const rows = await sellerRtoQuery(
             `
             DELETE FROM public.cerood_seller_rto_discounts
             WHERE seller_id::text = $1
