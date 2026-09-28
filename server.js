@@ -10067,15 +10067,26 @@ async function renewedSetPaymentTransaction(client, razorpayOrderId, values = {}
     if (!razorpayOrderId) return [];
     const status = String(values.status || '').trim();
     if (!['created','pending','success','failed','cancelled'].includes(status)) return [];
+
+    // One Razorpay order may be reopened for multiple customer attempts.
+    // Update ONLY the newest still-open Cerood attempt so older failed/cancelled
+    // history remains immutable instead of being overwritten.
     return client.query(
-        `UPDATE public.renewed_payment_transactions
+        `UPDATE public.renewed_payment_transactions t
          SET status=$2,
-             razorpay_payment_id=COALESCE($3,razorpay_payment_id),
+             razorpay_payment_id=COALESCE($3,t.razorpay_payment_id),
              failure_code=$4,
              failure_reason=$5,
              updated_at=NOW()
-         WHERE razorpay_order_id=$1
-           AND status <> 'success'
+         WHERE t.id = (
+             SELECT id
+             FROM public.renewed_payment_transactions
+             WHERE razorpay_order_id=$1
+               AND status IN ('created','pending')
+             ORDER BY created_at DESC, id DESC
+             LIMIT 1
+             FOR UPDATE
+         )
          RETURNING transaction_id,status,razorpay_order_id,razorpay_payment_id,amount,currency,created_at,updated_at`,
         [razorpayOrderId,status,values.paymentId || null,values.failureCode || null,values.failureReason || null]
     );
@@ -10645,6 +10656,84 @@ if (
         console.error('Renewed prepare payment:',e.message);
         return res.status(e.status || 503).json({success:false,
             message:e.status ? e.message : 'Unable to prepare payment. Please retry.'});
+    }
+});
+
+// RENEWED PAYMENT RETRY: reopen the SAME Razorpay order, but create a NEW
+// Cerood transaction row for every customer attempt. This avoids duplicate
+// renewed_orders/stock reservations while preserving full attempt history.
+app.post('/api/renewed/retry-payment', async (req,res)=>{
+    res.set('Cache-Control','no-store');
+    const flowReady = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' &&
+        Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
+    if (!flowReady)
+        return res.status(503).json({success:false,message:'Renewed online payment is not enabled.'});
+
+    try {
+        const orderId=String(req.body?.order_id||'').trim();
+        const recoveryToken=String(req.body?.recovery_token||'').trim();
+        if(!/^[0-9a-f-]{36}$/i.test(orderId) || !recoveryToken || recoveryToken.length>4096)
+            return res.status(400).json({success:false,message:'Invalid payment retry request.'});
+
+        const recoverySecret = crypto.createHash('sha256')
+            .update('cerood-renewed-recovery-v1:' + process.env.RAZORPAY_KEY_SECRET).digest();
+        let proof;
+        try {
+            proof=jwt.verify(recoveryToken,recoverySecret,{algorithms:['HS256'],issuer:'cerood-renewed-recovery'});
+        } catch (_) {
+            return res.status(401).json({success:false,message:'Payment retry session expired. Please reopen checkout.'});
+        }
+        if(String(proof?.order_id||'')!==orderId || proof?.scope!=='renewed_payment_status')
+            return res.status(403).json({success:false,message:'Payment retry is not authorized for this order.'});
+
+        const client=await db.getClient();
+        try {
+            await client.query('BEGIN');
+            await client.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
+            const rows=await client.query(
+                `SELECT id,status,total,currency,razorpay_order_id,razorpay_payment_id,reserved_until
+                 FROM public.renewed_orders WHERE id=$1 FOR UPDATE`,[orderId]);
+            const order=rows[0];
+            if(!order) { await client.query('ROLLBACK'); return res.status(404).json({success:false,message:'Order not found.'}); }
+            if(order.status==='paid' || order.razorpay_payment_id) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({success:false,status:'paid',message:'Payment is already completed for this order.'});
+            }
+            if(order.status!=='pending_payment' || !order.razorpay_order_id) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({success:false,status:order.status,message:'This order is not eligible for payment retry.'});
+            }
+
+            // Never create overlapping browser attempts. The previous attempt must
+            // first be failed/cancelled by payment-event or webhook.
+            const open=await client.query(
+                `SELECT transaction_id,status FROM public.renewed_payment_transactions
+                 WHERE order_id=$1 AND razorpay_order_id=$2 AND status IN ('created','pending')
+                 ORDER BY created_at DESC LIMIT 1 FOR UPDATE`,[orderId,order.razorpay_order_id]);
+            if(open.length) {
+                await client.query('ROLLBACK');
+                return res.status(409).json({success:false,status:'pending',message:'A payment attempt is still open. Check payment status before retrying.'});
+            }
+
+            const transactionId=renewedPaymentTransactionId();
+            await client.query(
+                `INSERT INTO public.renewed_payment_transactions
+                 (order_id,transaction_id,razorpay_order_id,amount,currency,status)
+                 VALUES ($1,$2,$3,$4,$5,'pending')`,
+                [orderId,transactionId,order.razorpay_order_id,Number(order.total),order.currency||'INR']);
+            await client.query('COMMIT');
+
+            return res.json({success:true,retry:true,order_id:orderId,
+                razorpay_order_id:order.razorpay_order_id,transaction_id:transactionId,
+                amount:Number(order.total)*100,currency:order.currency||'INR',
+                key_id:process.env.RAZORPAY_KEY_ID,recovery_token:recoveryToken});
+        } catch(e) {
+            await client.query('ROLLBACK').catch(()=>{});
+            throw e;
+        } finally { client.release(); }
+    } catch(e) {
+        console.error('Renewed retry payment:',e.message);
+        return res.status(503).json({success:false,message:'Unable to retry payment right now.'});
     }
 });
 
