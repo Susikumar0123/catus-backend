@@ -11070,6 +11070,231 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
 });
 
+
+// ==========================================
+// CEROOD RENEWED — RETURNS / EXCHANGE / REPLACEMENT
+// Central request workflow.
+// Home Services / Clothing / Cosmetics are NOT modified here.
+// ==========================================
+
+function renewedReturnClean(value, max = 500) {
+    return String(value == null ? '' : value).trim().slice(0, max);
+}
+
+function renewedReturnUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(String(value || ''));
+}
+
+app.post('/api/renewed/customer-returns', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+
+    const orderId = renewedReturnClean(req.body?.order_id, 80);
+    const productId = renewedReturnClean(req.body?.product_id, 120);
+    const requestType = renewedReturnClean(req.body?.request_type, 30).toLowerCase();
+    const reason = renewedReturnClean(req.body?.reason, 160);
+    const details = renewedReturnClean(req.body?.details, 1500);
+    const quantity = Math.max(1, Math.floor(Number(req.body?.quantity) || 1));
+
+    if (!renewedReturnUuid(orderId) || !productId) {
+        return res.status(400).json({ success: false, message: 'Valid order and product are required.' });
+    }
+    if (!['return', 'exchange', 'replacement'].includes(requestType)) {
+        return res.status(400).json({ success: false, message: 'Choose return, exchange or replacement.' });
+    }
+    if (!reason) {
+        return res.status(400).json({ success: false, message: 'Return reason is required.' });
+    }
+
+    try {
+        const purchased = await renewedQuery(
+            `SELECT o.id AS order_id,o.customer_id,o.customer_phone,o.delivery_status,o.delivered_at,
+                    i.product_id,i.product_name,i.quantity AS purchased_quantity,i.seller_id
+             FROM public.renewed_orders o
+             JOIN public.renewed_order_items i ON i.order_id = o.id
+             WHERE o.id = ? AND o.customer_id = ? AND i.product_id = ?
+             LIMIT 1`,
+            [orderId, req.renewedCustomerId, productId]
+        );
+
+        if (!purchased.length) {
+            return res.status(404).json({ success: false, message: 'This product was not found in your order.' });
+        }
+
+        const item = purchased[0];
+
+        if (String(item.delivery_status || '').toLowerCase() !== 'delivered') {
+            return res.status(409).json({ success: false, message: 'A return request can be created after the order is delivered.' });
+        }
+
+        if (quantity > Number(item.purchased_quantity || 0)) {
+            return res.status(400).json({ success: false, message: 'Requested quantity is higher than the purchased quantity.' });
+        }
+
+        const existing = await renewedQuery(
+            `SELECT id,status FROM public.cerood_return_requests
+             WHERE marketplace='renewed' AND order_id=? AND product_id=? AND customer_id=?
+               AND status NOT IN ('rejected','cancelled','closed')
+             LIMIT 1`,
+            [orderId, productId, req.renewedCustomerId]
+        );
+
+        if (existing.length) {
+            return res.status(409).json({
+                success: false,
+                message: 'An active return request already exists for this product.',
+                request_id: existing[0].id,
+                status: existing[0].status
+            });
+        }
+
+        const rows = await renewedQuery(
+            `INSERT INTO public.cerood_return_requests
+             (marketplace,order_id,product_id,product_name,customer_id,customer_phone,seller_id,
+              request_type,reason,details,quantity,status,created_at,updated_at)
+             VALUES ('renewed',?,?,?,?,?,?,?,?,?,?,'requested',NOW(),NOW())
+             RETURNING *`,
+            [
+                orderId, productId, item.product_name || '', req.renewedCustomerId,
+                req.renewedCustomerPhone, item.seller_id || null, requestType,
+                reason, details || null, quantity
+            ]
+        );
+
+        return res.status(201).json({ success: true, message: 'Request submitted successfully.', request: rows[0] });
+    } catch (error) {
+        console.error('Renewed create return request:', error.message);
+        return res.status(503).json({ success: false, message: 'Unable to submit the request right now.' });
+    }
+});
+
+app.get('/api/renewed/customer-returns', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const rows = await renewedQuery(
+            `SELECT r.*,p.image_url
+             FROM public.cerood_return_requests r
+             LEFT JOIN public.renewed_products p ON p.id::text=r.product_id::text
+             WHERE r.marketplace='renewed' AND r.customer_id=?
+             ORDER BY r.created_at DESC LIMIT 100`,
+            [req.renewedCustomerId]
+        );
+        return res.json({ success: true, requests: rows });
+    } catch (error) {
+        console.error('Renewed customer returns:', error.message);
+        return res.status(503).json({ success: false, message: 'Returns are temporarily unavailable.' });
+    }
+});
+
+app.get('/api/sellers/renewed/returns', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+
+    if (!sellerId) {
+        return res.status(401).json({ success: false, message: 'Seller authentication required.' });
+    }
+
+    try {
+        const rows = await renewedQuery(
+            `SELECT * FROM public.cerood_return_requests
+             WHERE marketplace='renewed' AND seller_id::text=?
+             ORDER BY created_at DESC LIMIT 200`,
+            [sellerId]
+        );
+        return res.json({ success: true, requests: rows });
+    } catch (error) {
+        console.error('Seller Renewed returns:', error.message);
+        return res.status(503).json({ success: false, message: 'Unable to load return requests.' });
+    }
+});
+
+app.patch('/api/sellers/renewed/returns/:id', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+    const id = renewedReturnClean(req.params.id, 80);
+    const decision = renewedReturnClean(req.body?.decision, 30).toLowerCase();
+    const sellerNote = renewedReturnClean(req.body?.seller_note, 1200);
+
+    if (!sellerId) {
+        return res.status(401).json({ success: false, message: 'Seller authentication required.' });
+    }
+    if (!renewedReturnUuid(id) || !['approve', 'reject'].includes(decision)) {
+        return res.status(400).json({ success: false, message: 'Valid request and seller decision are required.' });
+    }
+
+    try {
+        const status = decision === 'approve' ? 'seller_approved' : 'seller_rejected';
+        const rows = await renewedQuery(
+            `UPDATE public.cerood_return_requests
+             SET status=?,seller_note=?,seller_responded_at=NOW(),updated_at=NOW()
+             WHERE id=? AND marketplace='renewed' AND seller_id::text=?
+               AND status IN ('requested','seller_approved','seller_rejected')
+             RETURNING *`,
+            [status, sellerNote || null, id, sellerId]
+        );
+
+        if (!rows.length) {
+            return res.status(404).json({ success: false, message: 'Return request not found or cannot be updated.' });
+        }
+        return res.json({ success: true, request: rows[0] });
+    } catch (error) {
+        console.error('Seller Renewed return response:', error.message);
+        return res.status(503).json({ success: false, message: 'Unable to update the request.' });
+    }
+});
+
+app.get('/api/admin/renewed/returns', requireAdminAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const rows = await renewedQuery(
+            `SELECT * FROM public.cerood_return_requests
+             WHERE marketplace='renewed'
+             ORDER BY created_at DESC LIMIT 300`
+        );
+        return res.json({ success: true, requests: rows });
+    } catch (error) {
+        console.error('Admin Renewed returns:', error.message);
+        return res.status(503).json({ success: false, message: 'Unable to load return requests.' });
+    }
+});
+
+app.patch('/api/admin/renewed/returns/:id', requireAdminAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const id = renewedReturnClean(req.params.id, 80);
+    const status = renewedReturnClean(req.body?.status, 40).toLowerCase();
+    const adminNote = renewedReturnClean(req.body?.admin_note, 1500);
+    const allowed = [
+        'approved','rejected','pickup_scheduled','picked_up','received',
+        'refund_pending','refunded','replacement_approved','exchange_approved',
+        'closed','cancelled'
+    ];
+
+    if (!renewedReturnUuid(id) || !allowed.includes(status)) {
+        return res.status(400).json({ success: false, message: 'Valid return status is required.' });
+    }
+
+    try {
+        const rows = await renewedQuery(
+            `UPDATE public.cerood_return_requests
+             SET status=?,admin_note=?,admin_updated_at=NOW(),
+                 resolved_at=CASE WHEN ? IN ('rejected','refunded','closed','cancelled') THEN NOW() ELSE resolved_at END,
+                 updated_at=NOW()
+             WHERE id=? AND marketplace='renewed'
+             RETURNING *`,
+            [status, adminNote || null, status, id]
+        );
+
+        if (!rows.length) {
+            return res.status(404).json({ success: false, message: 'Return request not found.' });
+        }
+        return res.json({ success: true, request: rows[0] });
+    } catch (error) {
+        console.error('Admin Renewed return update:', error.message);
+        return res.status(503).json({ success: false, message: 'Unable to update the request.' });
+    }
+});
+
+
 // ==========================================
 // CEROOD RENEWED — CUSTOMER PRODUCT REVIEWS
 // ==========================================

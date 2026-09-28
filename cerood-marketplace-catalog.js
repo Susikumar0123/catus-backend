@@ -498,50 +498,15 @@ module.exports = function (
          WHERE marketplace=? AND is_active=true
          ORDER BY category_level ASC,sort_order ASC,name ASC`, [marketplace]
       );
-      if (!categories.length) return res.json({success:true,marketplace,categories:[]});
-
-      const categoryIds = categories.map(row => String(row.id));
-      const placeholders = categoryIds.map(() => '?').join(',');
-      const [attributes,imageSlots] = await Promise.all([
-        query(`SELECT id,category_id,attribute_key,label,input_type,unit,options,placeholder,is_required,is_variant,sort_order
-               FROM public.cerood_product_attributes
-               WHERE is_active=true AND category_id IN (${placeholders})
-               ORDER BY sort_order ASC,label ASC`, categoryIds),
-        query(`SELECT id,category_id,slot_key,label,description,is_required,sort_order
-               FROM public.cerood_category_image_slots
-               WHERE is_active=true AND category_id IN (${placeholders})
-               ORDER BY sort_order ASC,label ASC`, categoryIds)
-      ]);
-
-      const categoryById = new Map(categories.map(row => [String(row.id),row]));
-      const group = (rows) => { const map=new Map(); for (const row of rows) { const id=String(row.category_id); if(!map.has(id)) map.set(id,[]); map.get(id).push(row); } return map; };
-      const attrsByCategory=group(attributes), imagesByCategory=group(imageSlots);
-      const buildChain = category => {
-        const chain=[],seen=new Set(); let current=category;
-        while(current){
-          const id=String(current.id);
-          if(seen.has(id)) throw badRequest('Category schema inheritance cycle detected.');
-          seen.add(id); chain.push(current);
-          if(chain.length>12) throw badRequest('Category schema inheritance is too deep.');
-          if(!current.schema_parent_id) break;
-          current=categoryById.get(String(current.schema_parent_id));
-          if(!current) throw badRequest('Category schema reference was not found.');
-        }
-        return chain;
-      };
-      const mergeRows=(chain,map,key)=>{
-        const merged=new Map();
-        for(const category of [...chain].reverse()) for(const row of (map.get(String(category.id))||[])) merged.set(String(row[key]),row);
-        return [...merged.values()].sort((a,b)=>Number(a.sort_order||0)-Number(b.sort_order||0)||String(a.label||'').localeCompare(String(b.label||'')));
-      };
-      const result=categories.map(category=>{
-        const chain=buildChain(category);
-        return {...category,attributes:mergeRows(chain,attrsByCategory,'attribute_key'),image_slots:mergeRows(chain,imagesByCategory,'slot_key'),schema_chain:chain.map(row=>String(row.id))};
-      });
+      const result=[];
+      for (const category of categories) {
+        const resolved=await resolveMarketplaceCategorySchema(category.id,marketplace);
+        result.push({...category,attributes:resolved.attributes,image_slots:resolved.image_slots,
+          schema_chain:resolved.chain.map(row=>String(row.id))});
+      }
       return res.json({success:true,marketplace,categories:result});
     } catch(error) { return handleError(res,error); }
   });
-
   // Compatibility alias: existing Main Store dashboard can keep its current URL.
   app.get('/api/sellers/shop-categories', requireSellerAuth, async (req,res) => {
     try {
@@ -1602,4 +1567,55 @@ module.exports = function (
       }
     }
   );
+  // ============================================================
+  // PUBLIC: CEROOOD MAIN STORE PRODUCTS
+  // Customer-facing read-only endpoints. Home Services / Renewed
+  // routes are intentionally untouched.
+  // ============================================================
+  app.get('/api/shop/products', async (req, res) => {
+    try {
+      const products = await query(`
+        SELECT id, category_id, name, category, subcategory, brand, model,
+               description, price, compare_price, stock, image_url, video_url,
+               product_attributes, product_images, status, approval_status,
+               created_at, updated_at
+        FROM public.cerood_shop_products
+        WHERE status = 'published'
+          AND approval_status = 'approved'
+        ORDER BY created_at DESC
+        LIMIT 500
+      `);
+      return res.json({ success: true, products });
+    } catch (error) {
+      return handleError(res, error);
+    }
+  });
+
+  app.get('/api/shop/products/:id', async (req, res) => {
+    try {
+      const id = cleanText(req.params.id, 80);
+      if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id)) {
+        return res.status(400).json({ success: false, message: 'Invalid product ID.' });
+      }
+      const products = await query(`
+        SELECT id, category_id, name, category, subcategory, brand, model,
+               description, price, compare_price, stock, image_url, video_url,
+               product_attributes, product_images, status, approval_status,
+               created_at, updated_at
+        FROM public.cerood_shop_products
+        WHERE id = ?
+          AND status = 'published'
+          AND approval_status = 'approved'
+        LIMIT 1
+      `, [id]);
+      if (!products.length) {
+        return res.status(404).json({ success: false, message: 'Product not found.' });
+      }
+      return res.json({ success: true, product: products[0] });
+    } catch (error) {
+      return handleError(res, error);
+    }
+  });
+
+
 };
