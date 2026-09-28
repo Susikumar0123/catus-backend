@@ -133,12 +133,78 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
     };
   }
 
+  // Resolve effective schema through schema_parent_id inheritance.
+  // More-specific child definitions override inherited keys/slots.
+  async function resolveCategorySchema(categoryId) {
+    const chain=[];
+    const seen=new Set();
+    let currentId=String(categoryId || '').trim();
+
+    while (currentId) {
+      if (!uuid(currentId)) throw bad('Invalid Renewed category schema reference.');
+      if (seen.has(currentId)) throw bad('Renewed category schema inheritance cycle detected.');
+      seen.add(currentId);
+
+      const rows=await query(
+        `SELECT id,name,slug,parent_id,schema_parent_id,category_level,is_leaf,category_path
+         FROM public.cerood_product_categories
+         WHERE id=? AND marketplace='renewed' AND is_active=true
+         LIMIT 1`,
+        [currentId]
+      );
+      if (!rows.length) throw bad('Renewed category schema reference was not found.');
+
+      chain.push(rows[0]);
+      currentId=rows[0].schema_parent_id ? String(rows[0].schema_parent_id) : '';
+      if (chain.length>12) throw bad('Renewed category schema inheritance is too deep.');
+    }
+
+    const ids=chain.map(x=>String(x.id));
+    const attributeRows=await query(
+      `SELECT a.id,a.category_id,a.attribute_key,a.label,a.input_type,a.unit,
+              a.options,a.placeholder,a.is_required,a.is_variant,a.sort_order
+       FROM public.cerood_product_attributes a
+       WHERE a.is_active=true AND a.category_id IN (${ids.map(()=>'?').join(',')})
+       ORDER BY a.sort_order ASC,a.label ASC`,
+      ids
+    );
+    const slotRows=await query(
+      `SELECT i.id,i.category_id,i.slot_key,i.label,i.description,
+              i.is_required,i.sort_order
+       FROM public.cerood_category_image_slots i
+       WHERE i.is_active=true AND i.category_id IN (${ids.map(()=>'?').join(',')})
+       ORDER BY i.sort_order ASC,i.label ASC`,
+      ids
+    );
+
+    const rank=new Map([...ids].reverse().map((id,index)=>[id,index]));
+    const merge=(rows,keyName)=>{
+      const merged=new Map();
+      for (const row of [...rows].sort((a,b)=>
+        (rank.get(String(a.category_id))??0)-(rank.get(String(b.category_id))??0) ||
+        Number(a.sort_order||0)-Number(b.sort_order||0)
+      )) merged.set(String(row[keyName]),row);
+
+      return [...merged.values()].sort((a,b)=>
+        Number(a.sort_order||0)-Number(b.sort_order||0) ||
+        String(a.label||'').localeCompare(String(b.label||''))
+      );
+    };
+
+    return {
+      chain,
+      attributes:merge(attributeRows,'attribute_key'),
+      image_slots:merge(slotRows,'slot_key')
+    };
+  }
+
   // Dynamic Renewed category master for Seller Dashboard.
   // Reads the relational category/attribute/image-slot tables created for CEROOD Renewed.
   app.get('/api/sellers/renewed-categories',requireSellerAuth,async(req,res)=>{
     try {
       const categories = await query(
-        `SELECT id,marketplace,parent_id,name,slug,sort_order
+        `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
+                 category_level,is_leaf,category_path
          FROM public.cerood_product_categories
          WHERE marketplace='renewed' AND is_active=true
          ORDER BY sort_order ASC,name ASC`
@@ -176,11 +242,26 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
         imagesByCategory.get(key).push(row);
       }
 
-      const result = categories.map(category => ({
-        ...category,
-        attributes: attrsByCategory.get(String(category.id)) || [],
-        image_slots: imagesByCategory.get(String(category.id)) || []
-      }));
+      const result=[];
+      for (const category of categories) {
+        if (!category.schema_parent_id) {
+          result.push({
+            ...category,
+            attributes:attrsByCategory.get(String(category.id)) || [],
+            image_slots:imagesByCategory.get(String(category.id)) || [],
+            schema_chain:[String(category.id)]
+          });
+          continue;
+        }
+
+        const resolved=await resolveCategorySchema(category.id);
+        result.push({
+          ...category,
+          attributes:resolved.attributes,
+          image_slots:resolved.image_slots,
+          schema_chain:resolved.chain.map(x=>String(x.id))
+        });
+      }
 
       res.json({success:true,categories:result});
     } catch(e) {
@@ -205,20 +286,9 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
     if (!categoryRows.length) throw bad('Choose an active Renewed category.');
 
     const category=categoryRows[0];
-    const attributeRows=await query(
-      `SELECT id,attribute_key,label,input_type,is_required,is_variant
-       FROM public.cerood_product_attributes
-       WHERE category_id=? AND is_active=true
-       ORDER BY sort_order ASC,label ASC`,
-      [categoryId]
-    );
-    const slotRows=await query(
-      `SELECT slot_key,label,is_required
-       FROM public.cerood_category_image_slots
-       WHERE category_id=? AND is_active=true
-       ORDER BY sort_order ASC,label ASC`,
-      [categoryId]
-    );
+    const resolvedSchema=await resolveCategorySchema(categoryId);
+    const attributeRows=resolvedSchema.attributes;
+    const slotRows=resolvedSchema.image_slots;
 
     const rawAttrs=(body?.product_attributes && typeof body.product_attributes==='object' && !Array.isArray(body.product_attributes))
       ? body.product_attributes : {};
