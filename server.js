@@ -11107,24 +11107,6 @@ app.post('/api/renewed/customer-returns', renewedCustomerSession, async (req, re
     }
 
     try {
-        // TEMP DEBUG: identify why a valid delivered item is not matching.
-        const debugPurchased = await renewedQuery(
-            `SELECT o.id AS order_id,o.customer_id,o.customer_phone,o.delivery_status,
-                    i.id AS order_item_id,i.product_id,i.product_name,i.quantity,i.seller_id
-             FROM public.renewed_orders o
-             LEFT JOIN public.renewed_order_items i ON i.order_id = o.id
-             WHERE o.id = ?`,
-            [orderId]
-        );
-
-        console.log('[RENEWED RETURN DEBUG]', {
-            auth_customer_id: req.renewedCustomerId || null,
-            auth_customer_phone: req.renewedCustomerPhone || null,
-            body_order_id: orderId,
-            body_product_id: productId,
-            order_rows: debugPurchased
-        });
-
         const purchased = await renewedQuery(
             `SELECT o.id AS order_id,o.customer_id,o.customer_phone,o.delivery_status,o.delivered_at,
                     i.product_id,i.product_name,i.quantity AS purchased_quantity,i.seller_id
@@ -11136,11 +11118,6 @@ app.post('/api/renewed/customer-returns', renewedCustomerSession, async (req, re
              LIMIT 1`,
             [orderId, req.renewedCustomerId, req.renewedCustomerPhone, productId]
         );
-
-        console.log('[RENEWED RETURN MATCH DEBUG]', {
-            matched_rows: purchased,
-            matched_count: purchased.length
-        });
 
         if (!purchased.length) {
             return res.status(404).json({ success: false, message: 'This product was not found in your order.' });
