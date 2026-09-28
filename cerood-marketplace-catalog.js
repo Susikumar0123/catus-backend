@@ -786,7 +786,7 @@ module.exports = function (
           `
             SELECT
               id, marketplace, parent_id, name, slug,
-              attribute_schema, sort_order
+              attribute_schema, image_schema, sort_order
             FROM public.cerood_shop_categories
             WHERE marketplace = 'general'
               AND is_active = true
@@ -800,6 +800,9 @@ module.exports = function (
             ...category,
             attribute_schema: Array.isArray(category.attribute_schema)
               ? category.attribute_schema
+              : [],
+            image_schema: Array.isArray(category.image_schema)
+              ? category.image_schema
               : []
           }))
         });
