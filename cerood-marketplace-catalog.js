@@ -182,7 +182,9 @@ module.exports = function (
 
     'category_id',
 
-    'product_attributes'
+    'product_attributes',
+
+    'product_images'
 
   ];
 
@@ -508,7 +510,23 @@ module.exports = function (
 
       }
 
+      if (typeof product.product_images === 'string') {
+        try {
+          product.product_images = JSON.parse(product.product_images);
+        } catch (_) {
+          throw badRequest('Invalid product images.');
+        }
+      }
 
+      if (!product.product_images || typeof product.product_images !== 'object' || Array.isArray(product.product_images)) {
+        product.product_images = {};
+      }
+
+      for (const [key, value] of Object.entries(product.product_images)) {
+        if (!/^[a-z0-9_]{1,80}$/i.test(key)) throw badRequest('Invalid product image slot.');
+        if (!/^https:\/\//i.test(String(value || ''))) throw badRequest('All product image URLs must use HTTPS.');
+        product.product_images[key] = cleanText(value, 2048);
+      }
 
       return product;
 
@@ -2338,6 +2356,8 @@ module.exports = function (
 
                   product_attributes = ?::jsonb,
 
+                  product_images = ?::jsonb,
+
                   status = 'published',
 
                   approval_status = 'approved',
@@ -2439,6 +2459,8 @@ module.exports = function (
                   product.product_attributes
 
                 ),
+
+                JSON.stringify(product.product_images),
 
                 productId,
 
@@ -2590,6 +2612,8 @@ module.exports = function (
 
                 product_attributes,
 
+                product_images,
+
                 status,
 
                 approval_status
@@ -2625,6 +2649,8 @@ module.exports = function (
                 ?,
 
                 ?,
+
+                ?::jsonb,
 
                 ?::jsonb,
 
@@ -2678,7 +2704,9 @@ module.exports = function (
 
                 product.product_attributes
 
-              )
+              ),
+
+              JSON.stringify(product.product_images)
 
             ]
 
