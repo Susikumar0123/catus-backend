@@ -9660,7 +9660,7 @@ app.get('/api/admin/renewed/test-preview/:id', async (req,res) => {
 });
 const renewedAllowedCategories = new Set(['tv', 'refrigerator', 'washing-machine', 'ac', 'laptop', 'other']);
 const renewedAllowedConditions = new Set(['Refurbished', 'Pre-owned', 'Open box']);
-const renewedPublicFields = `id, name, category, condition, brand, model, price, compare_price,
+const renewedPublicFields = `id, category_id, name, category, condition, brand, model, price, compare_price,
  stock, warranty_days, location, delivery, image_url, video_url,
  known_defects, accessories, warranty_terms, status, created_at, updated_at`;
 function renewedPublicProduct(row) {
@@ -9672,6 +9672,53 @@ function renewedPublicProduct(row) {
     p.inspection = [];
     p.accessories = String(p.accessories || '').split(/\r?\n|,/).map(s=>s.trim()).filter(Boolean);
     p.specifications = { Brand: p.brand || 'Not specified', Model: p.model || 'Not specified' };
+    return p;
+}
+async function hydrateRenewedDynamicProduct(row) {
+    const p = renewedPublicProduct(row);
+    const attrs = await renewedQuery(
+      `SELECT a.attribute_key,a.label,a.unit,v.value
+       FROM public.cerood_product_attribute_values v
+       JOIN public.cerood_product_attributes a ON a.id=v.attribute_id
+       WHERE v.marketplace='renewed' AND v.product_id=? AND a.is_active=true
+       ORDER BY a.sort_order ASC,a.label ASC`, [String(row.id)]
+    );
+    p.product_attributes = {};
+    p.specifications = { Brand: p.brand || 'Not specified', Model: p.model || 'Not specified' };
+    if (row.category_id) {
+      const cats=await renewedQuery(`SELECT name,slug,category_path FROM public.cerood_product_categories WHERE id=? AND marketplace='renewed' LIMIT 1`,[row.category_id]);
+      if(cats[0]) { p.category_name=cats[0].name; p.category_path=cats[0].category_path || cats[0].name; }
+    }
+    for (const a of attrs) {
+      let value=a.value;
+      if (typeof value==='string') { try { value=JSON.parse(value); } catch {} }
+      p.product_attributes[a.attribute_key]=value;
+      const shown=Array.isArray(value)?value.join(', '):(typeof value==='boolean'?(value?'Yes':'No'):String(value ?? ''));
+      p.specifications[a.label+(a.unit?` (${a.unit})`:'')]=shown;
+    }
+    const images = await renewedQuery(
+      `SELECT i.slot_key,i.image_url,i.sort_order,s.label
+       FROM public.cerood_product_images i
+       LEFT JOIN public.cerood_category_image_slots s
+         ON s.slot_key=i.slot_key AND s.category_id = ?
+       WHERE i.marketplace='renewed' AND i.product_id=?
+       ORDER BY i.sort_order ASC,i.id ASC`, [row.category_id || null,String(row.id)]
+    ).catch(async()=>renewedQuery(
+      `SELECT slot_key,image_url,sort_order FROM public.cerood_product_images WHERE marketplace='renewed' AND product_id=? ORDER BY sort_order ASC,id ASC`, [String(row.id)]
+    ));
+    p.product_images={};
+    const dynamicMedia=[];
+    for(const img of images){
+      if(!img.image_url) continue;
+      p.product_images[img.slot_key]=img.image_url;
+      dynamicMedia.push({type:'image',url:img.image_url,alt:img.label||img.slot_key||p.name});
+    }
+    const seen=new Set();
+    p.media=[...dynamicMedia,...p.media].filter(m=>m?.url&&!seen.has(m.url)&&seen.add(m.url));
+    const variants=await renewedQuery(
+      `SELECT sku,variant_values,price,compare_price,stock FROM public.cerood_product_variants WHERE marketplace='renewed' AND product_id=? AND is_active=true ORDER BY id ASC`, [String(row.id)]
+    );
+    p.product_variants=variants.map(v=>{ let vv=v.variant_values; if(typeof vv==='string'){try{vv=JSON.parse(vv)}catch{}} return {...v,variant_values:vv||{}}; });
     return p;
 }
 function renewedClean(body) {
@@ -9713,7 +9760,7 @@ app.get('/api/renewed/products/:id', async (req,res) => {
         if(!/^[a-zA-Z0-9_-]{1,80}$/.test(req.params.id)) return res.status(400).json({success:false,message:'Invalid product ID.'});
         const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products WHERE id = ? AND status = 'published' AND (seller_id IS NULL OR approval_status = 'approved') LIMIT 1`,[req.params.id]);
         if(!rows.length) return res.status(404).json({success:false,message:'Product not found.'});
-        res.json({success:true,product:renewedPublicProduct(rows[0])});
+        res.json({success:true,product:await hydrateRenewedDynamicProduct(rows[0])});
     } catch(error) { renewedError(res,error); }
 });
 app.get('/api/admin/renewed/products', async (req,res) => {
