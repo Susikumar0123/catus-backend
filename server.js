@@ -9801,6 +9801,8 @@ app.post('/api/renewed/delivery-quote', async (req,res) => {
     try {
         const items = req.body && req.body.items;
         const address = req.body && req.body.address;
+        const paymentMethod = String(req.body?.payment_method || 'cod').trim().toLowerCase();
+        if (!['cod','online'].includes(paymentMethod)) return res.status(400).json({success:false,message:'Invalid payment method.'});
         if (!Array.isArray(items) || items.length < 1 || items.length > 20 || !address || typeof address !== 'object' || Array.isArray(address))
             return res.status(400).json({success:false,message:'Items and delivery address are required.'});
         const state = String(address.state || '')
@@ -9836,7 +9838,7 @@ if (
             quantities.set(id,combined);
         }
         const ids = [...quantities.keys()];
-        const rows = await renewedQuery(`SELECT id,price,stock,status FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
+        const rows = await renewedQuery(`SELECT id,price,stock,status,seller_id FROM public.renewed_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);
         const byId = new Map(rows.map(p=>[p.id,p]));
         let subtotal = 0;
         for (const id of ids) {
@@ -9849,7 +9851,41 @@ if (
         }
         const fee = ceroodShoppingDeliveryFee(subtotal);
 
-const total = subtotal + fee;
+let prepaidDiscount = 0;
+
+if (paymentMethod === 'online') {
+    const discountRows = await renewedQuery(
+        `SELECT seller_id::text AS seller_id, product_id, prepaid_discount
+         FROM public.cerood_seller_rto_discounts
+         WHERE marketplace = 'renewed'
+           AND is_active = true
+           AND product_id IN (${ids.map(()=>'?').join(',')})`,
+        ids
+    );
+
+    const discountMap = new Map(
+        discountRows.map(row => [
+            `${String(row.seller_id || '')}:${String(row.product_id)}`,
+            Number(row.prepaid_discount || 0)
+        ])
+    );
+
+    for (const id of ids) {
+        const p = byId.get(id);
+        const qty = quantities.get(id);
+        const raw = Number(
+            discountMap.get(`${String(p.seller_id || '')}:${id}`) || 0
+        );
+        const unit = Number(p.price);
+        const safe = Math.min(
+            Number.isFinite(raw) ? Math.max(0, Math.floor(raw)) : 0,
+            Math.max(0, unit - 1)
+        );
+        prepaidDiscount += safe * qty;
+    }
+}
+
+const total = subtotal - prepaidDiscount + fee;
 
 if (
     !Number.isSafeInteger(total) ||
@@ -9864,12 +9900,16 @@ return res.json({
     state,
     district,
     pincode,
+    payment_method: paymentMethod,
     subtotal,
     delivery_fee: fee,
+    prepaid_discount: prepaidDiscount,
     total,
     delivery_status: 'rate_configured',
     checkout_enabled: false,
-    message: 'Estimated India-wide delivery quote. Final availability and amount must be reconfirmed before payment.'
+    message: paymentMethod === 'online' && prepaidDiscount > 0
+        ? 'Prepaid discount applied. Final amount will be revalidated before payment.'
+        : 'Estimated India-wide delivery quote. Final availability and amount must be reconfirmed before payment.'
 });
     } catch(e) { renewedError(res,e); }
 });
