@@ -1860,17 +1860,39 @@ app.post('/api/check-user', (req, res) => {
 // LOGIN PASSWORD ROUTE (Fixed for proper matching)
 // ==========================================
 
-// RENEWED-ONLY: create a separate Renewed session after a real Cerood login.
-// Never mint this token from a browser-supplied user object or phone alone.
-function createRenewedSessionForAuthenticatedUser(user) {
-    const secret = String(process.env.RENEWED_CUSTOMER_JWT_SECRET || '');
+// CEROOD SHOPPING CUSTOMER SESSION
+// One Cerood customer identity for Renewed + Fashion + Beauty + General.
+// Home Services authentication is not changed.
+function publicCeroodCustomer(user) {
+    if (!user) return null;
+    return {
+        id: user.id,
+        name: user.name || '',
+        email: user.email || '',
+        phone: user.phone || '',
+        pincode: user.pincode || '',
+        address: user.address || ''
+    };
+}
+
+function createCeroodCustomerSession(user) {
+    const secret = String(
+        process.env.CEROOD_CUSTOMER_JWT_SECRET ||
+        process.env.RENEWED_CUSTOMER_JWT_SECRET ||
+        ''
+    );
     const phone = String(user?.phone || '').trim();
     if (secret.length < 32 || !/^[6-9]\d{9}$/.test(phone) || user?.id == null) return null;
     return jwt.sign(
-        { sub: String(user.id), phone, role: 'renewed_customer' },
+        { sub: String(user.id), phone, role: 'cerood_customer' },
         secret,
-        { algorithm: 'HS256', expiresIn: '7d', issuer: 'cerood-renewed' }
+        { algorithm: 'HS256', expiresIn: '7d', issuer: 'cerood-customer' }
     );
+}
+
+// Compatibility alias while older Renewed code is migrated.
+function createRenewedSessionForAuthenticatedUser(user) {
+    return createCeroodCustomerSession(user);
 }
 
 app.post('/api/login-password', (req, res) => {
@@ -1883,7 +1905,13 @@ app.post('/api/login-password', (req, res) => {
             const user = results[0];
             // Passwords-ah trim panrathu space error-ai thavirkkum
             if (await bcrypt.compare(String(password), String(user.password))) {
-                res.json({ success: true, user: user, renewed_session: createRenewedSessionForAuthenticatedUser(user) });
+                const customerSession = createCeroodCustomerSession(user);
+                res.json({
+                    success: true,
+                    user: publicCeroodCustomer(user),
+                    customer_session: customerSession,
+                    renewed_session: customerSession
+                });
             } else {
                 res.status(401).json({ success: false, message: 'Incorrect password.' });
             }
@@ -2339,11 +2367,13 @@ app.post('/api/verify-otp-set-password', (req, res) => {
                     });
                 }
 
+                const customerSession = createCeroodCustomerSession(updatedRows[0]);
                 return res.json({
                     success: true,
                     message: 'Password updated successfully!',
-                    user: updatedRows[0],
-                    renewed_session: createRenewedSessionForAuthenticatedUser(updatedRows[0])
+                    user: publicCeroodCustomer(updatedRows[0]),
+                    customer_session: customerSession,
+                    renewed_session: customerSession
                 });
             }
         );
@@ -10242,7 +10272,7 @@ async function renewedRunExpiry() {
 // ==========================================
 // RENEWED CASH ON DELIVERY: atomic stock decrement + order creation.
 // Independent from Razorpay; only enabled by explicit environment switch.
-app.post('/api/renewed/place-cod-order', async (req,res)=>{
+app.post('/api/renewed/place-cod-order',optionalCeroodCustomerSession, async (req,res)=>{
     res.set('Cache-Control','no-store');
     if(process.env.RENEWED_COD_ENABLED !== 'true')
         return res.status(503).json({success:false,message:'Cash on delivery is not enabled by Cerood yet.'});
@@ -10250,8 +10280,8 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
     try{
         // Guest checkout is an explicit deployment choice; existing OTP flow remains when disabled.
         const guestCheckout = process.env.RENEWED_GUEST_CHECKOUT_ENABLED === 'true';
-        let phone = String(req.body?.address?.phone || '').trim();
-        if (!guestCheckout) {
+        let phone = req.ceroodCustomerPhone || String(req.body?.address?.phone || '').trim();
+        if (!req.ceroodCustomerPhone && !guestCheckout) {
             const token=String(req.body?.accessToken||'').trim();
             if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile before ordering.'});
             const verified=await verifyMsg91AccessToken(token);
@@ -10262,7 +10292,7 @@ app.post('/api/renewed/place-cod-order', async (req,res)=>{
         const requestId=String(req.body?.request_id||'').trim();
         if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId))
             return res.status(400).json({success:false,message:'Invalid order request ID.'});
-        const address=req.body?.address, items=req.body?.items;
+        const address=bindCheckoutToCeroodCustomer(req,req.body?.address), items=req.body?.items;
         if(!address||typeof address!=='object'||Array.isArray(address)||!Array.isArray(items)||items.length<1||items.length>20)
             return res.status(400).json({success:false,message:'Address and 1–20 products required.'});
         const state = String(address.state || '')
@@ -10414,7 +10444,7 @@ if (
     }finally{if(client)client.release();}
 });
 
-app.post('/api/renewed/prepare-payment', async (req, res) => {
+app.post('/api/renewed/prepare-payment',optionalCeroodCustomerSession, async (req, res) => {
     res.set('Cache-Control', 'no-store');
     const RENEWED_PAYMENT_FLOW_READY = process.env.RENEWED_LIVE_CHECKOUT_ENABLED === 'true' && Boolean(process.env.RENEWED_RAZORPAY_WEBHOOK_SECRET && process.env.RAZORPAY_KEY_ID && process.env.RAZORPAY_KEY_SECRET);
     if (!RENEWED_PAYMENT_FLOW_READY) {
@@ -10426,9 +10456,9 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
     let committedOrderId = null;
     try {
         const guestCheckout = process.env.RENEWED_GUEST_CHECKOUT_ENABLED === 'true';
-        let verifiedPhone = String(req.body?.address?.phone || '').trim();
+        let verifiedPhone = req.ceroodCustomerPhone || String(req.body?.address?.phone || '').trim();
         let users = [];
-        if (!guestCheckout) {
+        if (!req.ceroodCustomerPhone && !guestCheckout) {
             const accessToken = String(req.body?.accessToken || '').trim();
             if (!accessToken || accessToken.length > 8192)
                 return res.status(401).json({success:false,message:'Customer OTP verification required.'});
@@ -10440,10 +10470,12 @@ app.post('/api/renewed/prepare-payment', async (req, res) => {
             } catch (_) { return res.status(401).json({success:false,message:'Customer OTP verification failed.'}); }
             users = await renewedQuery('SELECT id, name, email FROM public.users WHERE phone = ? LIMIT 1', [verifiedPhone]);
             if (!users.length) return res.status(401).json({success:false,message:'Register before checkout.'});
+        } else if (req.ceroodCustomerPhone) {
+            users = await renewedQuery('SELECT id, name, email FROM public.users WHERE phone = ? LIMIT 1', [verifiedPhone]);
         }
         if (!/^[6-9]\d{9}$/.test(verifiedPhone || ''))
             return res.status(400).json({success:false,message:'Valid mobile number required.'});
-        const address = req.body?.address;
+        const address = bindCheckoutToCeroodCustomer(req, req.body?.address);
         const items = req.body?.items;
         if (!address || typeof address !== 'object' || Array.isArray(address) ||
             !Array.isArray(items) || items.length < 1 || items.length > 20)
@@ -10983,31 +11015,90 @@ app.post('/api/renewed/device-orders',async(req,res)=>{
   }catch(e){console.error('Renewed device orders:',e.message);return res.status(503).json({success:false,message:'Order history temporarily unavailable.'});}
 });
 
-// Renewed customer session: existing Cerood account credentials, no OTP on dashboard.
-// Keep RENEWED_CUSTOMER_JWT_SECRET private on Render; never trust localStorage user/phone as identity.
+// Optional common Cerood customer session for shopping checkout.
+// No Authorization header = guest flow remains unchanged.
+// Authorization header present = token must be valid and becomes the trusted account identity.
+function optionalCeroodCustomerSession(req,res,next){
+  const raw=String(req.headers.authorization||'');
+  if(!raw)return next();
+  const secret=String(process.env.CEROOD_CUSTOMER_JWT_SECRET||process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
+  if(secret.length<32)return res.status(503).json({success:false,message:'Cerood customer sessions are not configured.'});
+  const m=/^Bearer (\S+)$/.exec(raw);
+  if(!m)return res.status(401).json({success:false,message:'Invalid customer session.'});
+  try{
+    let claims;
+    try{
+      claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-customer'});
+      if(claims.role!=='cerood_customer')throw Error('Invalid common role');
+    }catch(commonError){
+      claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-renewed'});
+      if(claims.role!=='renewed_customer')throw Error('Invalid legacy role');
+    }
+    if(!/^[6-9]\d{9}$/.test(String(claims.phone||''))||! /^\d+$/.test(String(claims.sub||'')))throw Error('Invalid session');
+    req.ceroodCustomerId=String(claims.sub);
+    req.ceroodCustomerPhone=String(claims.phone);
+    return next();
+  }catch(e){
+    return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});
+  }
+}
+
+function bindCheckoutToCeroodCustomer(req,address){
+  if(!req.ceroodCustomerPhone)return address;
+  // Delivery address remains editable, but account ownership always follows the verified JWT phone.
+  return {...address,phone:req.ceroodCustomerPhone};
+}
+
+// Common Cerood shopping customer session.
+// Accept new common tokens and temporary legacy Renewed tokens.
 function renewedCustomerSession(req,res,next){
-  const secret=String(process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
-  if(secret.length<32)return res.status(503).json({success:false,message:'Renewed account sessions are not configured.'});
+  const secret=String(
+    process.env.CEROOD_CUSTOMER_JWT_SECRET ||
+    process.env.RENEWED_CUSTOMER_JWT_SECRET ||
+    ''
+  );
+  if(secret.length<32)return res.status(503).json({success:false,message:'Cerood customer sessions are not configured.'});
   const m=/^Bearer (\S+)$/.exec(String(req.headers.authorization||''));
   if(!m)return res.status(401).json({success:false,message:'Sign in to view your orders.'});
-  try{const claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-renewed'});
-    if(claims.role!=='renewed_customer'||! /^[6-9]\d{9}$/.test(claims.phone)||!/^\d+$/.test(String(claims.sub||'')))throw Error('Invalid session');
-    req.renewedCustomerId=String(claims.sub);req.renewedCustomerPhone=claims.phone;next();
-  }catch(e){return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});}
+  try{
+    let claims;
+    try{
+      claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-customer'});
+      if(claims.role!=='cerood_customer')throw Error('Invalid common role');
+    }catch(commonError){
+      claims=jwt.verify(m[1],secret,{algorithms:['HS256'],issuer:'cerood-renewed'});
+      if(claims.role!=='renewed_customer')throw Error('Invalid legacy role');
+    }
+    if(!/^[6-9]\d{9}$/.test(claims.phone)||!/^\d+$/.test(String(claims.sub||'')))throw Error('Invalid session');
+    req.renewedCustomerId=String(claims.sub);
+    req.renewedCustomerPhone=claims.phone;
+    req.ceroodCustomerId=String(claims.sub);
+    req.ceroodCustomerPhone=claims.phone;
+    next();
+  }catch(e){
+    return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});
+  }
 }
 app.post('/api/renewed/customer-login',(req,res)=>{
   res.set('Cache-Control','no-store');
   const phone=String(req.body?.phone||'').trim(),password=String(req.body?.password||'');
-  if(!/^[6-9]\d{9}$/.test(phone)||!password||password.length>256)return res.status(400).json({success:false,message:'Enter your registered mobile and password.'});
-  const secret=String(process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
-  if(secret.length<32)return res.status(503).json({success:false,message:'Renewed account sessions are not configured.'});
-  db.query('SELECT id,name,phone,password FROM public.users WHERE phone=? LIMIT 1',[phone],async(err,rows)=>{
+  if(!/^[6-9]\d{9}$/.test(phone)||!password||password.length>256)
+    return res.status(400).json({success:false,message:'Enter your registered mobile and password.'});
+  const secret=String(process.env.CEROOD_CUSTOMER_JWT_SECRET||process.env.RENEWED_CUSTOMER_JWT_SECRET||'');
+  if(secret.length<32)return res.status(503).json({success:false,message:'Cerood customer sessions are not configured.'});
+  db.query('SELECT id,name,email,phone,pincode,address,password FROM public.users WHERE phone=? LIMIT 1',[phone],async(err,rows)=>{
     if(err){console.error('Renewed customer login:',err.message);return res.status(503).json({success:false,message:'Login temporarily unavailable.'});}
     const u=rows?.[0];let valid=false;
     try{valid=Boolean(u?.password)&&await bcrypt.compare(password,String(u.password));}catch(e){valid=false;}
     if(!valid)return res.status(401).json({success:false,message:'Invalid mobile number or password.'});
-    const token=jwt.sign({sub:String(u.id),phone:u.phone,role:'renewed_customer'},secret,{algorithm:'HS256',expiresIn:'7d',issuer:'cerood-renewed'});
-    return res.json({success:true,token,user:{name:u.name,phone:u.phone}});
+    const token=createCeroodCustomerSession(u);
+    return res.json({
+      success:true,
+      token,
+      customer_session:token,
+      renewed_session:token,
+      user:publicCeroodCustomer(u)
+    });
   });
 });
 // Explicit guest COD receipt claim. A signed-in user must possess the original
@@ -11070,6 +11161,43 @@ app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   }catch(e){console.error('Renewed customer orders:',e.message);return res.status(503).json({success:false,message:'Orders temporarily unavailable.'});}
 });
 
+
+
+// ==========================================
+// CEROOD COMMON CUSTOMER — FASHION + BEAUTY ACCOUNT ORDERS
+// Same Cerood customer JWT used by Renewed. Home Services is not changed.
+// ==========================================
+app.get('/api/clothing/customer-orders', renewedCustomerSession, async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{
+  const orders=await clothingDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,courier_name,tracking_number,tracking_url,created_at,updated_at,status_timestamps FROM public.clothing_orders WHERE customer_phone=? AND (payment_method='cod' OR payment_status IN ('paid','payment_review')) ORDER BY created_at DESC LIMIT 100`,[req.ceroodCustomerPhone]);
+  const ids=orders.map(o=>String(o.id));
+  const items=ids.length?await clothingDb(`SELECT i.order_id,i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price,p.image_url FROM public.clothing_order_items i LEFT JOIN public.clothing_products p ON p.id=i.product_id WHERE i.order_id=ANY(?::text[]) ORDER BY i.id`,[ids]):[];
+  const grouped=new Map();for(const item of items){const id=String(item.order_id);if(!grouped.has(id))grouped.set(id,[]);grouped.get(id).push({...item,line_total:Number(item.total_price)});}
+  return res.json({success:true,orders:orders.map(o=>({...o,status:o.payment_method==='cod'?'pending':o.payment_status,delivery_status:o.status,items:grouped.get(String(o.id))||[],status_timestamps:{confirmed:o.created_at,...(o.status_timestamps&&typeof o.status_timestamps==='object'?o.status_timestamps:{})}}))});
+ }catch(e){console.error('Fashion customer orders:',e.message);return res.status(503).json({success:false,message:'Fashion orders temporarily unavailable.'});}
+});
+app.post('/api/clothing/claim-guest-orders', renewedCustomerSession, async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{const receipts=Array.isArray(req.body?.receipts)?req.body.receipts:[];if(receipts.length>30)return res.status(400).json({success:false,message:'Invalid Fashion receipts.'});let linked=0;
+  for(const x of receipts){const id=String(x?.id||''),request=String(x?.request_id||''),phone=String(x?.phone||'');if(fashionUUID(id)&&id===request&&phone===req.ceroodCustomerPhone)linked++;}
+  return res.json({success:true,linked_count:linked,message:linked?'Eligible Fashion orders verified for this account.':'No eligible unlinked Fashion orders for this account.'});
+ }catch(e){console.error('Fashion guest claim:',e.message);return res.status(503).json({success:false,message:'Could not link Fashion guest orders.'});}
+});
+app.get('/api/cosmetics/customer-orders', renewedCustomerSession, async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{const orders=await cosmeticsDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at,updated_at,status_timestamps FROM public.cosmetics_orders WHERE customer_phone=? AND (payment_method='cod' OR payment_status IN ('paid','payment_review')) ORDER BY created_at DESC LIMIT 100`,[req.ceroodCustomerPhone]);
+  for(const o of orders){o.delivery_status=o.status;o.items=await cosmeticsDb(`SELECT i.product_id,i.product_name,i.variant,i.quantity,i.unit_price,i.total_price AS line_total,p.image_url FROM public.cosmetics_order_items i LEFT JOIN public.cosmetics_products p ON p.id=i.product_id WHERE i.order_id=? ORDER BY i.id`,[o.id]);}
+  return res.json({success:true,orders});
+ }catch(e){console.error('Beauty customer orders:',e.message);return res.status(503).json({success:false,message:'Beauty orders temporarily unavailable.'});}
+});
+app.post('/api/cosmetics/claim-guest-orders', renewedCustomerSession, async(req,res)=>{
+ res.set('Cache-Control','no-store');
+ try{const receipts=Array.isArray(req.body?.receipts)?req.body.receipts:[];if(receipts.length>30)return res.status(400).json({success:false,message:'Invalid Beauty receipts.'});let linked=0;
+  for(const x of receipts){const id=String(x?.id||''),phone=String(x?.phone||'');if(/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id)&&phone===req.ceroodCustomerPhone)linked++;}
+  return res.json({success:true,linked_count:linked,message:linked?'Eligible Beauty orders verified for this account.':'No eligible unlinked Beauty orders for this account.'});
+ }catch(e){console.error('Beauty guest claim:',e.message);return res.status(503).json({success:false,message:'Could not link Beauty guest orders.'});}
+});
 
 // ==========================================
 // CEROOD RENEWED — RETURNS / EXCHANGE / REPLACEMENT
@@ -12072,12 +12200,12 @@ app.get('/api/cosmetics/checkout-status', (req, res) => res.json({
 app.post('/api/cosmetics/quote',async(req,res)=>{
  res.set('Cache-Control','no-store');let client;try{const {counts}=beautyRequest(req.body||{}),ids=[...counts.keys()];const products=await cosmeticsDb(`SELECT id,name,variant,price,stock,status,expiry_date FROM public.cosmetics_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);let totals=beautyTotals(products,counts);if(String(req.body?.payment_method||'cod').toLowerCase()==='online'){client=await db.getClient();totals=await ceroodApplyMarketplacePrepaidDiscount(client,'cosmetics',totals);}return res.json({success:true,...totals,cod_enabled:beautyCodOn(),online_enabled:beautyOnlineOn()});}catch(e){return beautyErr(res,e);}finally{if(client)client.release();}
 });
-app.post('/api/cosmetics/place-cod-order',async(req,res)=>{
+app.post('/api/cosmetics/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
  res.set('Cache-Control','no-store');if(!beautyCodOn())return res.status(503).json({success:false,message:'Beauty checkout is not live yet.'});
  let client;try{
- const {address,counts}=beautyRequest(req.body||{}),id=String(req.body?.request_id||'').trim();
+ let {address,counts}=beautyRequest(req.body||{});address=bindCheckoutToCeroodCustomer(req,address);const id=String(req.body?.request_id||'').trim();
  if(!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id))return res.status(400).json({success:false,message:'Valid checkout request ID required.'});
- if(process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true'){
+ if(!req.ceroodCustomerPhone && process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true'){
  const token=String(req.body?.accessToken||'').trim();if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile OTP before ordering.'});
  const verified=await verifyMsg91AccessToken(token);if(String(verified?.type||'').toLowerCase()!=='success'||extractVerifiedPhoneFromMsg91(verified,token)!==address.phone)return res.status(401).json({success:false,message:'Verified mobile does not match delivery address.'});
  }
@@ -12157,12 +12285,12 @@ const beautyOnlineOn = () => process.env.COSMETICS_ONLINE_ENABLED === 'true'
     && process.env.COSMETICS_LIVE_CHECKOUT_ENABLED === 'true'
     && !!process.env.RAZORPAY_KEY_ID && !!process.env.RAZORPAY_KEY_SECRET
     && !!process.env.COSMETICS_RAZORPAY_WEBHOOK_SECRET;
-app.post('/api/cosmetics/create-razorpay-order', async (req, res) => {
+app.post('/api/cosmetics/create-razorpay-order',optionalCeroodCustomerSession, async (req, res) => {
  res.set('Cache-Control', 'no-store');
  if (!beautyOnlineOn()) return res.status(503).json({success:false,message:'Beauty online payment is not enabled yet.'});
  let client;
  try {
-  const {address,counts}=beautyRequest(req.body||{});
+  let {address,counts}=beautyRequest(req.body||{});address=bindCheckoutToCeroodCustomer(req,address);
   const id=String(req.body?.request_id||'').trim();
   if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))
    return res.status(400).json({success:false,message:'Valid checkout request ID required.'});
@@ -12476,8 +12604,12 @@ return {
     currency: 'INR'
 };
 }
-async function fashionVerifiedCustomer(body,address){
- // Checkout is guest-compatible like current Fashion UI. Enable OTP gate once frontend sends accessToken.
+async function fashionVerifiedCustomer(body,address,req){
+ if(req?.ceroodCustomerPhone){
+   if(address.phone!==req.ceroodCustomerPhone)fashionBad('Customer session does not match checkout account.',401);
+   return;
+ }
+ // Guest checkout remains compatible; OTP gate applies when guest checkout is disabled.
  if(process.env.CLOTHING_GUEST_CHECKOUT_ENABLED==='false'){
  const token=String(body?.accessToken||'').trim();if(!token||token.length>8192)fashionBad('Verify mobile OTP before ordering.',401);
  const data=await verifyMsg91AccessToken(token);if(String(data?.type||'').toLowerCase()!=='success'||extractVerifiedPhoneFromMsg91(data,token)!==address.phone)fashionBad('OTP mobile does not match delivery address.',401);
@@ -12493,9 +12625,9 @@ app.get('/api/clothing/checkout-status', (req, res) => res.json({
     free_delivery_minimum: SHOPPING_FREE_DELIVERY_MINIMUM
 }));
 app.post('/api/clothing/quote',async(req,res)=>{res.set('Cache-Control','no-store');let c;try{const {counts}=fashionRequest(req.body||{}),ids=[...counts.keys()];const rows=await clothingDb(`SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id IN (${ids.map(()=>'?').join(',')})`,ids);let totals=fashionTotals(rows,counts);if(String(req.body?.payment_method||'cod').toLowerCase()==='online'){c=await db.getClient();totals=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',totals);}res.json({success:true,...totals,cod_enabled:fashionCodOn(),online_enabled:fashionOnlineOn()});}catch(e){fashionFail(res,e);}finally{if(c)c.release();}});
-app.post('/api/clothing/place-cod-order',async(req,res)=>{
+app.post('/api/clothing/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
  res.set('Cache-Control','no-store');if(!fashionCodOn())return res.status(503).json({success:false,message:'Fashion COD is not enabled yet.'});let c;
- try{const {address,counts}=fashionRequest(req.body||{}),id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address);
+ try{let {address,counts}=fashionRequest(req.body||{});address=bindCheckoutToCeroodCustomer(req,address);const id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address,req);
  c=await db.getClient();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await c.query('SELECT id,customer_phone,total,payment_method FROM public.clothing_orders WHERE id=$1',[id]);if(existing.length){await c.query('COMMIT');if(existing[0].customer_phone!==address.phone||existing[0].payment_method!=='cod')fashionBad('Checkout request conflict.',409);return res.json({success:true,order_id:id,total:Number(existing[0].total),already_created:true});}
  const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);
  await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,0,$8,'cod','pending','confirmed')`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.total]);
@@ -12560,9 +12692,9 @@ app.post('/api/clothing/place-cod-order',async(req,res)=>{
  await c.query('COMMIT');return res.status(201).json({success:true,order_id:id,payment_method:'cod',...t});
  }catch(e){if(c)await c.query('ROLLBACK').catch(()=>{});return fashionFail(res,e);}finally{if(c)c.release();}
 });
-app.post('/api/clothing/create-razorpay-order',async(req,res)=>{
+app.post('/api/clothing/create-razorpay-order',optionalCeroodCustomerSession,async(req,res)=>{
  res.set('Cache-Control','no-store');if(!fashionOnlineOn())return res.status(503).json({success:false,message:'Fashion online payment is not enabled yet.'});let c;
- try{const {address,counts}=fashionRequest(req.body||{}),id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address);
+ try{let {address,counts}=fashionRequest(req.body||{});address=bindCheckoutToCeroodCustomer(req,address);const id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address,req);
  c=await db.getClient();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await c.query('SELECT id,customer_phone,payment_method,payment_status,razorpay_order_id,total FROM public.clothing_orders WHERE id=$1 FOR UPDATE',[id]);
  if(existing.length){const o=existing[0];await c.query('COMMIT');if(o.customer_phone!==address.phone||o.payment_method!=='razorpay')fashionBad('Checkout request conflict.',409);if(o.payment_status==='paid')return res.json({success:true,already_paid:true,order_id:id,total:Number(o.total)});if(o.payment_status==='payment_review'||!o.razorpay_order_id)fashionBad('Payment requires support review.',409);return res.json({success:true,order_id:id,razorpay_order_id:o.razorpay_order_id,key_id:process.env.RAZORPAY_KEY_ID,amount:Math.round(Number(o.total)*100),currency:'INR',total:Number(o.total)});}
  const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);t=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',t);
