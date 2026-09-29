@@ -11303,7 +11303,12 @@ app.post('/api/renewed/claim-guest-orders',renewedCustomerSession,async(req,res)
 app.get('/api/renewed/customer-session',renewedCustomerSession,(req,res)=>res.json({success:true,phone:req.renewedCustomerPhone}));
 app.get('/api/renewed/customer-orders',renewedCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
-  try{const orders=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,paid_at,created_at,updated_at FROM public.renewed_orders WHERE customer_id=? ORDER BY created_at DESC LIMIT 100`,[req.renewedCustomerId]);
+  try{const orders=await renewedQuery(`SELECT id,customer_name,customer_phone,subtotal,delivery_fee,total,currency,status,delivery_status,status_timestamps,payment_method,delivered_at,paid_at,created_at,updated_at
+    FROM public.renewed_orders
+    WHERE customer_id=?
+       OR (customer_id IS NULL AND customer_phone=?)
+    ORDER BY created_at DESC
+    LIMIT 100`,[req.renewedCustomerId,req.renewedCustomerPhone]);
     const ids=orders.map(o=>o.id);
     const items=ids.length?await renewedQuery(`SELECT
     i.order_id,
@@ -11411,7 +11416,7 @@ app.post('/api/renewed/customer-returns', renewedCustomerSession, async (req, re
              FROM public.renewed_orders o
              JOIN public.renewed_order_items i ON i.order_id = o.id
              WHERE o.id = ?
-               AND (o.customer_id = ? OR o.customer_phone = ?)
+               AND (o.customer_id = ? OR (o.customer_id IS NULL AND o.customer_phone = ?))
                AND i.product_id::text = ?::text
              LIMIT 1`,
             [orderId, req.renewedCustomerId, req.renewedCustomerPhone, productId]
