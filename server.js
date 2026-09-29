@@ -11049,6 +11049,176 @@ function bindCheckoutToCeroodCustomer(req,address){
   return {...address,phone:req.ceroodCustomerPhone};
 }
 
+
+// ============================================================
+// CEROOD MAIN STORE — CUSTOMER ORDERS / COD CHECKOUT
+// Shopping only. Does not modify Home Services.
+// ============================================================
+const SHOP_ORDER_STATUS = new Set([
+  'confirmed','processing','packed','shipped','out_for_delivery',
+  'delivered','cancelled'
+]);
+function shopCleanText(v,max=250){ return String(v??'').trim().slice(0,max); }
+function shopUuid(v){ return /^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(String(v||'')); }
+function shopAddress(body){
+  const a=body&&typeof body==='object'&&!Array.isArray(body)?body:{};
+  const out={
+    name:shopCleanText(a.name,120),
+    phone:shopCleanText(a.phone,20),
+    house:shopCleanText(a.house,160),
+    street:shopCleanText(a.street,160),
+    village:shopCleanText(a.village||a.city,120),
+    district:shopCleanText(a.district,120),
+    state:shopCleanText(a.state,120),
+    pincode:shopCleanText(a.pincode,10),
+    landmark:shopCleanText(a.landmark,160)
+  };
+  if(!out.name) throw Object.assign(new Error('Customer name is required.'),{status:400});
+  if(!/^[6-9]\d{9}$/.test(out.phone)) throw Object.assign(new Error('Enter a valid 10-digit mobile number.'),{status:400});
+  if(!out.house||!out.village||!out.district||!out.state||!/^\d{6}$/.test(out.pincode))
+    throw Object.assign(new Error('Complete delivery address is required.'),{status:400});
+  return out;
+}
+function shopItems(body){
+  if(!Array.isArray(body)||!body.length||body.length>20)
+    throw Object.assign(new Error('Cart must contain 1 to 20 products.'),{status:400});
+  const merged=new Map();
+  for(const raw of body){
+    const id=shopCleanText(raw?.product_id,80),qty=Number(raw?.quantity);
+    if(!shopUuid(id)||!Number.isSafeInteger(qty)||qty<1||qty>10)
+      throw Object.assign(new Error('Invalid cart item.'),{status:400});
+    merged.set(id,(merged.get(id)||0)+qty);
+  }
+  return [...merged].map(([product_id,quantity])=>({product_id,quantity}));
+}
+async function shopOrderWithItems(row){
+  const items=await renewedQuery(
+    `SELECT product_id,product_name,unit_price,quantity,line_total,seller_id
+       FROM public.cerood_shop_order_items
+      WHERE order_id=?
+      ORDER BY id ASC`,[row.id]
+  );
+  return {...row,items};
+}
+
+app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
+  try{
+    const requestId=shopCleanText(req.body?.request_id,80);
+    if(!shopUuid(requestId)) return res.status(400).json({success:false,message:'Invalid checkout request.'});
+    const address=shopAddress(req.body?.address);
+    const items=shopItems(req.body?.items);
+
+    const existing=await renewedQuery(
+      `SELECT * FROM public.cerood_shop_orders WHERE request_id=? LIMIT 1`,[requestId]
+    );
+    if(existing.length){
+      return res.json({success:true,order:await shopOrderWithItems(existing[0]),idempotent:true});
+    }
+
+    const ids=items.map(x=>x.product_id);
+    const placeholders=ids.map(()=>'?').join(',');
+    const products=await renewedQuery(
+      `SELECT id,seller_id,name,price,stock,status,approval_status
+         FROM public.cerood_shop_products
+        WHERE id IN (${placeholders})`,ids
+    );
+    if(products.length!==ids.length)
+      return res.status(409).json({success:false,message:'One or more products are no longer available.'});
+
+    const byId=new Map(products.map(p=>[String(p.id),p]));
+    let subtotal=0;
+    const lines=[];
+    for(const item of items){
+      const p=byId.get(item.product_id);
+      if(!p||p.status!=='published'||p.approval_status!=='approved')
+        return res.status(409).json({success:false,message:'A product is not available for purchase.'});
+      const price=Number(p.price),stock=Number(p.stock);
+      if(!Number.isFinite(price)||price<=0||stock<item.quantity)
+        return res.status(409).json({success:false,message:`Insufficient stock for ${p.name||'a product'}.`});
+      const lineTotal=price*item.quantity; subtotal+=lineTotal;
+      lines.push({p,quantity:item.quantity,unit_price:price,line_total:lineTotal});
+    }
+
+    const deliveryFee=Math.max(0,Number(process.env.SHOP_DELIVERY_FEE||0)||0);
+    const total=subtotal+deliveryFee;
+    const orderRows=await renewedQuery(
+      `INSERT INTO public.cerood_shop_orders
+       (request_id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
+        subtotal,delivery_fee,total,currency,status,payment_method,payment_status)
+       VALUES (?::uuid,?,?,?,?,?::jsonb,?,?,?,'INR','confirmed','cod','cod_pending')
+       RETURNING *`,
+      [
+        requestId,
+        req.ceroodCustomerId||null,
+        address.name,
+        address.phone,
+        shopCleanText(req.body?.email,200)||null,
+        JSON.stringify(address),
+        subtotal,deliveryFee,total
+      ]
+    );
+    const order=orderRows[0];
+
+    try{
+      for(const line of lines){
+        const changed=await renewedQuery(
+          `UPDATE public.cerood_shop_products
+              SET stock=stock-?,updated_at=NOW()
+            WHERE id=? AND status='published' AND approval_status='approved' AND stock>=?
+            RETURNING id`,
+          [line.quantity,line.p.id,line.quantity]
+        );
+        if(!changed.length) throw new Error(`Stock changed for ${line.p.name||'product'}.`);
+        await renewedQuery(
+          `INSERT INTO public.cerood_shop_order_items
+           (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total)
+           VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?)`,
+          [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total]
+        );
+      }
+    }catch(inner){
+      // Compensate any stock already reserved and remove the incomplete order.
+      const inserted=await renewedQuery(
+        `SELECT product_id,quantity FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]
+      ).catch(()=>[]);
+      for(const x of inserted){
+        await renewedQuery(`UPDATE public.cerood_shop_products SET stock=stock+?,updated_at=NOW() WHERE id=?`,
+          [Number(x.quantity)||0,x.product_id]).catch(()=>{});
+      }
+      await renewedQuery(`DELETE FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]).catch(()=>{});
+      await renewedQuery(`DELETE FROM public.cerood_shop_orders WHERE id=?`,[order.id]).catch(()=>{});
+      throw inner;
+    }
+
+    return res.status(201).json({success:true,order:await shopOrderWithItems(order)});
+  }catch(error){
+    console.error('Main Store COD checkout:',error);
+    return res.status(error.status||503).json({success:false,message:error.status?error.message:'Unable to place Main Store order.'});
+  }
+});
+
+app.get('/api/shop/customer-orders',renewedCustomerSession,async(req,res)=>{
+  try{
+    res.set('Cache-Control','no-store');
+    const rows=await renewedQuery(
+      `SELECT *
+         FROM public.cerood_shop_orders
+        WHERE customer_id=?
+           OR (customer_id IS NULL AND customer_phone=?)
+        ORDER BY created_at DESC
+        LIMIT 200`,
+      [req.ceroodCustomerId,req.ceroodCustomerPhone]
+    );
+    const orders=[];
+    for(const row of rows) orders.push(await shopOrderWithItems(row));
+    return res.json({success:true,orders});
+  }catch(error){
+    console.error('Main Store customer orders:',error);
+    return res.status(503).json({success:false,message:'Unable to load Main Store orders.'});
+  }
+});
+
+
 // Common Cerood shopping customer session.
 // Accept new common tokens and temporary legacy Renewed tokens.
 function renewedCustomerSession(req,res,next){
