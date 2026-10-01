@@ -11249,6 +11249,168 @@ function renewedCustomerSession(req,res,next){
     return res.status(401).json({success:false,message:'Session expired. Please sign in again.'});
   }
 }
+
+// ============================================================
+// CEROOD COMMON CUSTOMER ADDRESSES
+// Renewed + Fashion + Beauty + Main Store.
+// Does NOT affect Home Services.
+// ============================================================
+function ceroodAddressText(value, max = 180) {
+    return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
+}
+
+function ceroodAddressPayload(body) {
+    const a = body && typeof body === 'object' && !Array.isArray(body) ? body : {};
+    const out = {
+        full_name: ceroodAddressText(a.full_name || a.name, 120),
+        phone: ceroodAddressText(a.phone, 20).replace(/\D/g, '').slice(-10),
+        address_line1: ceroodAddressText(a.address_line1 || a.house || a.address, 220),
+        address_line2: ceroodAddressText(a.address_line2 || a.street, 220),
+        landmark: ceroodAddressText(a.landmark, 160),
+        city: ceroodAddressText(a.city || a.village, 120),
+        district: ceroodAddressText(a.district, 120),
+        state: ceroodAddressText(a.state, 120),
+        pincode: ceroodAddressText(a.pincode, 10).replace(/\D/g, '').slice(0, 6),
+        address_type: ceroodAddressText(a.address_type || 'HOME', 20).toUpperCase(),
+        is_default: a.is_default === true
+    };
+
+    if (!out.full_name || !out.address_line1 || !out.state ||
+        !/^[6-9]\d{9}$/.test(out.phone) || !/^\d{6}$/.test(out.pincode)) {
+        const error = new Error('Enter a valid name, mobile number, address, state and pincode.');
+        error.status = 400;
+        throw error;
+    }
+    if (!out.city && !out.district) {
+        const error = new Error('City or district is required.');
+        error.status = 400;
+        throw error;
+    }
+    if (!['HOME','WORK','OTHER'].includes(out.address_type)) out.address_type = 'HOME';
+    return out;
+}
+
+app.get('/api/customer/addresses', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const rows = await renewedQuery(
+            `SELECT id,full_name,phone,address_line1,address_line2,landmark,
+                    city,district,state,pincode,address_type,is_default,created_at,updated_at
+             FROM public.cerood_customer_addresses
+             WHERE customer_id=?
+             ORDER BY is_default DESC, created_at DESC`,
+            [req.ceroodCustomerId]
+        );
+        return res.json({ success:true, addresses:rows });
+    } catch (error) {
+        console.error('Customer addresses load:', error.message);
+        return res.status(503).json({ success:false, message:'Unable to load saved addresses.' });
+    }
+});
+
+app.post('/api/customer/addresses', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    try {
+        const a = ceroodAddressPayload(req.body);
+        // Account ownership/phone is trusted from JWT, never from another customer's input.
+        a.phone = req.ceroodCustomerPhone;
+
+        const countRows = await renewedQuery(
+            `SELECT COUNT(*)::int AS count FROM public.cerood_customer_addresses WHERE customer_id=?`,
+            [req.ceroodCustomerId]
+        );
+        if ((Number(countRows?.[0]?.count) || 0) >= 20) {
+            return res.status(400).json({ success:false, message:'Maximum 20 saved addresses allowed.' });
+        }
+
+        const makeDefault = a.is_default || (Number(countRows?.[0]?.count) || 0) === 0;
+        if (makeDefault) {
+            await renewedQuery(
+                `UPDATE public.cerood_customer_addresses SET is_default=FALSE,updated_at=NOW() WHERE customer_id=?`,
+                [req.ceroodCustomerId]
+            );
+        }
+
+        const rows = await renewedQuery(
+            `INSERT INTO public.cerood_customer_addresses
+             (customer_id,full_name,phone,address_line1,address_line2,landmark,city,district,state,pincode,address_type,is_default)
+             VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+             ON CONFLICT (
+                customer_id,
+                lower(trim(address_line1)),
+                lower(trim(coalesce(city,''))),
+                lower(trim(state)),
+                trim(pincode)
+             )
+             DO UPDATE SET
+                full_name=EXCLUDED.full_name,
+                phone=EXCLUDED.phone,
+                address_line2=EXCLUDED.address_line2,
+                landmark=EXCLUDED.landmark,
+                district=EXCLUDED.district,
+                address_type=EXCLUDED.address_type,
+                updated_at=NOW()
+             RETURNING *`,
+            [req.ceroodCustomerId,a.full_name,a.phone,a.address_line1,a.address_line2||null,
+             a.landmark||null,a.city||'',a.district||null,a.state,a.pincode,a.address_type,makeDefault]
+        );
+        return res.status(201).json({ success:true, address:rows[0] });
+    } catch (error) {
+        console.error('Customer address save:', error.message);
+        return res.status(error.status || 503).json({ success:false, message:error.status ? error.message : 'Unable to save address.' });
+    }
+});
+
+app.put('/api/customer/addresses/:id', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const id=String(req.params.id||'').trim();
+    if(!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({success:false,message:'Invalid address ID.'});
+    try {
+        const a=ceroodAddressPayload(req.body);
+        a.phone=req.ceroodCustomerPhone;
+        if(a.is_default) {
+            await renewedQuery(`UPDATE public.cerood_customer_addresses SET is_default=FALSE,updated_at=NOW() WHERE customer_id=?`,[req.ceroodCustomerId]);
+        }
+        const rows=await renewedQuery(
+            `UPDATE public.cerood_customer_addresses
+             SET full_name=?,phone=?,address_line1=?,address_line2=?,landmark=?,city=?,district=?,state=?,pincode=?,address_type=?,
+                 is_default=CASE WHEN ? THEN TRUE ELSE is_default END,updated_at=NOW()
+             WHERE id=? AND customer_id=? RETURNING *`,
+            [a.full_name,a.phone,a.address_line1,a.address_line2||null,a.landmark||null,a.city||'',a.district||null,
+             a.state,a.pincode,a.address_type,a.is_default,id,req.ceroodCustomerId]
+        );
+        if(!rows.length) return res.status(404).json({success:false,message:'Address not found.'});
+        return res.json({success:true,address:rows[0]});
+    } catch(error) {
+        console.error('Customer address update:',error.message);
+        return res.status(error.status||503).json({success:false,message:error.status?error.message:'Unable to update address.'});
+    }
+});
+
+app.delete('/api/customer/addresses/:id', renewedCustomerSession, async (req, res) => {
+    res.set('Cache-Control','no-store');
+    const id=String(req.params.id||'').trim();
+    if(!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({success:false,message:'Invalid address ID.'});
+    try {
+        const rows=await renewedQuery(
+            `DELETE FROM public.cerood_customer_addresses WHERE id=? AND customer_id=? RETURNING id,is_default`,
+            [id,req.ceroodCustomerId]
+        );
+        if(!rows.length) return res.status(404).json({success:false,message:'Address not found.'});
+        if(rows[0].is_default) {
+            await renewedQuery(
+                `UPDATE public.cerood_customer_addresses SET is_default=TRUE,updated_at=NOW()
+                 WHERE id=(SELECT id FROM public.cerood_customer_addresses WHERE customer_id=? ORDER BY created_at DESC LIMIT 1)`,
+                [req.ceroodCustomerId]
+            );
+        }
+        return res.json({success:true});
+    } catch(error) {
+        console.error('Customer address delete:',error.message);
+        return res.status(503).json({success:false,message:'Unable to delete address.'});
+    }
+});
+
 app.post('/api/renewed/customer-login',(req,res)=>{
   res.set('Cache-Control','no-store');
   const phone=String(req.body?.phone||'').trim(),password=String(req.body?.password||'');
