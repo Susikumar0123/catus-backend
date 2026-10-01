@@ -662,12 +662,14 @@ app.post(
                                     };
 
 
+                            const customerSession =
+                                createCeroodCustomerSession(createdUser);
                             return res.json({
                                 success: true,
-                                message:
-                                    'Account created successfully!',
-                                user:
-                                    createdUser
+                                message: 'Account created successfully!',
+                                user: publicCeroodCustomer(createdUser),
+                                customer_session: customerSession,
+                                renewed_session: customerSession
                             });
                         }
                     );
@@ -871,12 +873,14 @@ app.post(
                     }
 
 
+                    const customerSession =
+                        createCeroodCustomerSession(updatedRows[0]);
                     return res.json({
                         success: true,
-                        message:
-                            'Password updated successfully!',
-                        user:
-                            updatedRows[0]
+                        message: 'Password updated successfully!',
+                        user: publicCeroodCustomer(updatedRows[0]),
+                        customer_session: customerSession,
+                        renewed_session: customerSession
                     });
                 }
             );
