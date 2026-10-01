@@ -11250,6 +11250,62 @@ function renewedCustomerSession(req,res,next){
   }
 }
 
+
+// ============================================================
+// CEROOD COMMON CUSTOMER PROFILE
+// Uses the authenticated Cerood customer session.
+// Mobile number is intentionally read-only here; changing it must use OTP.
+// ============================================================
+function ceroodProfileText(value, max = 160) {
+  return String(value ?? '').trim().replace(/\s+/g, ' ').slice(0, max);
+}
+
+app.get('/api/customer/profile', renewedCustomerSession, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const rows = await renewedQuery(
+      `SELECT id,name,email,phone,pincode,address
+       FROM public.users
+       WHERE id=?
+       LIMIT 1`,
+      [req.ceroodCustomerId]
+    );
+    const user = rows && rows[0];
+    if (!user) return res.status(404).json({success:false,message:'Customer account not found.'});
+    return res.json({success:true,user:publicCeroodCustomer(user)});
+  } catch (error) {
+    console.error('Customer profile load:', error.message);
+    return res.status(503).json({success:false,message:'Unable to load customer profile.'});
+  }
+});
+
+app.put('/api/customer/profile', renewedCustomerSession, async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const name = ceroodProfileText(req.body?.name, 120);
+    const email = ceroodProfileText(req.body?.email, 180).toLowerCase();
+
+    if (!name) return res.status(400).json({success:false,message:'Name is required.'});
+    if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({success:false,message:'Enter a valid email address.'});
+    }
+
+    const rows = await renewedQuery(
+      `UPDATE public.users
+       SET name=?, email=?
+       WHERE id=?
+       RETURNING id,name,email,phone,pincode,address`,
+      [name,email,req.ceroodCustomerId]
+    );
+    const user = rows && rows[0];
+    if (!user) return res.status(404).json({success:false,message:'Customer account not found.'});
+    return res.json({success:true,message:'Profile updated successfully.',user:publicCeroodCustomer(user)});
+  } catch (error) {
+    console.error('Customer profile update:', error.message);
+    return res.status(503).json({success:false,message:'Unable to update customer profile.'});
+  }
+});
+
 // ============================================================
 // CEROOD COMMON CUSTOMER ADDRESSES
 // Renewed + Fashion + Beauty + Main Store.
