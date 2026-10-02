@@ -287,6 +287,118 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
     }
   }
 
+  // ==========================================================
+  // CEROOD CATALOG LATCH — search existing approved Renewed products
+  // Seller can attach an offer to an existing master product instead
+  // of creating a duplicate product row.
+  // ==========================================================
+  app.get('/api/sellers/catalog-search',requireSellerAuth,async(req,res)=>{
+    try {
+      const q=String(req.query.q||'').trim().slice(0,120);
+      if (q.length < 2) return res.json({success:true,products:[]});
+      const like=`%${q}%`;
+      const products=await query(
+        `SELECT id,name,category,condition,brand,model,image_url,warranty_days,status,approval_status
+         FROM public.renewed_products
+         WHERE approval_status='approved'
+           AND status='published'
+           AND (
+             LOWER(COALESCE(name,'')) LIKE LOWER(?) OR
+             LOWER(COALESCE(brand,'')) LIKE LOWER(?) OR
+             LOWER(COALESCE(model,'')) LIKE LOWER(?) OR
+             LOWER(CONCAT(COALESCE(brand,''),' ',COALESCE(model,''))) LIKE LOWER(?)
+           )
+         ORDER BY
+           CASE WHEN LOWER(COALESCE(name,''))=LOWER(?) THEN 0 ELSE 1 END,
+           updated_at DESC
+         LIMIT 20`,
+        [like,like,like,like,q]
+      );
+      res.json({success:true,products});
+    } catch(e) { err(res,e); }
+  });
+
+  // Create/update this seller's offer for an existing product.
+  app.post('/api/sellers/products/:id/latch',requireSellerAuth,async(req,res)=>{
+    try {
+      const productId=String(req.params.id||'').trim();
+      if (!productId || productId.length > 200) throw bad('Invalid product ID.');
+
+      const master=await query(
+        `SELECT id,name,condition,warranty_days
+         FROM public.renewed_products
+         WHERE id=? AND approval_status='approved' AND status='published'
+         LIMIT 1`,
+        [productId]
+      );
+      if (!master.length) return res.status(404).json({success:false,message:'Approved product was not found in the CEROOD catalog.'});
+
+      const money=(key,required=false)=>{
+        const raw=req.body?.[key];
+        if (!required && (raw==='' || raw==null)) return null;
+        const n=Number(raw);
+        if (!Number.isFinite(n) || n < 0 || n > 100000000) throw bad(`Invalid ${key}.`);
+        if (required && n <= 0) throw bad(`${key} must be greater than zero.`);
+        return n;
+      };
+      const integer=(key,min,max,def)=>{
+        const raw=req.body?.[key];
+        if ((raw==='' || raw==null) && def!==undefined) return def;
+        const n=Number(raw);
+        if (!Number.isSafeInteger(n) || n<min || n>max) throw bad(`Invalid ${key}.`);
+        return n;
+      };
+
+      const price=money('price',true);
+      const comparePrice=money('compare_price',false);
+      const stock=integer('stock',0,99999);
+      const warrantyDays=integer('warranty_days',0,3650,Number(master[0].warranty_days||0));
+      const dispatchDays=integer('dispatch_days',0,60,1);
+      const sellerSku=String(req.body?.seller_sku||'').trim().slice(0,120) || null;
+      const condition=String(req.body?.condition||master[0].condition||'Refurbished').trim().slice(0,40);
+
+      // UNIQUE(seller_id,product_id) makes this idempotent: a repeat submission
+      // updates the seller offer and sends it back for admin approval.
+      const rows=await query(
+        `INSERT INTO public.cerood_seller_listings
+          (seller_id,product_id,seller_sku,price,compare_price,stock,warranty_days,dispatch_days,condition,approval_status,rejection_reason,is_active)
+         VALUES (?,?,?,?,?,?,?,?,?,'pending',NULL,true)
+         ON CONFLICT (seller_id,product_id)
+         DO UPDATE SET
+           seller_sku=EXCLUDED.seller_sku,
+           price=EXCLUDED.price,
+           compare_price=EXCLUDED.compare_price,
+           stock=EXCLUDED.stock,
+           warranty_days=EXCLUDED.warranty_days,
+           dispatch_days=EXCLUDED.dispatch_days,
+           condition=EXCLUDED.condition,
+           approval_status='pending',
+           rejection_reason=NULL,
+           is_active=true,
+           updated_at=NOW()
+         RETURNING *`,
+        [req.seller.id,productId,sellerSku,price,comparePrice,stock,warrantyDays,dispatchDays,condition]
+      );
+      res.status(201).json({success:true,message:'Product latched successfully. Waiting for CEROOD admin approval.',listing:rows[0],product:master[0]});
+    } catch(e) { err(res,e); }
+  });
+
+  // Seller's own latched offers.
+  app.get('/api/sellers/latched-products',requireSellerAuth,async(req,res)=>{
+    try {
+      const rows=await query(
+        `SELECT l.*,p.name,p.brand,p.model,p.image_url,p.category
+         FROM public.cerood_seller_listings l
+         JOIN public.renewed_products p ON p.id=l.product_id
+         WHERE l.seller_id=?
+         ORDER BY l.updated_at DESC
+         LIMIT 250`,
+        [req.seller.id]
+      );
+      res.json({success:true,products:rows});
+    } catch(e) { err(res,e); }
+  });
+
   // Sellers can read ONLY their own inventory.
   app.get('/api/sellers/products',requireSellerAuth,async(req,res)=>{
     try {
@@ -484,4 +596,78 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
       err(res,e);
     }
   });
+
+  // =========================================================
+  // CEROOD LATCH — ADMIN REVIEW
+  // Seller offer approval is separate from the master product.
+  // =========================================================
+
+  app.get('/api/admin/seller-listings',requireAdminAuth,async(req,res)=>{
+    try {
+      const listings = await query(
+        `SELECT
+           l.id,l.seller_id,l.product_id,l.seller_sku,l.price,l.compare_price,
+           l.stock,l.warranty_days,l.dispatch_days,l.condition,
+           l.approval_status,l.rejection_reason,l.is_active,
+           l.created_at,l.updated_at,
+           p.name,p.brand,p.model,p.category,p.image_url,
+           s.shop_name,s.owner_name,s.phone AS seller_phone
+         FROM public.cerood_seller_listings l
+         JOIN public.renewed_products p ON p.id=l.product_id
+         JOIN public.cerood_sellers s ON s.id=l.seller_id
+         ORDER BY l.updated_at DESC
+         LIMIT 500`
+      );
+      res.json({success:true,listings});
+    } catch(e) {
+      err(res,e);
+    }
+  });
+
+  app.patch('/api/admin/seller-listings/:id/approval',requireAdminAuth,async(req,res)=>{
+    try {
+      if (!uuid(req.params.id)) throw bad('Invalid seller listing ID.');
+
+      const approval = String(req.body?.approval_status || '').trim();
+      if (!['approved','rejected','pending','suspended'].includes(approval)) {
+        throw bad('Invalid approval status.');
+      }
+
+      const reason = approval === 'rejected'
+        ? String(req.body?.rejection_reason || '').trim().slice(0,1000)
+        : null;
+
+      if (approval === 'rejected' && !reason) {
+        throw bad('Rejection reason is required.');
+      }
+
+      const listings = await query(
+        `UPDATE public.cerood_seller_listings l
+         SET approval_status=?,
+             rejection_reason=?,
+             is_active=CASE WHEN ?='approved' THEN true
+                            WHEN ? IN ('rejected','suspended') THEN false
+                            ELSE l.is_active END,
+             updated_at=NOW()
+         FROM public.cerood_sellers s
+         WHERE l.id=?
+           AND l.seller_id=s.id
+           AND s.status='approved'
+         RETURNING l.*`,
+        [approval,reason,approval,approval,req.params.id]
+      );
+
+      if (!listings.length) {
+        return res.status(404).json({
+          success:false,
+          message:'Seller listing or active seller not found.'
+        });
+      }
+
+      res.json({success:true,listing:listings[0]});
+    } catch(e) {
+      err(res,e);
+    }
+  });
+
 };
