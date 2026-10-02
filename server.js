@@ -9797,6 +9797,58 @@ app.get('/api/renewed/products/:id', async (req,res) => {
         res.json({success:true,product:await hydrateRenewedDynamicProduct(rows[0])});
     } catch(error) { renewedError(res,error); }
 });
+
+// Public approved seller offers for one Renewed master product.
+// Only approved/active sellers and approved/active listings are exposed.
+app.get('/api/renewed/products/:id/seller-offers', async (req,res) => {
+    try {
+        const productId = String(req.params.id || '').trim();
+        if(!/^[a-zA-Z0-9_-]{1,80}$/.test(productId))
+            return res.status(400).json({success:false,message:'Invalid product ID.'});
+
+        const master = await renewedQuery(
+            `SELECT id,name,status
+             FROM public.renewed_products
+             WHERE id=? AND status='published'
+               AND (seller_id IS NULL OR approval_status='approved')
+             LIMIT 1`,
+            [productId]
+        );
+        if(!master.length)
+            return res.status(404).json({success:false,message:'Product not found.'});
+
+        const offers = await renewedQuery(
+            `SELECT
+                l.id AS seller_listing_id,
+                l.product_id,
+                l.seller_id,
+                l.seller_sku,
+                l.price,
+                l.compare_price,
+                l.stock,
+                l.warranty_days,
+                l.dispatch_days,
+                l.condition,
+                s.shop_name,
+                s.owner_name
+             FROM public.cerood_seller_listings l
+             JOIN public.cerood_sellers s ON s.id=l.seller_id
+             WHERE l.product_id=?
+               AND l.approval_status='approved'
+               AND l.is_active=true
+               AND l.stock>0
+               AND s.status='approved'
+             ORDER BY l.price ASC,l.dispatch_days ASC,l.updated_at DESC
+             LIMIT 50`,
+            [productId]
+        );
+
+        return res.json({success:true,product_id:productId,offers});
+    } catch(error) {
+        return renewedError(res,error);
+    }
+});
+
 app.get('/api/admin/renewed/products', async (req,res) => {
     try {
         const rows = await renewedQuery(`SELECT ${renewedPublicFields} FROM public.renewed_products ORDER BY updated_at DESC LIMIT 500`);
