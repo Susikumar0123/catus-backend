@@ -10240,14 +10240,44 @@ async function renewedReleaseExpired(client) {
     `,[ids]);
     const releasedIds = changed.map(row => row.id);
     if (!releasedIds.length) return 0;
+    // Restore latched seller inventory first. seller_id + product_id is unique
+    // in cerood_seller_listings, so no new order-item column is required.
+    await client.query(`
+        UPDATE public.cerood_seller_listings l
+        SET stock = l.stock + r.qty, updated_at = NOW()
+        FROM (
+          SELECT oi.product_id, oi.seller_id, SUM(oi.quantity)::integer AS qty
+          FROM public.renewed_order_items oi
+          WHERE oi.order_id = ANY($1::uuid[])
+            AND oi.seller_id IS NOT NULL
+            AND EXISTS (
+              SELECT 1
+              FROM public.cerood_seller_listings x
+              WHERE x.product_id = oi.product_id
+                AND x.seller_id = oi.seller_id
+            )
+          GROUP BY oi.product_id, oi.seller_id
+        ) r
+        WHERE l.product_id = r.product_id
+          AND l.seller_id = r.seller_id
+    `,[releasedIds]);
+
+    // Restore legacy/non-latched Renewed inventory only when that order item
+    // does not map to a seller listing.
     await client.query(`
         UPDATE public.renewed_products p
         SET stock = p.stock + r.qty, updated_at = NOW()
         FROM (
-          SELECT product_id, SUM(quantity)::integer AS qty
-          FROM public.renewed_order_items
-          WHERE order_id = ANY($1::uuid[])
-          GROUP BY product_id
+          SELECT oi.product_id, SUM(oi.quantity)::integer AS qty
+          FROM public.renewed_order_items oi
+          WHERE oi.order_id = ANY($1::uuid[])
+            AND NOT EXISTS (
+              SELECT 1
+              FROM public.cerood_seller_listings x
+              WHERE x.product_id = oi.product_id
+                AND x.seller_id = oi.seller_id
+            )
+          GROUP BY oi.product_id
         ) r
         WHERE p.id = r.product_id
     `,[releasedIds]);
@@ -10274,6 +10304,114 @@ async function renewedRunExpiry() {
 // HARD DISABLED until payment verification, webhook and reconciliation ship.
 // Do not remove this gate or expose the route in production yet.
 // ==========================================
+
+// LATCH CHECKOUT HELPERS
+// Browser sends product_id + optional seller_listing_id. The server never trusts
+// browser price, stock, warranty or seller identity.
+const CEROOD_UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function renewedNormalizeCheckoutItems(items) {
+    const selections = new Map();
+    for (const item of items) {
+        const productId = String(item?.product_id || '').trim();
+        const listingId = String(item?.seller_listing_id || '').trim();
+        const qty = Number(item?.quantity);
+        if (!/^[a-zA-Z0-9_-]{1,80}$/.test(productId) ||
+            (listingId && !CEROOD_UUID_RE.test(listingId)) ||
+            !Number.isSafeInteger(qty) || qty < 1 || qty > 99) {
+            const e = new Error('Invalid product, seller offer or quantity.');
+            e.status = 400; throw e;
+        }
+        const key = productId + '::' + listingId;
+        const current = selections.get(key);
+        const sum = (current?.qty || 0) + qty;
+        if (sum > 99) { const e = new Error('Quantity limit exceeded.'); e.status = 400; throw e; }
+        selections.set(key,{product_id:productId,listing_id:listingId||null,qty:sum});
+    }
+    return [...selections.values()].sort((a,b)=>
+        (a.product_id+'::'+(a.listing_id||'')).localeCompare(b.product_id+'::'+(b.listing_id||'')));
+}
+
+async function renewedResolveCheckoutItems(client, selections) {
+    const productIds = [...new Set(selections.map(x=>x.product_id))].sort();
+    const listingIds = [...new Set(selections.map(x=>x.listing_id).filter(Boolean))].sort();
+
+    const products = await client.query(
+        `SELECT id,name,price,stock,status,warranty_days,seller_id
+         FROM public.renewed_products
+         WHERE id = ANY($1::text[])
+         ORDER BY id FOR UPDATE`,[productIds]);
+    const byProduct = new Map(products.map(p=>[String(p.id),p]));
+
+    let listingById = new Map();
+    if (listingIds.length) {
+        const listings = await client.query(
+            `SELECT l.id,l.product_id,l.seller_id,l.price,l.stock,l.warranty_days,
+                    l.approval_status,l.is_active,s.status AS seller_status
+             FROM public.cerood_seller_listings l
+             JOIN public.cerood_sellers s ON s.id=l.seller_id
+             WHERE l.id = ANY($1::uuid[])
+             ORDER BY l.id FOR UPDATE`,[listingIds]);
+        listingById = new Map(listings.map(l=>[String(l.id),l]));
+    }
+
+    let subtotal=0;
+    const orderItems=[];
+    for (const sel of selections) {
+        const p=byProduct.get(sel.product_id);
+        if (!p || p.status!=='published') {
+            const e=new Error('Product unavailable.'); e.status=409; throw e;
+        }
+
+        let unit,warranty,sellerId,stock,listingId=null;
+        if (sel.listing_id) {
+            const l=listingById.get(sel.listing_id);
+            if (!l || String(l.product_id)!==sel.product_id ||
+                l.approval_status!=='approved' || l.is_active!==true ||
+                l.seller_status!=='approved') {
+                const e=new Error('Selected seller offer is no longer available.'); e.status=409; throw e;
+            }
+            unit=Number(l.price); warranty=Number(l.warranty_days||0);
+            sellerId=l.seller_id; stock=Number(l.stock); listingId=String(l.id);
+        } else {
+            unit=Number(p.price); warranty=Number(p.warranty_days||0);
+            sellerId=p.seller_id||null; stock=Number(p.stock);
+        }
+
+        if (!Number.isSafeInteger(unit) || unit<1 || stock<sel.qty) {
+            const e=new Error('Product unavailable or insufficient stock.'); e.status=409; throw e;
+        }
+        const line=unit*sel.qty;
+        subtotal+=line;
+        if (!Number.isSafeInteger(line) || !Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
+        orderItems.push({
+            id:sel.product_id, listing_id:listingId, name:p.name, qty:sel.qty,
+            unit,line,warranty_days:warranty,seller_id:sellerId
+        });
+    }
+    return {subtotal,orderItems};
+}
+
+async function renewedReduceResolvedStock(client,item) {
+    if (item.listing_id) {
+        const rows=await client.query(
+            `UPDATE public.cerood_seller_listings
+             SET stock=stock-$1,updated_at=NOW()
+             WHERE id=$2 AND product_id=$3 AND seller_id=$4
+               AND approval_status='approved' AND is_active=true AND stock >= $1
+             RETURNING id`,
+            [item.qty,item.listing_id,item.id,item.seller_id]);
+        return rows.length>0;
+    }
+    const rows=await client.query(
+        `UPDATE public.renewed_products
+         SET stock=stock-$1,updated_at=NOW()
+         WHERE id=$2 AND status='published' AND stock >= $1
+         RETURNING id`,[item.qty,item.id]);
+    return rows.length>0;
+}
+
+
 // RENEWED CASH ON DELIVERY: atomic stock decrement + order creation.
 // Independent from Razorpay; only enabled by explicit environment switch.
 app.post('/api/renewed/place-cod-order',optionalCeroodCustomerSession, async (req,res)=>{
@@ -10334,16 +10472,10 @@ if (
         message: 'Complete Indian delivery address and verified mobile are required.'
     });
 }
-        const quantities=new Map();
-        for(const item of items){
-            const id=String(item?.product_id||'').trim(),qty=Number(item?.quantity);
-            if(!/^[a-zA-Z0-9_-]{1,80}$/.test(id)||!Number.isSafeInteger(qty)||qty<1||qty>99)
-                return res.status(400).json({success:false,message:'Invalid product or quantity.'});
-            const sum=(quantities.get(id)||0)+qty;
-            if(sum>99)return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
-            quantities.set(id,sum);
-        }
-        const ids=[...quantities.keys()].sort();
+        let selections;
+        try { selections=renewedNormalizeCheckoutItems(items); }
+        catch(e){ return res.status(e.status||400).json({success:false,message:e.message}); }
+
         client=await db.getClient();
         await client.query('BEGIN');
         await client.query('SELECT pg_advisory_xact_lock($1)',[RENEWED_RESERVE_LOCK]);
@@ -10355,31 +10487,9 @@ if (
         }
         const users=guestCheckout?[]:await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
         if(!guestCheckout&&!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
-        const products=await client.query(
-  `SELECT id,name,price,stock,status,warranty_days,seller_id
-   FROM public.renewed_products
-   WHERE id=ANY($1::text[])
-   ORDER BY id
-   FOR UPDATE`,
-  [ids]
-);
-        const byId=new Map(products.map(p=>[String(p.id),p]));
-        let subtotal=0;const orderItems=[];
-        for(const id of ids){
-            const p=byId.get(id),qty=quantities.get(id);
-            if(!p||p.status!=='published'||Number(p.stock)<qty){const e=Error('Product unavailable or sold out.');e.status=409;throw e;}
-            const unit=Number(p.price),line=unit*qty;subtotal+=line;
-            if(!Number.isSafeInteger(unit)||unit<1||!Number.isSafeInteger(line)||!Number.isSafeInteger(subtotal))throw Error('Invalid price.');
-            orderItems.push({
-    id,
-    name: p.name,
-    qty,
-    unit,
-    line,
-    warranty_days: Number(p.warranty_days || 0),
-    seller_id: p.seller_id || null
-});
-        }
+
+        const resolved=await renewedResolveCheckoutItems(client,selections);
+        const subtotal=resolved.subtotal, orderItems=resolved.orderItems;
         const fee = ceroodShoppingDeliveryFee(subtotal);
 
 const total = subtotal + fee;
@@ -10407,9 +10517,8 @@ if (
           VALUES ($1,$2,$3,$4,$5,$6::jsonb,$7,$8,$9,'INR','processing','confirmed','cod',$10)`,
           [id,guestCheckout?null:String(users[0].id),fullName,phone,guestCheckout?null:(users[0].email||null),JSON.stringify(savedAddress),subtotal,fee,total,requestId]);
         for(const item of orderItems){
-            const reduced=await client.query(`UPDATE public.renewed_products SET stock=stock-$1,updated_at=NOW()
-              WHERE id=$2 AND status='published' AND stock >= $1 RETURNING id`,[item.qty,item.id]);
-            if(!reduced.length){const e=Error('Product sold out.');e.status=409;throw e;}
+            const reduced=await renewedReduceResolvedStock(client,item);
+            if(!reduced){const e=Error('Product sold out or seller offer changed.');e.status=409;throw e;}
             await client.query(
     `INSERT INTO public.renewed_order_items
     (
@@ -10518,51 +10627,19 @@ if (
         message: 'Complete Indian delivery address required.'
     });
 }
-        const quantities = new Map();
-        for (const item of items) {
-            const id = String(item?.product_id || '').trim();
-            const qty = Number(item?.quantity);
-            if (!/^[a-zA-Z0-9_-]{1,80}$/.test(id) || !Number.isSafeInteger(qty) || qty < 1 || qty > 99)
-                return res.status(400).json({success:false,message:'Invalid item.'});
-            const sum = (quantities.get(id) || 0) + qty;
-            if (sum > 99) return res.status(400).json({success:false,message:'Quantity limit exceeded.'});
-            quantities.set(id,sum);
-        }
-        const sortedIds = [...quantities.keys()].sort();
+        let selections;
+        try { selections=renewedNormalizeCheckoutItems(items); }
+        catch(e){ return res.status(e.status||400).json({success:false,message:e.message}); }
+
         client = await db.getClient();
         await client.query('BEGIN');
         await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
         await renewedReleaseExpired(client);
-        const products = await client.query(
-    `SELECT id,name,price,stock,status,warranty_days,seller_id
-     FROM public.renewed_products
-     WHERE id = ANY($1::text[])
-     ORDER BY id
-     FOR UPDATE`,
-    [sortedIds]
-);
-        const byId = new Map(products.map(p => [String(p.id),p]));
-        let subtotal = 0;
-        const orderItems = [];
-        for (const id of sortedIds) {
-            const p = byId.get(id), qty = quantities.get(id);
-            if (!p || p.status !== 'published' || Number(p.stock) < qty) {
-                const e = new Error('Product unavailable or insufficient stock.'); e.status = 409; throw e;
-            }
-            const unit = Number(p.price), line = unit * qty;
-            if (!Number.isSafeInteger(unit) || unit < 1 || !Number.isSafeInteger(line)) throw Error('Invalid product price.');
-            subtotal += line;
-            if (!Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
-            orderItems.push({
-    id,
-    name: p.name,
-    qty,
-    unit,
-    line,
-    warranty_days: Number(p.warranty_days || 0),
-    seller_id: p.seller_id || null
-});
-        }
+
+        const resolved=await renewedResolveCheckoutItems(client,selections);
+        const subtotal=resolved.subtotal, orderItems=resolved.orderItems;
+        const sortedIds=[...new Set(orderItems.map(x=>x.id))].sort();
+
         // ONLINE ONLY: apply the seller's active Renewed prepaid discount.
         // Never trust a discount amount from the browser.
         const discountRows = await client.query(
@@ -10634,11 +10711,8 @@ if (
             [orderId,guestCheckout?null:String(users[0].id),fullName,verifiedPhone,guestCheckout?null:(users[0].email || null),
              JSON.stringify(savedAddress),subtotal,fee,prepaidDiscount,total]);
         for (const item of orderItems) {
-            const reduced = await client.query(
-                `UPDATE public.renewed_products SET stock = stock - $1,updated_at = NOW()
-                 WHERE id = $2 AND status = 'published' AND stock >= $1 RETURNING id`,
-                [item.qty,item.id]);
-            if (!reduced.length) {const e=new Error('Product sold out.');e.status=409;throw e;}
+            const reduced = await renewedReduceResolvedStock(client,item);
+            if (!reduced) {const e=new Error('Product sold out or seller offer changed.');e.status=409;throw e;}
             await client.query(
     `INSERT INTO public.renewed_order_items
     (
