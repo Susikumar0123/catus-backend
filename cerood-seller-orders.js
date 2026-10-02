@@ -775,7 +775,7 @@ module.exports = function (
 
                                 ? 'Order accepted.'
 
-                                : 'Order rejected. Cerood admin must resolve fulfilment/refund.',
+                                : 'Order rejected. Reserved stock restored for this seller item; Cerood admin must resolve any payment/refund action.',
 
                         order: rows[0]
 
@@ -858,99 +858,230 @@ module.exports = function (
 
             try {
 
-                const sql = `
+                // A reject must restore the stock that checkout already deducted.
+                // This is intentionally one SQL statement:
+                // - transition is allowed only from NULL/new
+                // - therefore a repeated reject cannot restore stock twice
+                // - latched offers restore cerood_seller_listings stock
+                // - legacy seller-owned Renewed products restore renewed_products stock
+                // - mixed-seller orders remain active; only this seller's item changes
+                const sql = decision === 'rejected'
+                    ? `
 
-                    UPDATE public.renewed_order_items AS oi
+                        WITH transitioned AS (
 
-                    SET
+                            UPDATE public.renewed_order_items AS oi
 
-                        seller_order_status = ?,
+                            SET
 
-                        seller_accepted_at =
+                                seller_order_status = 'rejected',
+
+                                seller_rejected_at = NOW()
+
+                            FROM public.renewed_orders AS o
+
+                            WHERE oi.order_id = o.id
+
+                              AND oi.id = ?
+
+                              AND oi.seller_id = ?
+
+                              AND (
+
+                                    oi.seller_order_status IS NULL
+
+                                    OR oi.seller_order_status = 'new'
+
+                              )
+
+                              AND (
+
+                                    (
+
+                                        o.payment_method = 'cod'
+
+                                        AND o.status = 'processing'
+
+                                    )
+
+                                    OR
+
+                                    (
+
+                                        o.payment_method <> 'cod'
+
+                                        AND o.status = 'paid'
+
+                                    )
+
+                              )
+
+                            RETURNING
+
+                                oi.id AS order_item_id,
+
+                                oi.order_id,
+
+                                oi.product_id,
+
+                                oi.seller_id,
+
+                                oi.quantity,
+
+                                oi.seller_order_status,
+
+                                oi.seller_accepted_at,
+
+                                oi.seller_rejected_at
+
+                        ),
+
+                        restored_listing AS (
+
+                            UPDATE public.cerood_seller_listings AS l
+
+                            SET
+
+                                stock = l.stock + t.quantity,
+
+                                updated_at = NOW()
+
+                            FROM transitioned AS t
+
+                            WHERE l.seller_id = t.seller_id
+
+                              AND l.product_id = t.product_id
+
+                            RETURNING l.id
+
+                        ),
+
+                        restored_master AS (
+
+                            UPDATE public.renewed_products AS p
+
+                            SET
+
+                                stock = p.stock + t.quantity,
+
+                                updated_at = NOW()
+
+                            FROM transitioned AS t
+
+                            WHERE p.id = t.product_id
+
+                              AND p.seller_id = t.seller_id
+
+                              AND NOT EXISTS (
+
+                                    SELECT 1
+
+                                    FROM public.cerood_seller_listings AS l
+
+                                    WHERE l.seller_id = t.seller_id
+
+                                      AND l.product_id = t.product_id
+
+                              )
+
+                            RETURNING p.id
+
+                        )
+
+                        SELECT
+
+                            t.order_item_id,
+
+                            t.order_id,
+
+                            t.seller_order_status,
+
+                            t.seller_accepted_at,
+
+                            t.seller_rejected_at,
 
                             CASE
 
-                                WHEN ? = 'accepted'
-                                    THEN NOW()
+                                WHEN EXISTS (SELECT 1 FROM restored_listing)
+                                    THEN 'seller_listing'
 
-                                ELSE seller_accepted_at
+                                WHEN EXISTS (SELECT 1 FROM restored_master)
+                                    THEN 'master_product'
 
-                            END,
+                                ELSE 'not_restored'
 
-                        seller_rejected_at =
+                            END AS stock_restored_to
 
-                            CASE
+                        FROM transitioned AS t
 
-                                WHEN ? = 'rejected'
-                                    THEN NOW()
+                    `
+                    : `
 
-                                ELSE seller_rejected_at
+                        UPDATE public.renewed_order_items AS oi
 
-                            END
+                        SET
 
-                    FROM public.renewed_orders AS o
+                            seller_order_status = 'accepted',
 
-                    WHERE oi.order_id = o.id
+                            seller_accepted_at = NOW()
 
-                      AND oi.id = ?
+                        FROM public.renewed_orders AS o
 
-                      AND oi.seller_id = ?
+                        WHERE oi.order_id = o.id
 
-                      AND (
+                          AND oi.id = ?
 
-                            oi.seller_order_status IS NULL
+                          AND oi.seller_id = ?
 
-                            OR oi.seller_order_status = 'new'
+                          AND (
 
-                      )
+                                oi.seller_order_status IS NULL
 
-                      AND (
+                                OR oi.seller_order_status = 'new'
 
-                            (
+                          )
 
-                                o.payment_method = 'cod'
+                          AND (
 
-                                AND o.status = 'processing'
+                                (
 
-                            )
+                                    o.payment_method = 'cod'
 
-                            OR
+                                    AND o.status = 'processing'
 
-                            (
+                                )
 
-                                o.payment_method <> 'cod'
+                                OR
 
-                                AND o.status = 'paid'
+                                (
 
-                            )
+                                    o.payment_method <> 'cod'
 
-                      )
+                                    AND o.status = 'paid'
 
-                    RETURNING
+                                )
 
-                        oi.id AS order_item_id,
+                          )
 
-                        oi.order_id,
+                        RETURNING
 
-                        oi.seller_order_status,
+                            oi.id AS order_item_id,
 
-                        oi.seller_accepted_at,
+                            oi.order_id,
 
-                        oi.seller_rejected_at
+                            oi.seller_order_status,
 
-                `;
+                            oi.seller_accepted_at,
+
+                            oi.seller_rejected_at
+
+                    `;
 
 
                 const rows =
                     await query(
                         sql,
                         [
-
-                            decision,
-
-                            decision,
-
-                            decision,
 
                             itemId,
 
