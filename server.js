@@ -10248,9 +10248,24 @@ async function renewedVerifyAndFinalize(razorpayOrderId,paymentId) {
     const rows = await renewedQuery(`SELECT id,total FROM public.renewed_orders
       WHERE razorpay_order_id=? LIMIT 1`,[razorpayOrderId]);
     if (!rows.length) return 'not_found';
-    const payment = await razorpayInstance.payments.fetch(paymentId);
-    if (payment.order_id !== razorpayOrderId || payment.currency !== 'INR' ||
-        Number(payment.amount) !== Number(rows[0].total)*100 || payment.status !== 'captured')
+    const [payment, gatewayOrder] = await Promise.all([
+        razorpayInstance.payments.fetch(paymentId),
+        razorpayInstance.orders.fetch(razorpayOrderId)
+    ]);
+    const localOrderAmount = Number(rows[0].total) * 100;
+    const gatewayOrderAmount = Number(gatewayOrder?.amount);
+    const capturedAmount = Number(payment?.amount);
+    if (
+        payment.order_id !== razorpayOrderId ||
+        payment.currency !== 'INR' ||
+        payment.status !== 'captured' ||
+        String(gatewayOrder?.id || '') !== razorpayOrderId ||
+        String(gatewayOrder?.currency || '') !== 'INR' ||
+        gatewayOrderAmount !== localOrderAmount ||
+        !Number.isFinite(capturedAmount) ||
+        capturedAmount < 1 ||
+        capturedAmount > gatewayOrderAmount
+    )
         return 'not_captured';
     const client = await db.getClient();
     try {
