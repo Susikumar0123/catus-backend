@@ -10807,10 +10807,27 @@ if (
             [orderId,transactionId,total,'INR','created']
         );
 
-        const razorpayOrder = await razorpayInstance.orders.create({
-            amount:total * 100,currency:'INR',receipt:`renewed_${orderId.slice(0,24)}`,
-            notes:{renewed_order_id:orderId,cerood_transaction_id:transactionId}
-        });
+        // Cerood Razorpay bank-offer integration (server controlled).
+        // Never accept an arbitrary offer id from the browser. Configure the test/live
+        // offer in Render as RAZORPAY_RENEWED_OFFER_ID. Remove/empty the env var to disable.
+        const renewedOfferId = String(process.env.RAZORPAY_RENEWED_OFFER_ID || '').trim();
+        const renewedOfferEligible =
+            /^offer_[A-Za-z0-9]+$/.test(renewedOfferId) &&
+            Number(total) >= 5000;
+
+        const razorpayOrderOptions = {
+            amount: total * 100,
+            currency: 'INR',
+            receipt: `renewed_${orderId.slice(0,24)}`,
+            notes: {
+                renewed_order_id: orderId,
+                cerood_transaction_id: transactionId,
+                ...(renewedOfferEligible ? { cerood_offer: 'bank_offer_test' } : {})
+            },
+            ...(renewedOfferEligible ? { offers: [renewedOfferId] } : {})
+        };
+
+        const razorpayOrder = await razorpayInstance.orders.create(razorpayOrderOptions);
         const updated = await renewedQuery(
     `UPDATE public.renewed_orders
      SET razorpay_order_id = ?,
@@ -10846,6 +10863,8 @@ if (
         return res.json({success:true,order_id:orderId,razorpay_order_id:razorpayOrder.id,
             transaction_id:transactionId,
             amount:razorpayOrder.amount,currency:'INR',key_id:process.env.RAZORPAY_KEY_ID,
+            offer_enabled:renewedOfferEligible,
+            offer_id:renewedOfferEligible ? renewedOfferId : null,
             subtotal,delivery_fee:fee,prepaid_discount:prepaidDiscount,total,
             reserved_until:updated[0].reserved_until,recovery_token:recoveryToken});
     } catch (e) {
