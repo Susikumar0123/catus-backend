@@ -271,15 +271,48 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
       if (!allowedSlots.has(key)) throw bad('Invalid Renewed product image slot.');
     }
 
-    const variants=rawVariants.slice(0,250).map((v,index)=>{
-      const values=(v?.variant_values && typeof v.variant_values==='object' && !Array.isArray(v.variant_values)) ? v.variant_values : {};
-      const sku=String(v?.sku||'').trim().slice(0,120) || null;
-      const price=v?.price===''||v?.price==null ? null : Number(v.price);
+    // Variant persistence: only attributes marked is_variant may appear in variant_values.
+    // Every generated combination must be unique and have its own SKU / price / stock.
+    const variantAttrs=attributeRows.filter(a=>a.is_variant);
+    const variantKeys=new Set(variantAttrs.map(a=>String(a.attribute_key)));
+    if (rawVariants.length > 250) throw bad('A product can have a maximum of 250 variants.');
+    if (variantAttrs.length && !rawVariants.length) throw bad('Add at least one product variant.');
+    if (!variantAttrs.length && rawVariants.length) throw bad('This category does not support product variants.');
+
+    const seenSkus=new Set();
+    const seenCombinations=new Set();
+    const variants=rawVariants.map((v,index)=>{
+      const row=index+1;
+      const source=(v?.variant_values && typeof v.variant_values==='object' && !Array.isArray(v.variant_values)) ? v.variant_values : {};
+      for (const key of Object.keys(source)) {
+        if (!variantKeys.has(String(key))) throw bad(`Invalid variant option at row ${row}.`);
+      }
+
+      const values={};
+      for (const a of variantAttrs) {
+        const key=String(a.attribute_key);
+        const value=String(source[key]??'').trim().slice(0,160);
+        if (!value) throw bad(`${a.label} is required for variant row ${row}.`);
+        values[key]=value;
+      }
+
+      const sku=String(v?.sku||'').trim().slice(0,120);
+      if (!sku) throw bad(`Seller SKU is required for variant row ${row}.`);
+      const skuKey=sku.toLowerCase();
+      if (seenSkus.has(skuKey)) throw bad(`Duplicate seller SKU at variant row ${row}.`);
+      seenSkus.add(skuKey);
+
+      const combinationKey=[...variantKeys].sort().map(k=>`${k}=${String(values[k]||'').trim().toLowerCase()}`).join('|');
+      if (seenCombinations.has(combinationKey)) throw bad(`Duplicate variant combination at row ${row}.`);
+      seenCombinations.add(combinationKey);
+
+      const price=Number(v?.price);
       const compare=v?.compare_price===''||v?.compare_price==null ? null : Number(v.compare_price);
       const stock=Number(v?.stock??0);
-      if (price!==null && (!Number.isFinite(price)||price<0)) throw bad(`Invalid variant price at row ${index+1}.`);
-      if (compare!==null && (!Number.isFinite(compare)||compare<0)) throw bad(`Invalid variant compare price at row ${index+1}.`);
-      if (!Number.isSafeInteger(stock)||stock<0||stock>1000000) throw bad(`Invalid variant stock at row ${index+1}.`);
+      if (!Number.isFinite(price)||price<=0||price>100000000) throw bad(`Invalid variant price at row ${row}.`);
+      if (compare!==null && (!Number.isFinite(compare)||compare<0||compare>100000000)) throw bad(`Invalid variant MRP at row ${row}.`);
+      if (compare!==null && compare<price) throw bad(`Variant MRP cannot be lower than selling price at row ${row}.`);
+      if (!Number.isSafeInteger(stock)||stock<0||stock>1000000) throw bad(`Invalid variant stock at row ${row}.`);
       return {sku,variant_values:values,price,compare_price:compare,stock};
     });
 
