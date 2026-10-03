@@ -11209,21 +11209,41 @@ function shopAddress(body){
     throw Object.assign(new Error('Complete delivery address is required.'),{status:400});
   return out;
 }
+function shopVariantValues(v){
+  if(!v||typeof v!=='object'||Array.isArray(v)) return {};
+  const out={};
+  for(const [k,val] of Object.entries(v)){
+    const key=shopCleanText(k,80);
+    if(!key) continue;
+    if(Array.isArray(val)) out[key]=val.slice(0,20).map(x=>shopCleanText(x,120));
+    else if(val!==null&&val!==undefined) out[key]=shopCleanText(val,120);
+  }
+  return out;
+}
 function shopItems(body){
   if(!Array.isArray(body)||!body.length||body.length>20)
     throw Object.assign(new Error('Cart must contain 1 to 20 products.'),{status:400});
   const merged=new Map();
   for(const raw of body){
     const id=shopCleanText(raw?.product_id,80),qty=Number(raw?.quantity);
-    if(!shopUuid(id)||!Number.isSafeInteger(qty)||qty<1||qty>10)
-      throw Object.assign(new Error('Invalid cart item.'),{status:400});
-    merged.set(id,(merged.get(id)||0)+qty);
+    const variantId=shopCleanText(raw?.variant_id,80);
+    if(!shopUuid(id)||!Number.isSafeInteger(qty)||qty<1||qty>10||
+       (variantId&&!shopUuid(variantId)))
+      throw Object.assign(new Error('Invalid cart item or product option.'),{status:400});
+    // Browser variant_sku / variant_values are display hints only. Server reloads the
+    // authoritative variant row before pricing, stock checks and order creation.
+    const key=id+'::'+(variantId||'');
+    const prev=merged.get(key);
+    const sum=(prev?.quantity||0)+qty;
+    if(sum>10) throw Object.assign(new Error('Maximum quantity is 10 per product option.'),{status:400});
+    merged.set(key,{product_id:id,variant_id:variantId||null,quantity:sum});
   }
-  return [...merged].map(([product_id,quantity])=>({product_id,quantity}));
+  return [...merged.values()];
 }
 async function shopOrderWithItems(row){
   const items=await renewedQuery(
-    `SELECT product_id,product_name,unit_price,quantity,line_total,seller_id
+    `SELECT product_id,product_name,unit_price,quantity,line_total,seller_id,
+            variant_id,variant_sku,variant_values
        FROM public.cerood_shop_order_items
       WHERE order_id=?
       ORDER BY id ASC`,[row.id]
@@ -11245,7 +11265,7 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
       return res.json({success:true,order:await shopOrderWithItems(existing[0]),idempotent:true});
     }
 
-    const ids=items.map(x=>x.product_id);
+    const ids=[...new Set(items.map(x=>x.product_id))];
     const placeholders=ids.map(()=>'?').join(',');
     const products=await renewedQuery(
       `SELECT id,seller_id,name,price,stock,status,approval_status
@@ -11256,17 +11276,57 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
       return res.status(409).json({success:false,message:'One or more products are no longer available.'});
 
     const byId=new Map(products.map(p=>[String(p.id),p]));
+    const variantIds=[...new Set(items.map(x=>x.variant_id).filter(Boolean))];
+    let variantById=new Map();
+    if(variantIds.length){
+      const vp=variantIds.map(()=>'?').join(',');
+      const rows=await renewedQuery(
+        `SELECT id,marketplace,product_id,sku,variant_values,price,compare_price,stock,is_active
+           FROM public.cerood_product_variants
+          WHERE id IN (${vp}) AND is_active=true`,variantIds
+      );
+      variantById=new Map(rows.map(v=>[String(v.id),v]));
+      if(rows.length!==variantIds.length)
+        return res.status(409).json({success:false,message:'A selected product option is no longer available.'});
+    }
+
+    // If a product has active variants, checkout must identify the exact variant.
+    const variantProductRows=await renewedQuery(
+      `SELECT DISTINCT product_id
+         FROM public.cerood_product_variants
+        WHERE product_id IN (${placeholders}) AND is_active=true`,ids
+    );
+    const productsWithVariants=new Set(variantProductRows.map(x=>String(x.product_id)));
+
     let subtotal=0;
     const lines=[];
     for(const item of items){
       const p=byId.get(item.product_id);
       if(!p||p.status!=='published'||p.approval_status!=='approved')
         return res.status(409).json({success:false,message:'A product is not available for purchase.'});
-      const price=Number(p.price),stock=Number(p.stock);
-      if(!Number.isFinite(price)||price<=0||stock<item.quantity)
-        return res.status(409).json({success:false,message:`Insufficient stock for ${p.name||'a product'}.`});
+
+      let variant=null;
+      if(productsWithVariants.has(item.product_id)){
+        if(!item.variant_id)
+          return res.status(409).json({success:false,message:`Choose an available option for ${p.name||'this product'}.`});
+        variant=variantById.get(item.variant_id);
+        if(!variant||String(variant.product_id)!==String(p.id)||variant.is_active===false)
+          return res.status(409).json({success:false,message:`Selected option is invalid for ${p.name||'this product'}.`});
+      }else if(item.variant_id){
+        return res.status(409).json({success:false,message:`This product does not use the selected option.`});
+      }
+
+      const price=Number(variant?.price ?? p.price);
+      const stock=Number(variant ? variant.stock : p.stock);
+      if(!Number.isFinite(price)||price<=0||!Number.isFinite(stock)||stock<item.quantity)
+        return res.status(409).json({success:false,message:`Insufficient stock for ${p.name||'a product'}${variant?.sku?' ('+variant.sku+')':''}.`});
       const lineTotal=price*item.quantity; subtotal+=lineTotal;
-      lines.push({p,quantity:item.quantity,unit_price:price,line_total:lineTotal});
+      lines.push({
+        p,variant,quantity:item.quantity,unit_price:price,line_total:lineTotal,
+        variant_id:variant?String(variant.id):null,
+        variant_sku:variant?shopCleanText(variant.sku,120)||null:null,
+        variant_values:variant?shopVariantValues(variant.variant_values):{}
+      });
     }
 
     const deliveryFee=Math.max(0,Number(process.env.SHOP_DELIVERY_FEE||0)||0);
@@ -11291,29 +11351,49 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
 
     try{
       for(const line of lines){
-        const changed=await renewedQuery(
-          `UPDATE public.cerood_shop_products
-              SET stock=stock-?,updated_at=NOW()
-            WHERE id=? AND status='published' AND approval_status='approved' AND stock>=?
-            RETURNING id`,
-          [line.quantity,line.p.id,line.quantity]
-        );
+        let changed;
+        if(line.variant){
+          changed=await renewedQuery(
+            `UPDATE public.cerood_product_variants
+                SET stock=stock-?,updated_at=NOW()
+              WHERE id=? AND product_id=? AND is_active=true AND stock>=?
+              RETURNING id`,
+            [line.quantity,line.variant_id,line.p.id,line.quantity]
+          );
+        }else{
+          changed=await renewedQuery(
+            `UPDATE public.cerood_shop_products
+                SET stock=stock-?,updated_at=NOW()
+              WHERE id=? AND status='published' AND approval_status='approved' AND stock>=?
+              RETURNING id`,
+            [line.quantity,line.p.id,line.quantity]
+          );
+        }
         if(!changed.length) throw new Error(`Stock changed for ${line.p.name||'product'}.`);
         await renewedQuery(
           `INSERT INTO public.cerood_shop_order_items
-           (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total)
-           VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?)`,
-          [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total]
+           (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,
+            variant_id,variant_sku,variant_values)
+           VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?,?::uuid,?,?::jsonb)`,
+          [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,
+           line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]
         );
       }
     }catch(inner){
-      // Compensate any stock already reserved and remove the incomplete order.
+      // Compensate stock already reserved and remove the incomplete order.
       const inserted=await renewedQuery(
-        `SELECT product_id,quantity FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]
+        `SELECT product_id,quantity,variant_id FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]
       ).catch(()=>[]);
       for(const x of inserted){
-        await renewedQuery(`UPDATE public.cerood_shop_products SET stock=stock+?,updated_at=NOW() WHERE id=?`,
-          [Number(x.quantity)||0,x.product_id]).catch(()=>{});
+        if(x.variant_id){
+          await renewedQuery(
+            `UPDATE public.cerood_product_variants SET stock=stock+?,updated_at=NOW() WHERE id=? AND product_id=?`,
+            [Number(x.quantity)||0,x.variant_id,x.product_id]
+          ).catch(()=>{});
+        }else{
+          await renewedQuery(`UPDATE public.cerood_shop_products SET stock=stock+?,updated_at=NOW() WHERE id=?`,
+            [Number(x.quantity)||0,x.product_id]).catch(()=>{});
+        }
       }
       await renewedQuery(`DELETE FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]).catch(()=>{});
       await renewedQuery(`DELETE FROM public.cerood_shop_orders WHERE id=?`,[order.id]).catch(()=>{});
