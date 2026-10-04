@@ -352,6 +352,26 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
     }
   }
 
+  // Validate that a fulfilment location belongs to the authenticated seller.
+  async function resolveFulfilmentLocation(sellerId, rawLocationId, { required = true } = {}) {
+    const locationId = String(rawLocationId || '').trim();
+    if (!locationId) {
+      if (required) throw bad('Choose a fulfilment / pickup location.');
+      return null;
+    }
+    if (!uuid(locationId)) throw bad('Invalid fulfilment location.');
+
+    const rows = await query(
+      `SELECT id,seller_id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default
+       FROM public.cerood_seller_locations
+       WHERE id=? AND seller_id=? AND is_active=true
+       LIMIT 1`,
+      [locationId,sellerId]
+    );
+    if (!rows.length) throw bad('Selected fulfilment location is unavailable.');
+    return rows[0];
+  }
+
   // ==========================================================
   // CEROOD CATALOG LATCH — search existing approved Renewed products
   // Seller can attach an offer to an existing master product instead
@@ -421,13 +441,14 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
       const dispatchDays=integer('dispatch_days',0,60,1);
       const sellerSku=String(req.body?.seller_sku||'').trim().slice(0,120) || null;
       const condition=String(req.body?.condition||master[0].condition||'Refurbished').trim().slice(0,40);
+      const fulfilmentLocation=await resolveFulfilmentLocation(req.seller.id,req.body?.fulfilment_location_id);
 
       // UNIQUE(seller_id,product_id) makes this idempotent: a repeat submission
       // updates the seller offer and sends it back for admin approval.
       const rows=await query(
         `INSERT INTO public.cerood_seller_listings
-          (seller_id,product_id,seller_sku,price,compare_price,stock,warranty_days,dispatch_days,condition,approval_status,rejection_reason,is_active)
-         VALUES (?,?,?,?,?,?,?,?,?,'pending',NULL,true)
+          (seller_id,product_id,seller_sku,price,compare_price,stock,warranty_days,dispatch_days,condition,fulfilment_location_id,approval_status,rejection_reason,is_active)
+         VALUES (?,?,?,?,?,?,?,?,?,?,'pending',NULL,true)
          ON CONFLICT (seller_id,product_id)
          DO UPDATE SET
            seller_sku=EXCLUDED.seller_sku,
@@ -442,7 +463,7 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
            is_active=true,
            updated_at=NOW()
          RETURNING *`,
-        [req.seller.id,productId,sellerSku,price,comparePrice,stock,warrantyDays,dispatchDays,condition]
+        [req.seller.id,productId,sellerSku,price,comparePrice,stock,warrantyDays,dispatchDays,condition,fulfilmentLocation.id]
       );
       res.status(201).json({success:true,message:'Product latched successfully. Waiting for CEROOD admin approval.',listing:rows[0],product:master[0]});
     } catch(e) { err(res,e); }
@@ -474,7 +495,7 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
 
       const current = await query(
         `SELECT id,seller_id,product_id,seller_sku,price,compare_price,stock,
-                warranty_days,dispatch_days,condition,approval_status,is_active
+                warranty_days,dispatch_days,condition,fulfilment_location_id,approval_status,is_active
          FROM public.cerood_seller_listings
          WHERE id=? AND seller_id=?
          LIMIT 1`,
@@ -510,6 +531,7 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
       const sellerSku=String(req.body?.seller_sku||'').trim().slice(0,120) || null;
       const condition=String(req.body?.condition||old.condition||'Refurbished').trim().slice(0,40);
       if (!conditions.has(condition)) throw bad('Invalid condition.');
+      const fulfilmentLocation=await resolveFulfilmentLocation(req.seller.id,req.body?.fulfilment_location_id || old.fulfilment_location_id);
 
       const listings=await query(
         `UPDATE public.cerood_seller_listings
@@ -525,7 +547,7 @@ module.exports = function registerSellerProductRoutes(app, db, requireSellerAuth
              updated_at=NOW()
          WHERE id=? AND seller_id=?
          RETURNING *`,
-        [sellerSku,price,comparePrice,stock,warrantyDays,dispatchDays,condition,req.params.id,req.seller.id]
+        [sellerSku,price,comparePrice,stock,warrantyDays,dispatchDays,condition,fulfilmentLocation.id,req.params.id,req.seller.id]
       );
 
       res.json({

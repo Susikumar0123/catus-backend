@@ -3494,6 +3494,171 @@ const { requireSellerAuth } = require('./cerood-seller-routes')(
 );
 
 
+// ==========================================
+// CEROOD SELLER FULFILMENT LOCATIONS — V1
+// Seller-owned pickup locations. India-wide serviceability remains enabled;
+// pincode is used for delivery-promise ranking without exposing seller identity.
+// ==========================================
+app.get('/api/sellers/locations', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client = await db.getClient();
+        const sellerId = String(req.seller?.id || '').trim();
+        const rows = await client.query(
+            `SELECT id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at
+             FROM public.cerood_seller_locations
+             WHERE seller_id=$1
+             ORDER BY is_default DESC, created_at ASC`, [sellerId]);
+        return res.json({success:true,locations:rows});
+    } catch(error) {
+        console.error('Seller locations GET:',error.message);
+        return res.status(500).json({success:false,message:'Unable to load pickup locations.'});
+    } finally { if(client) client.release(); }
+});
+
+app.post('/api/sellers/locations', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client = await db.getClient();
+        const sellerId = String(req.seller?.id || '').trim();
+        const b=req.body||{};
+        const clean=(v,n=200)=>String(v||'').trim().slice(0,n);
+        const pincode=clean(b.pincode,6).replace(/\\D/g,'');
+        const district=clean(b.district,100), state=clean(b.state,100);
+        if(!/^[1-9]\\d{5}$/.test(pincode)||!district||!state)
+            return res.status(400).json({success:false,message:'Valid state, district and 6-digit pincode are required.'});
+        await client.query('BEGIN');
+        const countRows=await client.query(`SELECT COUNT(*)::int AS n FROM public.cerood_seller_locations WHERE seller_id=$1`,[sellerId]);
+        const makeDefault=Boolean(b.is_default)||Number(countRows[0]?.n||0)===0;
+        if(makeDefault) await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);
+        const rows=await client.query(
+            `INSERT INTO public.cerood_seller_locations
+             (seller_id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,true,$9)
+             RETURNING id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at`,
+            [sellerId,clean(b.location_name,100)||'Main Location',clean(b.address_line1),clean(b.address_line2),clean(b.city,100),district,state,pincode,makeDefault]);
+        await client.query('COMMIT');
+        return res.status(201).json({success:true,location:rows[0]});
+    } catch(error) {
+        if(client) await client.query('ROLLBACK').catch(()=>{});
+        console.error('Seller locations POST:',error.message);
+        return res.status(500).json({success:false,message:'Unable to save pickup location.'});
+    } finally { if(client) client.release(); }
+});
+
+app.patch('/api/sellers/locations/:id/default', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient(); const sellerId=String(req.seller?.id||'').trim(), id=String(req.params.id||'').trim();
+        if(!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({success:false,message:'Invalid location.'});
+        await client.query('BEGIN');
+        const own=await client.query(`SELECT id FROM public.cerood_seller_locations WHERE id=$1 AND seller_id=$2 AND is_active=true FOR UPDATE`,[id,sellerId]);
+        if(!own.length){await client.query('ROLLBACK');return res.status(404).json({success:false,message:'Pickup location not found.'});}
+        await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);
+        await client.query(`UPDATE public.cerood_seller_locations SET is_default=true,updated_at=NOW() WHERE id=$1 AND seller_id=$2`,[id,sellerId]);
+        await client.query('COMMIT'); return res.json({success:true});
+    } catch(error){if(client)await client.query('ROLLBACK').catch(()=>{});return res.status(500).json({success:false,message:'Unable to change default location.'});}
+    finally{if(client)client.release();}
+});
+
+// ==========================================
+// CEROOD SELLER PINCODE SERVICEABILITY — V1
+// Seller can manage only pincodes attached to their own active fulfilment locations.
+// ==========================================
+app.get('/api/sellers/serviceability', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient();
+        const sellerId=String(req.seller?.id||'').trim();
+        const locationId=String(req.query.fulfilment_location_id||'').trim();
+        if(locationId && !CEROOD_UUID_RE.test(locationId)) return res.status(400).json({success:false,message:'Invalid fulfilment location.'});
+        const params=[sellerId];
+        let locationFilter='';
+        if(locationId){params.push(locationId);locationFilter=' AND svc.fulfilment_location_id=$2';}
+        const rows=await client.query(
+            `SELECT svc.id,svc.fulfilment_location_id,svc.destination_pincode,
+                    svc.min_delivery_days,svc.max_delivery_days,svc.delivery_fee,
+                    svc.cod_available,svc.prepaid_available,svc.is_active,
+                    svc.created_at,svc.updated_at,
+                    loc.location_name,loc.pincode AS origin_pincode
+             FROM public.cerood_seller_serviceability svc
+             JOIN public.cerood_seller_locations loc ON loc.id=svc.fulfilment_location_id
+             WHERE loc.seller_id=$1${locationFilter}
+             ORDER BY loc.is_default DESC,svc.destination_pincode ASC`,params);
+        return res.json({success:true,serviceability:rows});
+    } catch(error){console.error('Seller serviceability GET:',error.message);return res.status(500).json({success:false,message:'Unable to load delivery pincodes.'});}
+    finally{if(client)client.release();}
+});
+
+app.post('/api/sellers/serviceability', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient();
+        const sellerId=String(req.seller?.id||'').trim(), b=req.body||{};
+        const locationId=String(b.fulfilment_location_id||'').trim();
+        const pincode=String(b.destination_pincode||'').replace(/\D/g,'').slice(0,6);
+        const minDays=Number(b.min_delivery_days), maxDays=Number(b.max_delivery_days);
+        const fee=Number(b.delivery_fee??0);
+        if(!CEROOD_UUID_RE.test(locationId)||!/^[1-9]\d{5}$/.test(pincode)) return res.status(400).json({success:false,message:'Valid pickup location and 6-digit destination pincode are required.'});
+        if(!Number.isSafeInteger(minDays)||minDays<0||minDays>60||!Number.isSafeInteger(maxDays)||maxDays<minDays||maxDays>90) return res.status(400).json({success:false,message:'Enter a valid delivery-day range.'});
+        if(!Number.isFinite(fee)||fee<0||fee>100000) return res.status(400).json({success:false,message:'Invalid delivery fee.'});
+        const own=await client.query(`SELECT id FROM public.cerood_seller_locations WHERE id=$1 AND seller_id=$2 AND is_active=true LIMIT 1`,[locationId,sellerId]);
+        if(!own.length) return res.status(404).json({success:false,message:'Pickup location not found.'});
+        const rows=await client.query(
+            `INSERT INTO public.cerood_seller_serviceability
+             (fulfilment_location_id,destination_pincode,min_delivery_days,max_delivery_days,delivery_fee,cod_available,prepaid_available,is_active)
+             VALUES($1,$2,$3,$4,$5,$6,$7,true)
+             ON CONFLICT (fulfilment_location_id,destination_pincode)
+             DO UPDATE SET min_delivery_days=EXCLUDED.min_delivery_days,
+                           max_delivery_days=EXCLUDED.max_delivery_days,
+                           delivery_fee=EXCLUDED.delivery_fee,
+                           cod_available=EXCLUDED.cod_available,
+                           prepaid_available=EXCLUDED.prepaid_available,
+                           is_active=true,updated_at=NOW()
+             RETURNING *`,[locationId,pincode,minDays,maxDays,fee,b.cod_available!==false,b.prepaid_available!==false]);
+        return res.status(201).json({success:true,message:'Delivery pincode saved.',serviceability:rows[0]});
+    } catch(error){console.error('Seller serviceability POST:',error.message);return res.status(500).json({success:false,message:'Unable to save delivery pincode.'});}
+    finally{if(client)client.release();}
+});
+
+app.patch('/api/sellers/serviceability/:id', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient();
+        const sellerId=String(req.seller?.id||'').trim(), id=String(req.params.id||'').trim(), b=req.body||{};
+        if(!CEROOD_UUID_RE.test(id)) return res.status(400).json({success:false,message:'Invalid serviceability row.'});
+        const minDays=Number(b.min_delivery_days),maxDays=Number(b.max_delivery_days),fee=Number(b.delivery_fee??0);
+        if(!Number.isSafeInteger(minDays)||minDays<0||minDays>60||!Number.isSafeInteger(maxDays)||maxDays<minDays||maxDays>90||!Number.isFinite(fee)||fee<0||fee>100000) return res.status(400).json({success:false,message:'Invalid delivery settings.'});
+        const rows=await client.query(
+            `UPDATE public.cerood_seller_serviceability svc
+             SET min_delivery_days=$1,max_delivery_days=$2,delivery_fee=$3,
+                 cod_available=$4,prepaid_available=$5,is_active=$6,updated_at=NOW()
+             FROM public.cerood_seller_locations loc
+             WHERE svc.id=$7 AND loc.id=svc.fulfilment_location_id AND loc.seller_id=$8
+             RETURNING svc.*`,[minDays,maxDays,fee,b.cod_available!==false,b.prepaid_available!==false,b.is_active!==false,id,sellerId]);
+        if(!rows.length) return res.status(404).json({success:false,message:'Delivery pincode not found.'});
+        return res.json({success:true,message:'Delivery pincode updated.',serviceability:rows[0]});
+    } catch(error){console.error('Seller serviceability PATCH:',error.message);return res.status(500).json({success:false,message:'Unable to update delivery pincode.'});}
+    finally{if(client)client.release();}
+});
+
+app.delete('/api/sellers/serviceability/:id', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient();
+        const sellerId=String(req.seller?.id||'').trim(),id=String(req.params.id||'').trim();
+        if(!CEROOD_UUID_RE.test(id)) return res.status(400).json({success:false,message:'Invalid serviceability row.'});
+        const rows=await client.query(
+            `DELETE FROM public.cerood_seller_serviceability svc
+             USING public.cerood_seller_locations loc
+             WHERE svc.id=$1 AND loc.id=svc.fulfilment_location_id AND loc.seller_id=$2
+             RETURNING svc.id`,[id,sellerId]);
+        if(!rows.length) return res.status(404).json({success:false,message:'Delivery pincode not found.'});
+        return res.json({success:true,message:'Delivery pincode removed.'});
+    } catch(error){console.error('Seller serviceability DELETE:',error.message);return res.status(500).json({success:false,message:'Unable to remove delivery pincode.'});}
+    finally{if(client)client.release();}
+});
+
 // CEROOD SELLER PRODUCT MANAGEMENT
 
 require('./cerood-seller-products')(
@@ -9798,8 +9963,153 @@ app.get('/api/renewed/products/:id', async (req,res) => {
     } catch(error) { renewedError(res,error); }
 });
 
+// ==========================================
+// CEROOD RENEWED — CUSTOMER BUY BOX / RECOMMENDED OFFER
+// Seller identity is intentionally NOT exposed to the product page.
+// Uses the same customer-value + 7-day fairness ranking as checkout.
+// Final seller allocation is still recalculated and locked atomically at checkout.
+// ==========================================
+app.get('/api/renewed/products/:id/recommended-offer', async (req,res) => {
+    res.set('Cache-Control','no-store');
+    try {
+        const productId = String(req.params.id || '').trim();
+        const quantity = Math.max(1, Number.parseInt(String(req.query.quantity || '1'), 10) || 1);
+        const customerPincode = String(req.query.pincode || '').replace(/\D/g,'').slice(0,6);
+        if(customerPincode && !/^[1-9]\d{5}$/.test(customerPincode)) return res.status(400).json({success:false,message:'Invalid delivery pincode.'});
+
+        if(!/^[a-zA-Z0-9_-]{1,80}$/.test(productId) || quantity > 99)
+            return res.status(400).json({success:false,message:'Invalid product ID or quantity.'});
+
+        const master = await renewedQuery(
+            `SELECT id,name,price,compare_price,stock,warranty_days,status
+             FROM public.renewed_products
+             WHERE id=? AND status='published'
+               AND (seller_id IS NULL OR approval_status='approved')
+             LIMIT 1`,
+            [productId]
+        );
+
+        if(!master.length)
+            return res.status(404).json({success:false,message:'Product not found.'});
+
+        const offers = await renewedQuery(
+            `WITH eligible AS (
+                SELECT l.id,l.price,l.compare_price,l.stock,l.warranty_days,
+                       l.dispatch_days,l.updated_at,l.fulfilment_location_id,
+                       svc.min_delivery_days,svc.max_delivery_days,svc.delivery_fee,
+                       svc.cod_available,svc.prepaid_available,
+                       MIN(l.price) OVER () AS min_price
+                FROM public.cerood_seller_listings l
+                JOIN public.cerood_sellers s ON s.id=l.seller_id
+                JOIN public.cerood_seller_locations sl
+                  ON sl.id=l.fulfilment_location_id AND sl.seller_id=l.seller_id AND sl.is_active=true
+                LEFT JOIN public.cerood_seller_serviceability svc
+                  ON svc.fulfilment_location_id=l.fulfilment_location_id
+                 AND svc.destination_pincode=?
+                 AND svc.is_active=true
+                WHERE l.product_id=?
+                  AND l.approval_status='approved'
+                  AND l.is_active=true
+                  AND l.stock >= ?
+                  AND s.status='approved'
+                  AND (?='' OR svc.id IS NOT NULL)
+             ), fair_pool AS (
+                SELECT *
+                FROM eligible
+                WHERE price <= min_price + GREATEST(50, CEIL(min_price * 0.02))
+             ), recent_load AS (
+                SELECT i.seller_listing_id,
+                       COALESCE(SUM(i.quantity),0)::bigint AS assigned_units_7d
+                FROM public.renewed_order_items i
+                JOIN public.renewed_orders o ON o.id=i.order_id
+                WHERE i.seller_listing_id IS NOT NULL
+                  AND o.created_at >= NOW() - INTERVAL '7 days'
+                  AND o.status NOT IN ('expired','cancelled')
+                GROUP BY i.seller_listing_id
+             )
+             SELECT f.price,f.compare_price,f.stock,f.warranty_days,f.dispatch_days,
+                    f.min_delivery_days,f.max_delivery_days,f.delivery_fee,
+                    f.cod_available,f.prepaid_available
+             FROM fair_pool f
+             LEFT JOIN recent_load r ON r.seller_listing_id=f.id
+             ORDER BY CASE WHEN ?='' THEN 0 ELSE COALESCE(f.max_delivery_days,9999) END ASC,
+                      CASE WHEN ?='' THEN 0 ELSE COALESCE(f.min_delivery_days,9999) END ASC,
+                      COALESCE(r.assigned_units_7d,0) ASC,
+                      f.price ASC,f.dispatch_days ASC,f.updated_at ASC,f.id ASC
+             LIMIT 1`,
+            [customerPincode,productId,quantity,customerPincode,customerPincode,customerPincode]
+        );
+
+        if (offers.length) {
+            const o = offers[0];
+            return res.json({
+                success:true,
+                product_id:productId,
+                available:true,
+                quantity,
+                price:Number(o.price),
+                compare_price:o.compare_price == null ? null : Number(o.compare_price),
+                stock_available:true,
+                stock:Number(o.stock || 0),
+                warranty_days:Number(o.warranty_days || 0),
+                dispatch_days:Number(o.dispatch_days || 0),
+                delivery_pincode:customerPincode || null,
+                serviceable:true,
+                min_delivery_days:o.min_delivery_days == null ? null : Number(o.min_delivery_days),
+                max_delivery_days:o.max_delivery_days == null ? null : Number(o.max_delivery_days),
+                estimated_delivery_days:o.max_delivery_days == null ? null : Number(o.max_delivery_days),
+                delivery_fee:o.delivery_fee == null ? null : Number(o.delivery_fee),
+                cod_available:o.cod_available == null ? null : Boolean(o.cod_available),
+                prepaid_available:o.prepaid_available == null ? null : Boolean(o.prepaid_available),
+                allocation_mode:'automatic',
+                seller_hidden:true
+            });
+        }
+
+        // Seller-backed products must not bypass real destination serviceability.
+        if (customerPincode) {
+            const sellerOfferCount = await renewedQuery(
+                `SELECT COUNT(*)::integer AS count
+                 FROM public.cerood_seller_listings l
+                 JOIN public.cerood_sellers s ON s.id=l.seller_id
+                 WHERE l.product_id=? AND l.approval_status='approved'
+                   AND l.is_active=true AND l.stock >= ? AND s.status='approved'`,
+                [productId,quantity]
+            );
+            if (Number(sellerOfferCount[0]?.count || 0) > 0) {
+                return res.json({
+                    success:true,product_id:productId,available:false,quantity,
+                    stock_available:false,delivery_pincode:customerPincode,
+                    serviceable:false,allocation_mode:'unserviceable',seller_hidden:true
+                });
+            }
+        }
+
+        // Backward compatibility for Cerood-owned / legacy Renewed inventory.
+        const p = master[0];
+        const legacyAvailable = Number(p.stock || 0) >= quantity;
+        return res.json({
+            success:true,
+            product_id:productId,
+            available:legacyAvailable,
+            quantity,
+            price:Number(p.price),
+            compare_price:p.compare_price == null ? null : Number(p.compare_price),
+            stock_available:legacyAvailable,
+            stock:Number(p.stock || 0),
+            warranty_days:Number(p.warranty_days || 0),
+            dispatch_days:null,
+            allocation_mode:legacyAvailable ? 'legacy_inventory' : 'unavailable',
+            seller_hidden:true
+        });
+    } catch(error) {
+        return renewedError(res,error);
+    }
+});
+
 // Public approved seller offers for one Renewed master product.
-// Only approved/active sellers and approved/active listings are exposed.
+// Kept for backward compatibility/admin diagnostics. Customer product UI should
+// use /recommended-offer and must not render seller names or seller choices.
 app.get('/api/renewed/products/:id/seller-offers', async (req,res) => {
     try {
         const productId = String(req.params.id || '').trim();
@@ -10307,8 +10617,21 @@ async function renewedReleaseExpired(client) {
     `,[ids]);
     const releasedIds = changed.map(row => row.id);
     if (!releasedIds.length) return 0;
-    // Restore latched seller inventory first. seller_id + product_id is unique
-    // in cerood_seller_listings, so no new order-item column is required.
+    // Restore the exact seller listing latched on each order item.
+    await client.query(`
+        UPDATE public.cerood_seller_listings l
+        SET stock = l.stock + r.qty, updated_at = NOW()
+        FROM (
+          SELECT oi.seller_listing_id, SUM(oi.quantity)::integer AS qty
+          FROM public.renewed_order_items oi
+          WHERE oi.order_id = ANY($1::uuid[])
+            AND oi.seller_listing_id IS NOT NULL
+          GROUP BY oi.seller_listing_id
+        ) r
+        WHERE l.id = r.seller_listing_id
+    `,[releasedIds]);
+
+    // Historical rows created before seller_listing_id existed can still map by seller + product.
     await client.query(`
         UPDATE public.cerood_seller_listings l
         SET stock = l.stock + r.qty, updated_at = NOW()
@@ -10316,21 +10639,18 @@ async function renewedReleaseExpired(client) {
           SELECT oi.product_id, oi.seller_id, SUM(oi.quantity)::integer AS qty
           FROM public.renewed_order_items oi
           WHERE oi.order_id = ANY($1::uuid[])
+            AND oi.seller_listing_id IS NULL
             AND oi.seller_id IS NOT NULL
             AND EXISTS (
-              SELECT 1
-              FROM public.cerood_seller_listings x
-              WHERE x.product_id = oi.product_id
-                AND x.seller_id = oi.seller_id
+              SELECT 1 FROM public.cerood_seller_listings x
+              WHERE x.product_id = oi.product_id AND x.seller_id = oi.seller_id
             )
           GROUP BY oi.product_id, oi.seller_id
         ) r
-        WHERE l.product_id = r.product_id
-          AND l.seller_id = r.seller_id
+        WHERE l.product_id = r.product_id AND l.seller_id = r.seller_id
     `,[releasedIds]);
 
-    // Restore legacy/non-latched Renewed inventory only when that order item
-    // does not map to a seller listing.
+    // Restore true legacy master inventory only when no seller listing maps.
     await client.query(`
         UPDATE public.renewed_products p
         SET stock = p.stock + r.qty, updated_at = NOW()
@@ -10338,11 +10658,10 @@ async function renewedReleaseExpired(client) {
           SELECT oi.product_id, SUM(oi.quantity)::integer AS qty
           FROM public.renewed_order_items oi
           WHERE oi.order_id = ANY($1::uuid[])
+            AND oi.seller_listing_id IS NULL
             AND NOT EXISTS (
-              SELECT 1
-              FROM public.cerood_seller_listings x
-              WHERE x.product_id = oi.product_id
-                AND x.seller_id = oi.seller_id
+              SELECT 1 FROM public.cerood_seller_listings x
+              WHERE x.product_id = oi.product_id AND x.seller_id = oi.seller_id
             )
           GROUP BY oi.product_id
         ) r
@@ -10399,7 +10718,11 @@ function renewedNormalizeCheckoutItems(items) {
         (a.product_id+'::'+(a.listing_id||'')).localeCompare(b.product_id+'::'+(b.listing_id||'')));
 }
 
-async function renewedResolveCheckoutItems(client, selections) {
+async function renewedResolveCheckoutItems(client, selections, customerPincode = '') {
+    customerPincode = String(customerPincode || '').replace(/\D/g, '').slice(0, 6);
+    if (customerPincode && !/^[1-9]\d{5}$/.test(customerPincode)) {
+        const e = new Error('Invalid delivery pincode.'); e.status = 400; throw e;
+    }
     const productIds = [...new Set(selections.map(x=>x.product_id))].sort();
     const listingIds = [...new Set(selections.map(x=>x.listing_id).filter(Boolean))].sort();
 
@@ -10414,12 +10737,94 @@ async function renewedResolveCheckoutItems(client, selections) {
     if (listingIds.length) {
         const listings = await client.query(
             `SELECT l.id,l.product_id,l.seller_id,l.price,l.stock,l.warranty_days,
-                    l.approval_status,l.is_active,s.status AS seller_status
+                    l.dispatch_days,l.approval_status,l.is_active,s.status AS seller_status,
+                    l.fulfilment_location_id
              FROM public.cerood_seller_listings l
              JOIN public.cerood_sellers s ON s.id=l.seller_id
+             LEFT JOIN public.cerood_seller_locations sl
+               ON sl.id=l.fulfilment_location_id AND sl.seller_id=l.seller_id AND sl.is_active=true
              WHERE l.id = ANY($1::uuid[])
-             ORDER BY l.id FOR UPDATE`,[listingIds]);
+             ORDER BY l.id FOR UPDATE OF l`,[listingIds]);
         listingById = new Map(listings.map(l=>[String(l.id),l]));
+    }
+
+    // When the customer did not explicitly choose a seller offer, Cerood chooses one.
+    // Customer value comes first: only offers within 2% (minimum Rs.50) of the
+    // cheapest eligible offer enter the fair-allocation pool. Inside that pool,
+    // sellers with fewer assigned units in the last 7 days are preferred, then
+    // lower price, faster dispatch and the oldest-updated listing.
+    async function chooseCeroodSellerOffer(productId, qty) {
+        const candidates = await client.query(
+            `WITH eligible AS (
+                SELECT l.id,l.product_id,l.seller_id,l.price,l.stock,l.warranty_days,
+                       l.dispatch_days,l.updated_at,l.fulfilment_location_id,
+                       svc.min_delivery_days,svc.max_delivery_days,
+                       svc.delivery_fee,svc.cod_available,svc.prepaid_available,
+                       MIN(l.price) OVER () AS min_price
+                FROM public.cerood_seller_listings l
+                JOIN public.cerood_sellers s ON s.id=l.seller_id
+                JOIN public.cerood_seller_locations sl
+                  ON sl.id=l.fulfilment_location_id AND sl.seller_id=l.seller_id AND sl.is_active=true
+                LEFT JOIN public.cerood_seller_serviceability svc
+                  ON svc.fulfilment_location_id=l.fulfilment_location_id
+                 AND svc.destination_pincode=$3 AND svc.is_active=true
+                WHERE l.product_id=$1
+                  AND l.approval_status='approved'
+                  AND l.is_active=true
+                  AND l.stock >= $2
+                  AND s.status='approved'
+                  AND ($3='' OR svc.id IS NOT NULL)
+             ), fair_pool AS (
+                SELECT *
+                FROM eligible
+                WHERE price <= min_price + GREATEST(50, CEIL(min_price * 0.02))
+             ), recent_load AS (
+                SELECT i.seller_listing_id,
+                       COALESCE(SUM(i.quantity),0)::bigint AS assigned_units_7d
+                FROM public.renewed_order_items i
+                JOIN public.renewed_orders o ON o.id=i.order_id
+                WHERE i.seller_listing_id IS NOT NULL
+                  AND o.created_at >= NOW() - INTERVAL '7 days'
+                  AND o.status NOT IN ('expired','cancelled')
+                GROUP BY i.seller_listing_id
+             )
+             SELECT f.*,
+                    COALESCE(r.assigned_units_7d,0) AS assigned_units_7d
+             FROM fair_pool f
+             LEFT JOIN recent_load r ON r.seller_listing_id=f.id
+             ORDER BY CASE WHEN $3='' THEN 0 ELSE COALESCE(f.max_delivery_days,9999) END ASC,
+                      CASE WHEN $3='' THEN 0 ELSE COALESCE(f.min_delivery_days,9999) END ASC,
+                      COALESCE(r.assigned_units_7d,0) ASC,
+                      f.price ASC,
+                      f.dispatch_days ASC,
+                      f.updated_at ASC,
+                      f.id ASC
+             LIMIT 1`,
+            [productId,qty,customerPincode]
+        );
+        if (!candidates.length) return null;
+
+        // Lock the exact selected listing before checkout continues. Both COD and
+        // prepaid flows already hold the Renewed advisory transaction lock.
+        const locked = await client.query(
+            `SELECT l.id,l.product_id,l.seller_id,l.price,l.stock,l.warranty_days,
+                    l.dispatch_days,l.approval_status,l.is_active,s.status AS seller_status,
+                    l.fulfilment_location_id
+             FROM public.cerood_seller_listings l
+             JOIN public.cerood_sellers s ON s.id=l.seller_id
+             JOIN public.cerood_seller_locations sl
+               ON sl.id=l.fulfilment_location_id AND sl.seller_id=l.seller_id AND sl.is_active=true
+             LEFT JOIN public.cerood_seller_serviceability svc
+               ON svc.fulfilment_location_id=l.fulfilment_location_id
+              AND svc.destination_pincode=$4 AND svc.is_active=true
+             WHERE l.id=$1 AND l.product_id=$2
+               AND l.approval_status='approved' AND l.is_active=true
+               AND l.stock >= $3 AND s.status='approved'
+               AND ($4='' OR svc.id IS NOT NULL)
+             FOR UPDATE OF l`,
+            [candidates[0].id,productId,qty,customerPincode]
+        );
+        return locked[0] || null;
     }
 
     let subtotal=0;
@@ -10430,7 +10835,7 @@ async function renewedResolveCheckoutItems(client, selections) {
             const e=new Error('Product unavailable.'); e.status=409; throw e;
         }
 
-        let unit,warranty,sellerId,stock,listingId=null;
+        let unit,warranty,sellerId,stock,listingId=null,fulfilmentLocationId=null;
         if (sel.listing_id) {
             const l=listingById.get(sel.listing_id);
             if (!l || String(l.product_id)!==sel.product_id ||
@@ -10438,11 +10843,50 @@ async function renewedResolveCheckoutItems(client, selections) {
                 l.seller_status!=='approved') {
                 const e=new Error('Selected seller offer is no longer available.'); e.status=409; throw e;
             }
+            if (customerPincode) {
+                const svc = await client.query(
+                    `SELECT 1 FROM public.cerood_seller_serviceability
+                     WHERE fulfilment_location_id=$1 AND destination_pincode=$2
+                       AND is_active=true LIMIT 1`,
+                    [l.fulfilment_location_id,customerPincode]
+                );
+                if (!l.fulfilment_location_id || !svc.length) {
+                    const e=new Error('Selected seller cannot deliver to this pincode.'); e.status=409; throw e;
+                }
+            }
             unit=Number(l.price); warranty=Number(l.warranty_days||0);
             sellerId=l.seller_id; stock=Number(l.stock); listingId=String(l.id);
+            fulfilmentLocationId=l.fulfilment_location_id || null;
         } else {
-            unit=Number(p.price); warranty=Number(p.warranty_days||0);
-            sellerId=p.seller_id||null; stock=Number(p.stock);
+            const autoOffer = await chooseCeroodSellerOffer(sel.product_id,sel.qty);
+            if (autoOffer) {
+                unit=Number(autoOffer.price);
+                warranty=Number(autoOffer.warranty_days||0);
+                sellerId=autoOffer.seller_id;
+                stock=Number(autoOffer.stock);
+                listingId=String(autoOffer.id);
+                fulfilmentLocationId=autoOffer.fulfilment_location_id || null;
+            } else {
+                if (customerPincode) {
+                    const sellerOffers = await client.query(
+                        `SELECT 1
+                         FROM public.cerood_seller_listings l
+                         JOIN public.cerood_sellers s ON s.id=l.seller_id
+                         WHERE l.product_id=$1 AND l.approval_status='approved'
+                           AND l.is_active=true AND l.stock >= $2
+                           AND s.status='approved' LIMIT 1`,
+                        [sel.product_id,sel.qty]
+                    );
+                    if (sellerOffers.length) {
+                        const e=new Error('Delivery is not available to this pincode for this product.');
+                        e.status=409; throw e;
+                    }
+                }
+                // Backward compatibility for Cerood-owned / old Renewed products
+                // that do not yet have seller listings.
+                unit=Number(p.price); warranty=Number(p.warranty_days||0);
+                sellerId=p.seller_id||null; stock=Number(p.stock);
+            }
         }
 
         if (!Number.isSafeInteger(unit) || unit<1 || stock<sel.qty) {
@@ -10453,7 +10897,8 @@ async function renewedResolveCheckoutItems(client, selections) {
         if (!Number.isSafeInteger(line) || !Number.isSafeInteger(subtotal)) throw Error('Amount overflow.');
         orderItems.push({
             id:sel.product_id, listing_id:listingId, name:p.name, qty:sel.qty,
-            unit,line,warranty_days:warranty,seller_id:sellerId
+            unit,line,warranty_days:warranty,seller_id:sellerId,
+            fulfilment_location_id:fulfilmentLocationId
         });
     }
     return {subtotal,orderItems};
@@ -10555,7 +11000,7 @@ if (
         const users=guestCheckout?[]:await client.query('SELECT id,email FROM public.users WHERE phone=$1 LIMIT 1',[phone]);
         if(!guestCheckout&&!users.length){await client.query('ROLLBACK');return res.status(401).json({success:false,message:'Register or login before checkout.'});}
 
-        const resolved=await renewedResolveCheckoutItems(client,selections);
+        const resolved=await renewedResolveCheckoutItems(client,selections,pincode);
         const subtotal=resolved.subtotal, orderItems=resolved.orderItems;
         const fee = ceroodShoppingDeliveryFee(subtotal);
 
@@ -10598,9 +11043,11 @@ if (
         warranty_days_at_purchase,
         seller_id,
         prepaid_discount_at_purchase,
-        discounted_line_total
+        discounted_line_total,
+        seller_listing_id,
+        fulfilment_location_id
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [
         id,
         item.id,
@@ -10611,7 +11058,9 @@ if (
         item.warranty_days,
         item.seller_id,
         0,
-        item.line
+        item.line,
+        item.listing_id,
+        item.fulfilment_location_id
     ]
 );
         }
@@ -10703,7 +11152,7 @@ if (
         await client.query('SELECT pg_advisory_xact_lock($1)', [RENEWED_RESERVE_LOCK]);
         await renewedReleaseExpired(client);
 
-        const resolved=await renewedResolveCheckoutItems(client,selections);
+        const resolved=await renewedResolveCheckoutItems(client,selections,pincode);
         const subtotal=resolved.subtotal, orderItems=resolved.orderItems;
         const sortedIds=[...new Set(orderItems.map(x=>x.id))].sort();
 
@@ -10792,9 +11241,11 @@ if (
         warranty_days_at_purchase,
         seller_id,
         prepaid_discount_at_purchase,
-        discounted_line_total
+        discounted_line_total,
+        seller_listing_id,
+        fulfilment_location_id
     )
-    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10)`,
+    VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)`,
     [
         orderId,
         item.id,
@@ -10805,7 +11256,9 @@ if (
         item.warranty_days,
         item.seller_id,
         item.prepaid_discount_total || 0,
-        item.discounted_line_total ?? item.line
+        item.discounted_line_total ?? item.line,
+        item.listing_id,
+        item.fulfilment_location_id
     ]
 );
         }

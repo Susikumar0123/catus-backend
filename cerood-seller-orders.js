@@ -504,6 +504,8 @@ module.exports = function (
 
                             oi.seller_id,
 
+                            oi.seller_listing_id,
+
                             COALESCE(
                                 oi.seller_order_status,
                                 'new'
@@ -865,155 +867,132 @@ module.exports = function (
                 // - latched offers restore cerood_seller_listings stock
                 // - legacy seller-owned Renewed products restore renewed_products stock
                 // - mixed-seller orders remain active; only this seller's item changes
+                // Reject + replacement allocation are atomic. The replacement also locks
+                // the fulfilment location used for this order item. Customer pincode is read
+                // from the original order address and is used only as a location-priority signal.
                 const sql = decision === 'rejected'
                     ? `
-
                         WITH transitioned AS (
-
                             UPDATE public.renewed_order_items AS oi
-
-                            SET
-
-                                seller_order_status = 'rejected',
-
-                                seller_rejected_at = NOW()
-
+                            SET seller_order_status='rejected', seller_rejected_at=NOW()
                             FROM public.renewed_orders AS o
-
-                            WHERE oi.order_id = o.id
-
-                              AND oi.id = ?
-
-                              AND oi.seller_id = ?
-
-                              AND (
-
-                                    oi.seller_order_status IS NULL
-
-                                    OR oi.seller_order_status = 'new'
-
-                              )
-
-                              AND (
-
-                                    (
-
-                                        o.payment_method = 'cod'
-
-                                        AND o.status = 'processing'
-
-                                    )
-
-                                    OR
-
-                                    (
-
-                                        o.payment_method <> 'cod'
-
-                                        AND o.status = 'paid'
-
-                                    )
-
-                              )
-
-                            RETURNING
-
-                                oi.id AS order_item_id,
-
-                                oi.order_id,
-
-                                oi.product_id,
-
-                                oi.seller_id,
-
-                                oi.quantity,
-
-                                oi.seller_order_status,
-
-                                oi.seller_accepted_at,
-
-                                oi.seller_rejected_at
-
+                            WHERE oi.order_id=o.id AND oi.id=? AND oi.seller_id=?
+                              AND (oi.seller_order_status IS NULL OR oi.seller_order_status='new')
+                              AND ((o.payment_method='cod' AND o.status='processing')
+                                OR (o.payment_method<>'cod' AND o.status='paid'))
+                            RETURNING oi.id AS order_item_id,oi.order_id,oi.product_id,
+                                      oi.seller_id AS rejected_seller_id,
+                                      oi.seller_listing_id AS rejected_listing_id,
+                                      oi.quantity,oi.seller_order_status,
+                                      regexp_replace(COALESCE(o.delivery_address->>'pincode',''), '\D', '', 'g') AS customer_pincode
                         ),
-
-                        restored_listing AS (
-
-                            UPDATE public.cerood_seller_listings AS l
-
-                            SET
-
-                                stock = l.stock + t.quantity,
-
-                                updated_at = NOW()
-
-                            FROM transitioned AS t
-
-                            WHERE l.seller_id = t.seller_id
-
-                              AND l.product_id = t.product_id
-
+                        restored_exact AS (
+                            UPDATE public.cerood_seller_listings l
+                            SET stock=l.stock+t.quantity,updated_at=NOW()
+                            FROM transitioned t
+                            WHERE l.id=t.rejected_listing_id
+                              AND l.seller_id=t.rejected_seller_id
+                              AND l.product_id=t.product_id
                             RETURNING l.id
-
                         ),
-
+                        restored_legacy AS (
+                            UPDATE public.cerood_seller_listings l
+                            SET stock=l.stock+t.quantity,updated_at=NOW()
+                            FROM transitioned t
+                            WHERE t.rejected_listing_id IS NULL
+                              AND l.seller_id=t.rejected_seller_id
+                              AND l.product_id=t.product_id
+                            RETURNING l.id
+                        ),
                         restored_master AS (
-
-                            UPDATE public.renewed_products AS p
-
-                            SET
-
-                                stock = p.stock + t.quantity,
-
-                                updated_at = NOW()
-
-                            FROM transitioned AS t
-
-                            WHERE p.id = t.product_id
-
-                              AND p.seller_id = t.seller_id
-
+                            UPDATE public.renewed_products p
+                            SET stock=p.stock+t.quantity,updated_at=NOW()
+                            FROM transitioned t
+                            WHERE t.rejected_listing_id IS NULL
+                              AND p.id=t.product_id AND p.seller_id=t.rejected_seller_id
                               AND NOT EXISTS (
-
-                                    SELECT 1
-
-                                    FROM public.cerood_seller_listings AS l
-
-                                    WHERE l.seller_id = t.seller_id
-
-                                      AND l.product_id = t.product_id
-
+                                SELECT 1 FROM public.cerood_seller_listings l
+                                WHERE l.seller_id=t.rejected_seller_id AND l.product_id=t.product_id
                               )
-
                             RETURNING p.id
-
+                        ),
+                        eligible AS (
+                            SELECT l.id,l.product_id,l.seller_id,l.price,l.stock,l.warranty_days,
+                                   l.dispatch_days,l.updated_at,l.fulfilment_location_id,
+                                   t.order_item_id,t.order_id,t.quantity,t.customer_pincode,
+                                   regexp_replace(COALESCE(sl.pincode,s.pincode,''), '\D', '', 'g') AS origin_pincode,
+                                   MIN(l.price) OVER () AS min_price
+                            FROM transitioned t
+                            JOIN public.cerood_seller_listings l ON l.product_id=t.product_id
+                            JOIN public.cerood_sellers s ON s.id=l.seller_id
+                            LEFT JOIN public.cerood_seller_locations sl
+                              ON sl.id=l.fulfilment_location_id
+                             AND sl.seller_id=l.seller_id
+                             AND sl.is_active=true
+                            WHERE l.seller_id<>t.rejected_seller_id
+                              AND l.approval_status='approved' AND l.is_active=true
+                              AND l.stock>=t.quantity AND s.status='approved'
+                              AND (l.fulfilment_location_id IS NULL OR sl.id IS NOT NULL)
+                        ),
+                        fair_pool AS (
+                            SELECT *,
+                                   CASE
+                                     WHEN customer_pincode ~ '^\d{6}$' AND origin_pincode=customer_pincode THEN 0
+                                     WHEN customer_pincode ~ '^\d{6}$' AND origin_pincode ~ '^\d{6}$'
+                                          AND LEFT(origin_pincode,3)=LEFT(customer_pincode,3) THEN 1
+                                     WHEN origin_pincode ~ '^\d{6}$' THEN 2
+                                     ELSE 3
+                                   END AS location_rank
+                            FROM eligible
+                            WHERE price<=min_price+GREATEST(50,CEIL(min_price*0.02))
+                        ),
+                        recent_load AS (
+                            SELECT i.seller_listing_id,COALESCE(SUM(i.quantity),0)::bigint AS assigned_units_7d
+                            FROM public.renewed_order_items i
+                            JOIN public.renewed_orders o ON o.id=i.order_id
+                            WHERE i.seller_listing_id IS NOT NULL
+                              AND o.created_at>=NOW()-INTERVAL '7 days'
+                              AND o.status NOT IN ('expired','cancelled')
+                            GROUP BY i.seller_listing_id
+                        ),
+                        chosen AS (
+                            SELECT f.*
+                            FROM fair_pool f
+                            LEFT JOIN recent_load r ON r.seller_listing_id=f.id
+                            ORDER BY f.location_rank,COALESCE(r.assigned_units_7d,0),
+                                     f.price,f.dispatch_days,f.updated_at,f.id
+                            LIMIT 1
+                        ),
+                        reserved AS (
+                            UPDATE public.cerood_seller_listings l
+                            SET stock=l.stock-c.quantity,updated_at=NOW()
+                            FROM chosen c
+                            WHERE l.id=c.id AND l.stock>=c.quantity
+                            RETURNING l.id AS seller_listing_id,l.seller_id,l.price,l.warranty_days,
+                                      l.fulfilment_location_id,c.order_item_id,c.order_id,c.quantity
+                        ),
+                        reassigned AS (
+                            UPDATE public.renewed_order_items oi
+                            SET seller_id=r.seller_id,seller_listing_id=r.seller_listing_id,
+                                fulfilment_location_id=r.fulfilment_location_id,
+                                unit_price=r.price,line_total=r.price*r.quantity,
+                                warranty_days_at_purchase=r.warranty_days,
+                                seller_order_status='new',seller_accepted_at=NULL,
+                                seller_rejected_at=NULL,seller_packed_at=NULL,seller_shipped_at=NULL,
+                                seller_order_note=NULL
+                            FROM reserved r
+                            WHERE oi.id=r.order_item_id AND oi.order_id=r.order_id
+                            RETURNING oi.id AS order_item_id,oi.order_id,oi.seller_id,
+                                      oi.seller_listing_id,oi.fulfilment_location_id,oi.seller_order_status
                         )
-
-                        SELECT
-
-                            t.order_item_id,
-
-                            t.order_id,
-
-                            t.seller_order_status,
-
-                            t.seller_accepted_at,
-
-                            t.seller_rejected_at,
-
-                            CASE
-
-                                WHEN EXISTS (SELECT 1 FROM restored_listing)
-                                    THEN 'seller_listing'
-
-                                WHEN EXISTS (SELECT 1 FROM restored_master)
-                                    THEN 'master_product'
-
-                                ELSE 'not_restored'
-
-                            END AS stock_restored_to
-
-                        FROM transitioned AS t
-
+                        SELECT t.order_item_id,t.order_id,
+                               COALESCE(r.seller_order_status,t.seller_order_status) AS seller_order_status,
+                               r.seller_id AS reassigned_seller_id,
+                               r.seller_listing_id AS reassigned_listing_id,
+                               r.fulfilment_location_id AS reassigned_fulfilment_location_id,
+                               (r.order_item_id IS NOT NULL) AS reassigned
+                        FROM transitioned t
+                        LEFT JOIN reassigned r ON r.order_item_id=t.order_item_id
                     `
                     : `
 
