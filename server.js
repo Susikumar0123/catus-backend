@@ -3494,7 +3494,74 @@ const { requireSellerAuth } = require('./cerood-seller-routes')(
 );
 
 
-// ==========================================\n// CEROOD SELLER FULFILMENT LOCATIONS — V1\n// Seller-owned pickup locations. India-wide serviceability remains enabled;\n// pincode is used for delivery-promise ranking without exposing seller identity.\n// ==========================================\napp.get('/api/sellers/locations', requireSellerAuth, async (req,res) => {\n    let client;\n    try {\n        client = await db.getClient();\n        const sellerId = String(req.seller?.id || '').trim();\n        const rows = await client.query(\n            `SELECT id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at\n             FROM public.cerood_seller_locations\n             WHERE seller_id=$1\n             ORDER BY is_default DESC, created_at ASC`, [sellerId]);\n        return res.json({success:true,locations:rows});\n    } catch(error) {\n        console.error('Seller locations GET:',error.message);\n        return res.status(500).json({success:false,message:'Unable to load pickup locations.'});\n    } finally { if(client) client.release(); }\n});\n\napp.post('/api/sellers/locations', requireSellerAuth, async (req,res) => {\n    let client;\n    try {\n        client = await db.getClient();\n        const sellerId = String(req.seller?.id || '').trim();\n        const b=req.body||{};\n        const clean=(v,n=200)=>String(v||'').trim().slice(0,n);\n        const pincode=clean(b.pincode,6).replace(/\\D/g,'');\n        const district=clean(b.district,100), state=clean(b.state,100);\n        if(!/^[1-9]\\d{5}$/.test(pincode)||!district||!state)\n            return res.status(400).json({success:false,message:'Valid state, district and 6-digit pincode are required.'});\n        await client.query('BEGIN');\n        const countRows=await client.query(`SELECT COUNT(*)::int AS n FROM public.cerood_seller_locations WHERE seller_id=$1`,[sellerId]);\n        const makeDefault=Boolean(b.is_default)||Number(countRows[0]?.n||0)===0;\n        if(makeDefault) await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);\n        const rows=await client.query(\n            `INSERT INTO public.cerood_seller_locations\n             (seller_id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default)\n             VALUES($1,$2,$3,$4,$5,$6,$7,$8,true,$9)\n             RETURNING id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at`,\n            [sellerId,clean(b.location_name,100)||'Main Location',clean(b.address_line1),clean(b.address_line2),clean(b.city,100),district,state,pincode,makeDefault]);\n        await client.query('COMMIT');\n        return res.status(201).json({success:true,location:rows[0]});\n    } catch(error) {\n        if(client) await client.query('ROLLBACK').catch(()=>{});\n        console.error('Seller locations POST:',error.message);\n        return res.status(500).json({success:false,message:'Unable to save pickup location.'});\n    } finally { if(client) client.release(); }\n});\n\napp.patch('/api/sellers/locations/:id/default', requireSellerAuth, async (req,res) => {\n    let client;\n    try {\n        client=await db.getClient(); const sellerId=String(req.seller?.id||'').trim(), id=String(req.params.id||'').trim();\n        if(!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({success:false,message:'Invalid location.'});\n        await client.query('BEGIN');\n        const own=await client.query(`SELECT id FROM public.cerood_seller_locations WHERE id=$1 AND seller_id=$2 AND is_active=true FOR UPDATE`,[id,sellerId]);\n        if(!own.length){await client.query('ROLLBACK');return res.status(404).json({success:false,message:'Pickup location not found.'});}\n        await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);\n        await client.query(`UPDATE public.cerood_seller_locations SET is_default=true,updated_at=NOW() WHERE id=$1 AND seller_id=$2`,[id,sellerId]);\n        await client.query('COMMIT'); return res.json({success:true});\n    } catch(error){if(client)await client.query('ROLLBACK').catch(()=>{});return res.status(500).json({success:false,message:'Unable to change default location.'});}\n    finally{if(client)client.release();}\n});\n\n// CEROOD SELLER PRODUCT MANAGEMENT
+// ==========================================
+// CEROOD SELLER FULFILMENT LOCATIONS — V1
+// Seller-owned pickup locations. India-wide serviceability remains enabled;
+// pincode is used for delivery-promise ranking without exposing seller identity.
+// ==========================================
+app.get('/api/sellers/locations', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client = await db.getClient();
+        const sellerId = String(req.seller?.id || '').trim();
+        const rows = await client.query(
+            `SELECT id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at
+             FROM public.cerood_seller_locations
+             WHERE seller_id=$1
+             ORDER BY is_default DESC, created_at ASC`, [sellerId]);
+        return res.json({success:true,locations:rows});
+    } catch(error) {
+        console.error('Seller locations GET:',error.message);
+        return res.status(500).json({success:false,message:'Unable to load pickup locations.'});
+    } finally { if(client) client.release(); }
+});
+
+app.post('/api/sellers/locations', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client = await db.getClient();
+        const sellerId = String(req.seller?.id || '').trim();
+        const b=req.body||{};
+        const clean=(v,n=200)=>String(v||'').trim().slice(0,n);
+        const pincode=clean(b.pincode,6).replace(/\\D/g,'');
+        const district=clean(b.district,100), state=clean(b.state,100);
+        if(!/^[1-9]\\d{5}$/.test(pincode)||!district||!state)
+            return res.status(400).json({success:false,message:'Valid state, district and 6-digit pincode are required.'});
+        await client.query('BEGIN');
+        const countRows=await client.query(`SELECT COUNT(*)::int AS n FROM public.cerood_seller_locations WHERE seller_id=$1`,[sellerId]);
+        const makeDefault=Boolean(b.is_default)||Number(countRows[0]?.n||0)===0;
+        if(makeDefault) await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);
+        const rows=await client.query(
+            `INSERT INTO public.cerood_seller_locations
+             (seller_id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default)
+             VALUES($1,$2,$3,$4,$5,$6,$7,$8,true,$9)
+             RETURNING id,location_name,address_line1,address_line2,city,district,state,pincode,is_active,is_default,created_at,updated_at`,
+            [sellerId,clean(b.location_name,100)||'Main Location',clean(b.address_line1),clean(b.address_line2),clean(b.city,100),district,state,pincode,makeDefault]);
+        await client.query('COMMIT');
+        return res.status(201).json({success:true,location:rows[0]});
+    } catch(error) {
+        if(client) await client.query('ROLLBACK').catch(()=>{});
+        console.error('Seller locations POST:',error.message);
+        return res.status(500).json({success:false,message:'Unable to save pickup location.'});
+    } finally { if(client) client.release(); }
+});
+
+app.patch('/api/sellers/locations/:id/default', requireSellerAuth, async (req,res) => {
+    let client;
+    try {
+        client=await db.getClient(); const sellerId=String(req.seller?.id||'').trim(), id=String(req.params.id||'').trim();
+        if(!/^[0-9a-f-]{36}$/i.test(id)) return res.status(400).json({success:false,message:'Invalid location.'});
+        await client.query('BEGIN');
+        const own=await client.query(`SELECT id FROM public.cerood_seller_locations WHERE id=$1 AND seller_id=$2 AND is_active=true FOR UPDATE`,[id,sellerId]);
+        if(!own.length){await client.query('ROLLBACK');return res.status(404).json({success:false,message:'Pickup location not found.'});}
+        await client.query(`UPDATE public.cerood_seller_locations SET is_default=false,updated_at=NOW() WHERE seller_id=$1`,[sellerId]);
+        await client.query(`UPDATE public.cerood_seller_locations SET is_default=true,updated_at=NOW() WHERE id=$1 AND seller_id=$2`,[id,sellerId]);
+        await client.query('COMMIT'); return res.json({success:true});
+    } catch(error){if(client)await client.query('ROLLBACK').catch(()=>{});return res.status(500).json({success:false,message:'Unable to change default location.'});}
+    finally{if(client)client.release();}
+});
+
+// CEROOD SELLER PRODUCT MANAGEMENT
 
 require('./cerood-seller-products')(
     app,
