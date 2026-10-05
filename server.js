@@ -3561,6 +3561,281 @@ app.patch('/api/sellers/locations/:id/default', requireSellerAuth, async (req,re
     finally{if(client)client.release();}
 });
 
+
+// ==========================================
+// CEROOD SELLER DELIVERY PINCODE / ETA OVERRIDES — V1
+// India-wide delivery remains the default. These rows are seller/location
+// overrides for ETA, fee and payment-method availability.
+// ==========================================
+function ceroodSellerUuid(value) {
+    return /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
+        .test(String(value || '').trim());
+}
+
+function ceroodSellerPincode(value) {
+    return String(value || '').replace(/\D/g, '').slice(0, 6);
+}
+
+async function ceroodOwnsFulfilmentLocation(client, sellerId, locationId) {
+    if (!ceroodSellerUuid(locationId)) return false;
+    const rows = await client.query(
+        `SELECT id
+           FROM public.cerood_seller_locations
+          WHERE id=$1 AND seller_id=$2 AND is_active=true
+          LIMIT 1`,
+        [locationId, sellerId]
+    );
+    return Array.isArray(rows) && rows.length > 0;
+}
+
+app.get('/api/sellers/serviceability', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    let client;
+    try {
+        client = await db.getClient();
+        const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+        const locationId = String(req.query.fulfilment_location_id || '').trim();
+
+        if (!sellerId)
+            return res.status(401).json({success:false,message:'Seller authentication required.'});
+
+        if (!ceroodSellerUuid(locationId))
+            return res.status(400).json({success:false,message:'Choose a valid pickup location.'});
+
+        if (!await ceroodOwnsFulfilmentLocation(client, sellerId, locationId))
+            return res.status(404).json({success:false,message:'Pickup location not found.'});
+
+        const rows = await client.query(
+            `SELECT id,fulfilment_location_id,destination_pincode,
+                    min_delivery_days,max_delivery_days,delivery_fee,
+                    cod_available,prepaid_available,is_active,created_at,updated_at
+               FROM public.cerood_seller_serviceability
+              WHERE fulfilment_location_id=$1
+              ORDER BY destination_pincode ASC`,
+            [locationId]
+        );
+
+        return res.json({
+            success:true,
+            serviceability:Array.isArray(rows) ? rows : []
+        });
+    } catch (error) {
+        console.error('Seller serviceability GET:', error.message);
+        return res.status(500).json({success:false,message:'Unable to load delivery pincodes.'});
+    } finally {
+        if (client) client.release();
+    }
+});
+
+app.post('/api/sellers/serviceability', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    let client;
+    try {
+        client = await db.getClient();
+
+        const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+        const b = req.body || {};
+        const locationId = String(b.fulfilment_location_id || '').trim();
+        const pincode = ceroodSellerPincode(b.destination_pincode);
+        const minDays = Number(b.min_delivery_days);
+        const maxDays = Number(b.max_delivery_days);
+        const fee = Number(b.delivery_fee ?? 0);
+        const cod = b.cod_available !== false;
+        const prepaid = b.prepaid_available !== false;
+        const active = b.is_active !== false;
+
+        if (!sellerId)
+            return res.status(401).json({success:false,message:'Seller authentication required.'});
+
+        if (!ceroodSellerUuid(locationId))
+            return res.status(400).json({success:false,message:'Choose a valid pickup location.'});
+
+        if (!/^[1-9]\d{5}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a valid 6-digit destination pincode.'});
+
+        if (!Number.isInteger(minDays) || !Number.isInteger(maxDays) ||
+            minDays < 0 || maxDays < minDays || maxDays > 90)
+            return res.status(400).json({success:false,message:'Enter a valid delivery-day range.'});
+
+        if (!Number.isFinite(fee) || fee < 0 || fee > 100000)
+            return res.status(400).json({success:false,message:'Enter a valid delivery fee.'});
+
+        if (!await ceroodOwnsFulfilmentLocation(client, sellerId, locationId))
+            return res.status(404).json({success:false,message:'Pickup location not found.'});
+
+        // Update an existing override for the same location+pincode, otherwise insert.
+        const existing = await client.query(
+            `SELECT id
+               FROM public.cerood_seller_serviceability
+              WHERE fulfilment_location_id=$1 AND destination_pincode=$2
+              LIMIT 1`,
+            [locationId, pincode]
+        );
+
+        let rows;
+        if (Array.isArray(existing) && existing.length) {
+            rows = await client.query(
+                `UPDATE public.cerood_seller_serviceability
+                    SET min_delivery_days=$1,
+                        max_delivery_days=$2,
+                        delivery_fee=$3,
+                        cod_available=$4,
+                        prepaid_available=$5,
+                        is_active=$6,
+                        updated_at=NOW()
+                  WHERE id=$7
+                  RETURNING id,fulfilment_location_id,destination_pincode,
+                            min_delivery_days,max_delivery_days,delivery_fee,
+                            cod_available,prepaid_available,is_active,created_at,updated_at`,
+                [minDays,maxDays,fee,cod,prepaid,active,existing[0].id]
+            );
+        } else {
+            rows = await client.query(
+                `INSERT INTO public.cerood_seller_serviceability
+                    (fulfilment_location_id,destination_pincode,min_delivery_days,
+                     max_delivery_days,delivery_fee,cod_available,prepaid_available,is_active)
+                 VALUES($1,$2,$3,$4,$5,$6,$7,$8)
+                 RETURNING id,fulfilment_location_id,destination_pincode,
+                           min_delivery_days,max_delivery_days,delivery_fee,
+                           cod_available,prepaid_available,is_active,created_at,updated_at`,
+                [locationId,pincode,minDays,maxDays,fee,cod,prepaid,active]
+            );
+        }
+
+        return res.status(Array.isArray(existing) && existing.length ? 200 : 201).json({
+            success:true,
+            serviceability:rows[0],
+            message:Array.isArray(existing) && existing.length
+                ? 'Delivery pincode updated.'
+                : 'Delivery pincode added.'
+        });
+    } catch (error) {
+        console.error('Seller serviceability POST:', error.message);
+        return res.status(500).json({success:false,message:'Unable to save delivery pincode.'});
+    } finally {
+        if (client) client.release();
+    }
+});
+
+app.patch('/api/sellers/serviceability/:id', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    let client;
+    try {
+        client = await db.getClient();
+
+        const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+        const id = String(req.params.id || '').trim();
+        const b = req.body || {};
+        const locationId = String(b.fulfilment_location_id || '').trim();
+        const pincode = ceroodSellerPincode(b.destination_pincode);
+        const minDays = Number(b.min_delivery_days);
+        const maxDays = Number(b.max_delivery_days);
+        const fee = Number(b.delivery_fee ?? 0);
+        const cod = b.cod_available !== false;
+        const prepaid = b.prepaid_available !== false;
+        const active = b.is_active !== false;
+
+        if (!sellerId)
+            return res.status(401).json({success:false,message:'Seller authentication required.'});
+
+        if (!ceroodSellerUuid(id) || !ceroodSellerUuid(locationId))
+            return res.status(400).json({success:false,message:'Invalid delivery rule or pickup location.'});
+
+        if (!/^[1-9]\d{5}$/.test(pincode))
+            return res.status(400).json({success:false,message:'Enter a valid 6-digit destination pincode.'});
+
+        if (!Number.isInteger(minDays) || !Number.isInteger(maxDays) ||
+            minDays < 0 || maxDays < minDays || maxDays > 90)
+            return res.status(400).json({success:false,message:'Enter a valid delivery-day range.'});
+
+        if (!Number.isFinite(fee) || fee < 0 || fee > 100000)
+            return res.status(400).json({success:false,message:'Enter a valid delivery fee.'});
+
+        if (!await ceroodOwnsFulfilmentLocation(client, sellerId, locationId))
+            return res.status(404).json({success:false,message:'Pickup location not found.'});
+
+        const rows = await client.query(
+            `UPDATE public.cerood_seller_serviceability svc
+                SET fulfilment_location_id=$1,
+                    destination_pincode=$2,
+                    min_delivery_days=$3,
+                    max_delivery_days=$4,
+                    delivery_fee=$5,
+                    cod_available=$6,
+                    prepaid_available=$7,
+                    is_active=$8,
+                    updated_at=NOW()
+              WHERE svc.id=$9
+                AND EXISTS (
+                    SELECT 1
+                      FROM public.cerood_seller_locations loc
+                     WHERE loc.id=svc.fulfilment_location_id
+                       AND loc.seller_id=$10
+                )
+              RETURNING svc.id,svc.fulfilment_location_id,svc.destination_pincode,
+                        svc.min_delivery_days,svc.max_delivery_days,svc.delivery_fee,
+                        svc.cod_available,svc.prepaid_available,svc.is_active,
+                        svc.created_at,svc.updated_at`,
+            [locationId,pincode,minDays,maxDays,fee,cod,prepaid,active,id,sellerId]
+        );
+
+        if (!Array.isArray(rows) || !rows.length)
+            return res.status(404).json({success:false,message:'Delivery pincode rule not found.'});
+
+        return res.json({
+            success:true,
+            serviceability:rows[0],
+            message:'Delivery pincode updated.'
+        });
+    } catch (error) {
+        console.error('Seller serviceability PATCH:', error.message);
+        return res.status(500).json({success:false,message:'Unable to update delivery pincode.'});
+    } finally {
+        if (client) client.release();
+    }
+});
+
+app.delete('/api/sellers/serviceability/:id', requireSellerAuth, async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    let client;
+    try {
+        client = await db.getClient();
+
+        const sellerId = String(req.seller?.id || req.seller?.seller_id || '').trim();
+        const id = String(req.params.id || '').trim();
+
+        if (!sellerId)
+            return res.status(401).json({success:false,message:'Seller authentication required.'});
+
+        if (!ceroodSellerUuid(id))
+            return res.status(400).json({success:false,message:'Invalid delivery pincode rule.'});
+
+        const rows = await client.query(
+            `DELETE FROM public.cerood_seller_serviceability svc
+              WHERE svc.id=$1
+                AND EXISTS (
+                    SELECT 1
+                      FROM public.cerood_seller_locations loc
+                     WHERE loc.id=svc.fulfilment_location_id
+                       AND loc.seller_id=$2
+                )
+              RETURNING svc.id`,
+            [id,sellerId]
+        );
+
+        if (!Array.isArray(rows) || !rows.length)
+            return res.status(404).json({success:false,message:'Delivery pincode rule not found.'});
+
+        return res.json({success:true,message:'Delivery pincode removed.'});
+    } catch (error) {
+        console.error('Seller serviceability DELETE:', error.message);
+        return res.status(500).json({success:false,message:'Unable to remove delivery pincode.'});
+    } finally {
+        if (client) client.release();
+    }
+});
+
+
 // CEROOD SELLER PRODUCT MANAGEMENT
 
 require('./cerood-seller-products')(
