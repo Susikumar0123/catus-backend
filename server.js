@@ -3523,9 +3523,9 @@ app.post('/api/sellers/locations', requireSellerAuth, async (req,res) => {
         const sellerId = String(req.seller?.id || '').trim();
         const b=req.body||{};
         const clean=(v,n=200)=>String(v||'').trim().slice(0,n);
-        const pincode=clean(b.pincode,6).replace(/\\D/g,'');
+        const pincode=String(b.pincode||'').trim();
         const district=clean(b.district,100), state=clean(b.state,100);
-        if(!/^[1-9]\\d{5}$/.test(pincode)||!district||!state)
+        if(!/^[1-9]\d{5}$/.test(pincode)||!district||!state)
             return res.status(400).json({success:false,message:'Valid state, district and 6-digit pincode are required.'});
         await client.query('BEGIN');
         const countRows=await client.query(`SELECT COUNT(*)::int AS n FROM public.cerood_seller_locations WHERE seller_id=$1`,[sellerId]);
