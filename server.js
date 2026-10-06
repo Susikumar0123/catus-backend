@@ -11868,6 +11868,20 @@ async function shopOrderWithItems(row){
   return {...row,items};
 }
 
+// Main Store orders for Common Admin. Protected by app.use('/api/admin', requireAdminAuth).
+app.get('/api/admin/shop/orders', async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try{
+    const rows=await renewedQuery(`SELECT * FROM public.cerood_shop_orders ORDER BY created_at DESC LIMIT 300`);
+    const orders=[];
+    for(const row of rows) orders.push(await shopOrderWithItems(row));
+    return res.json({success:true,orders});
+  }catch(error){
+    console.error('Main Store admin orders:',error.message);
+    return res.status(503).json({success:false,message:'Main Store orders unavailable.'});
+  }
+});
+
 app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
   try{
     const requestId=shopCleanText(req.body?.request_id,80);
