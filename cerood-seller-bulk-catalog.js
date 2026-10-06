@@ -236,7 +236,7 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
 
   async function stageSubmission(sellerId, marketplace, product) {
     const existing = await query(`
-      SELECT id,approval_status,published_product_id
+      SELECT id,approval_status,published_product_id,product_data->>'catalog_batch_id' AS old_batch_id
       FROM public.cerood_seller_catalog_submissions
       WHERE seller_id=?
         AND marketplace=?
@@ -247,6 +247,9 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
 
     if (existing.length) {
       const old = existing[0];
+      if (String(old.old_batch_id || '') === String(product.catalog_batch_id || '')) {
+        throw fail('Duplicate supplier_sku inside this bulk batch.');
+      }
       if (old.approval_status === 'approved' || old.published_product_id) {
         return { action: 'skipped', reason: 'SKU already has an approved/live product. Use the inventory or API sync workflow for price/stock changes.' };
       }
@@ -390,4 +393,217 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
       return sendError(res, error);
     }
   });
+
+  // ================= CEROOD IMPORT CENTER INVENTORY SYNC =================
+  // Approved seller SKUs can receive routine price/stock changes without
+  // recreating the product catalog.  Supplier credentials never pass here;
+  // this endpoint accepts normalized rows only.
+
+  let updateTableReady = null;
+  function ensureUpdateBatchTable() {
+    if (updateTableReady) return updateTableReady;
+    updateTableReady = query(`
+      CREATE TABLE IF NOT EXISTS public.cerood_catalog_update_batches (
+        id uuid PRIMARY KEY,
+        seller_id uuid NOT NULL,
+        mode text NOT NULL,
+        file_name text NULL,
+        total_rows integer NOT NULL DEFAULT 0,
+        updated_rows integer NOT NULL DEFAULT 0,
+        skipped_rows integer NOT NULL DEFAULT 0,
+        rejected_rows integer NOT NULL DEFAULT 0,
+        status text NOT NULL DEFAULT 'processing',
+        error_report jsonb NOT NULL DEFAULT '[]'::jsonb,
+        created_at timestamptz NOT NULL DEFAULT NOW(),
+        updated_at timestamptz NOT NULL DEFAULT NOW()
+      )
+    `).catch(error => {
+      updateTableReady = null;
+      throw error;
+    });
+    return updateTableReady;
+  }
+
+  async function locateApprovedSku(sellerId, supplierSku) {
+    const submissions = await query(`
+      SELECT id,marketplace,published_product_id,product_data
+      FROM public.cerood_seller_catalog_submissions
+      WHERE seller_id=?
+        AND approval_status='approved'
+        AND published_product_id IS NOT NULL
+        AND LOWER(COALESCE(product_data->>'supplier_sku',''))=LOWER(?)
+      ORDER BY updated_at DESC
+      LIMIT 2
+    `, [sellerId, supplierSku]);
+
+    const listings = await query(`
+      SELECT id,product_id,seller_sku
+      FROM public.cerood_seller_listings
+      WHERE seller_id=?
+        AND approval_status='approved'
+        AND is_active=true
+        AND LOWER(COALESCE(seller_sku,''))=LOWER(?)
+      ORDER BY updated_at DESC
+      LIMIT 2
+    `, [sellerId, supplierSku]).catch(() => []);
+
+    const matches = [
+      ...submissions.map(row => ({ kind: 'submission', ...row })),
+      ...listings.map(row => ({ kind: 'listing', ...row }))
+    ];
+    if (matches.length > 1) throw fail('SKU matches more than one approved Cerood offer/product. Resolve the duplicate SKU before syncing.', 409);
+    return matches[0] || null;
+  }
+
+  async function applyInventoryUpdate(sellerId, mode, raw) {
+    const supplierSku = text(raw?.supplier_sku ?? raw?.sku, 120);
+    if (!supplierSku) throw fail('supplier_sku is required.');
+
+    let price = null, comparePrice = null, quantity = null;
+    if (mode === 'price' || mode === 'price_stock') {
+      price = money(raw?.selling_price ?? raw?.price, 'selling_price', true);
+      comparePrice = money(raw?.mrp ?? raw?.compare_price, 'mrp', false);
+      if (comparePrice !== null && comparePrice < price) throw fail('MRP must be greater than or equal to selling price.');
+    }
+    if (mode === 'stock' || mode === 'price_stock') quantity = stock(raw?.stock ?? raw?.quantity);
+
+    const match = await locateApprovedSku(sellerId, supplierSku);
+    if (!match) return { action: 'skipped', supplier_sku: supplierSku, reason: 'Approved product/offer not found for this seller SKU.' };
+
+    if (match.kind === 'listing') {
+      const sets = [], values = [];
+      if (price !== null) { sets.push('price=?', 'compare_price=?'); values.push(price, comparePrice); }
+      if (quantity !== null) { sets.push('stock=?'); values.push(quantity); }
+      sets.push('updated_at=NOW()');
+      const changed = await query(`
+        UPDATE public.cerood_seller_listings
+        SET ${sets.join(', ')}
+        WHERE id=? AND seller_id=? AND approval_status='approved' AND is_active=true
+        RETURNING id
+      `, [...values, match.id, sellerId]);
+      if (!changed.length) throw fail('Seller offer changed while syncing.', 409);
+      return { action: 'updated', supplier_sku: supplierSku, target: 'seller_offer', id: changed[0].id };
+    }
+
+    const marketplace = String(match.marketplace || '');
+    const productId = String(match.published_product_id || '');
+    const tables = { general: 'cerood_shop_products', clothing: 'clothing_products', cosmetics: 'cosmetics_products' };
+    const target = tables[marketplace];
+    if (!target || !productId) throw fail('Approved SKU is not linked to a supported live product.', 409);
+
+    const sets = [], values = [];
+    if (price !== null) { sets.push('price=?', 'compare_price=?'); values.push(price, comparePrice); }
+    if (quantity !== null) { sets.push('stock=?'); values.push(quantity); }
+    sets.push('updated_at=NOW()');
+
+    const ownership = marketplace === 'general' ? ' AND seller_id=?' : '';
+    const args = [...values, productId];
+    if (marketplace === 'general') args.push(sellerId);
+    const changed = await query(`
+      UPDATE public.${target}
+      SET ${sets.join(', ')}
+      WHERE id=?${ownership}
+        AND status='published'
+      RETURNING id
+    `, args);
+    if (!changed.length) throw fail('Live product was not found or is not published.', 409);
+    return { action: 'updated', supplier_sku: supplierSku, target: marketplace, id: changed[0].id };
+  }
+
+  app.get('/api/sellers/bulk-catalog/update-imports', requireSellerAuth, async (req, res) => {
+    try {
+      await ensureUpdateBatchTable();
+      const rows = await query(`
+        SELECT id,mode,file_name,total_rows,updated_rows,skipped_rows,rejected_rows,
+               status,error_report,created_at,updated_at
+        FROM public.cerood_catalog_update_batches
+        WHERE seller_id=?
+        ORDER BY created_at DESC
+        LIMIT 100
+      `, [req.seller.id]);
+      return res.json({ success: true, imports: rows });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
+  app.post('/api/sellers/bulk-catalog/inventory-update', requireSellerAuth, async (req, res) => {
+    try {
+      await ensureUpdateBatchTable();
+      const body = req.body || {};
+      const mode = text(body.mode, 30);
+      if (!['price', 'stock', 'price_stock'].includes(mode)) throw fail('Choose price, stock or price + stock update mode.');
+      const batchId = text(body.batch_id, 50);
+      if (!uuid(batchId)) throw fail('Invalid update batch ID.');
+      const rows = Array.isArray(body.rows) ? body.rows : [];
+      if (!rows.length || rows.length > 500) throw fail('Each update request must contain 1 to 500 rows.');
+      const fileName = text(body.file_name, 255);
+      const finalChunk = body.final_chunk === true;
+      const rowOffset = Number.isSafeInteger(Number(body.row_offset)) && Number(body.row_offset) >= 0 ? Number(body.row_offset) : 0;
+
+      await query(`
+        INSERT INTO public.cerood_catalog_update_batches
+          (id,seller_id,mode,file_name,status)
+        VALUES (?, ?, ?, ?, 'processing')
+        ON CONFLICT (id) DO NOTHING
+      `, [batchId, req.seller.id, mode, fileName || null]);
+
+      const owned = await query(`SELECT id,mode FROM public.cerood_catalog_update_batches WHERE id=? AND seller_id=? LIMIT 1`, [batchId, req.seller.id]);
+      if (!owned.length) throw fail('Update batch does not belong to this seller.', 403);
+      if (owned[0].mode !== mode) throw fail('Update batch mode mismatch.', 409);
+
+      let updated = 0, skipped = 0, rejected = 0;
+      const errors = [], seen = new Set();
+      for (let index = 0; index < rows.length; index++) {
+        try {
+          const raw = rows[index] && typeof rows[index] === 'object' && !Array.isArray(rows[index]) ? rows[index] : {};
+          const sku = text(raw.supplier_sku ?? raw.sku, 120).toLowerCase();
+          if (!sku) throw fail('supplier_sku is required.');
+          if (seen.has(sku)) throw fail('Duplicate supplier_sku inside this upload chunk.');
+          seen.add(sku);
+          const result = await applyInventoryUpdate(req.seller.id, mode, raw);
+          if (result.action === 'updated') updated++;
+          else {
+            skipped++;
+            errors.push({ row: rowOffset + index + 2, supplier_sku: sku, error: result.reason });
+          }
+        } catch (error) {
+          rejected++;
+          errors.push({
+            row: rowOffset + index + 2,
+            supplier_sku: text(rows[index]?.supplier_sku ?? rows[index]?.sku, 120) || null,
+            error: text(error.message || 'Invalid update row.', 500)
+          });
+        }
+      }
+
+      const status = finalChunk
+        ? ((skipped || rejected) ? (updated ? 'partial' : 'failed') : 'completed')
+        : 'processing';
+      const previous = await query(`SELECT error_report FROM public.cerood_catalog_update_batches WHERE id=? AND seller_id=? LIMIT 1`, [batchId, req.seller.id]);
+      const oldErrors = Array.isArray(previous[0]?.error_report) ? previous[0].error_report : [];
+      const mergedErrors = [...oldErrors, ...errors].slice(0, 1000);
+      const changed = await query(`
+        UPDATE public.cerood_catalog_update_batches
+        SET total_rows=total_rows+?,
+            updated_rows=updated_rows+?,
+            skipped_rows=skipped_rows+?,
+            rejected_rows=rejected_rows+?,
+            status=?,error_report=?::jsonb,updated_at=NOW()
+        WHERE id=? AND seller_id=?
+        RETURNING id,mode,file_name,total_rows,updated_rows,skipped_rows,rejected_rows,
+                  status,error_report,created_at,updated_at
+      `, [rows.length, updated, skipped, rejected, status, JSON.stringify(mergedErrors), batchId, req.seller.id]);
+
+      return res.status(201).json({
+        success: true,
+        message: finalChunk ? 'Catalog price/stock sync completed.' : 'Catalog update chunk accepted.',
+        chunk: { rows: rows.length, updated, skipped, rejected, errors },
+        batch: changed[0]
+      });
+    } catch (error) {
+      return sendError(res, error);
+    }
+  });
+
 };
