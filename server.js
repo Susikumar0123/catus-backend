@@ -1926,6 +1926,20 @@ app.post('/api/login-password', (req, res) => {
 });
 
 // ==========================================
+// CEROOD HOME SERVICES — SEPARATE CUSTOMER AUTH
+// Separate customer table/session from Cerood Shopping.
+// ==========================================
+require('./cerood-home-auth')(
+    app,
+    db,
+    {
+        verifyMsg91AccessToken,
+        extractVerifiedPhoneFromMsg91
+    }
+);
+
+
+// ==========================================
 // SECURE MEMORY OTP STORE (Temporary Storage)
 // ==========================================
 
