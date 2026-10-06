@@ -3894,6 +3894,19 @@ const sellerEkartShipping = require('./cerood-seller-ekart')(
 );
 
 // ==========================================
+// CEROOD SELLER DELHIVERY SHIPPING — PHASE 1
+// Per-seller pickup pincode serviceability.
+// Delhivery token stays server-side only.
+// ==========================================
+
+require('./cerood-seller-delhivery')(
+    app,
+    db,
+    requireSellerAuth,
+    requireAdminAuth
+);
+
+// ==========================================
 // CEROOD SELLER ORDERS
 // Renewed + Cosmetics + Fashion + Main Store
 // ==========================================
