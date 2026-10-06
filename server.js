@@ -3871,13 +3871,28 @@ require('./cerood-category-management')(
 require('./cerood-common-marketplace')(app, db);
 
 // ==========================================
+// CEROOD SELLER EKART SHIPPING
+// Seller pickup -> customer delivery.
+// Customer-facing delivery status remains admin controlled.
+// ==========================================
+
+const sellerEkartShipping = require('./cerood-seller-ekart')(
+    app,
+    db,
+    requireSellerAuth,
+    requireAdminAuth
+);
+
+// ==========================================
 // CEROOD SELLER ORDERS
+// Renewed + Cosmetics + Fashion + Main Store
 // ==========================================
 
 require('./cerood-seller-orders')(
     app,
     db,
-    requireSellerAuth
+    requireSellerAuth,
+    sellerEkartShipping
 );
 
 

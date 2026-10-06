@@ -3,7 +3,7 @@
 // ============================================================
 // CEROOD SELLER ORDERS
 //
-// Renewed + Cosmetics + Fashion
+// Renewed + Cosmetics + Fashion + Main Store
 //
 // GET   /api/seller/orders
 // PATCH /api/seller/orders/:orderItemId/decision
@@ -12,12 +12,14 @@
 // Renewed item ID: 123
 // Cosmetics item ID: cosmetics:123
 // Fashion item ID: clothing:123
+// Main Store item ID: shop:123
 // ============================================================
 
 module.exports = function (
     app,
     db,
-    requireSellerAuth
+    requireSellerAuth,
+    sellerShipping = null
 ) {
 
     // ========================================================
@@ -44,6 +46,15 @@ module.exports = function (
 
         });
 
+    }
+
+
+    // Ensure the shipping module's additive DB columns exist before
+    // Main Store/order queries use them. No Ekart credential is needed for this.
+    async function ensureOrderSchema() {
+        if (sellerShipping && typeof sellerShipping.ensureSchema === 'function') {
+            await sellerShipping.ensureSchema();
+        }
     }
 
 
@@ -186,6 +197,8 @@ module.exports = function (
                     AS warranty_days_at_purchase,
 
                 oi.seller_id,
+
+                oi.fulfilment_location_id,
 
                 COALESCE(
                     oi.seller_order_status,
@@ -454,6 +467,159 @@ module.exports = function (
 
 
     // ========================================================
+    // MAIN STORE ORDER HELPERS
+    // ========================================================
+
+    function parseShopItem(raw) {
+        const match = /^shop:([1-9]\d*)$/.exec(String(raw || ''));
+        if (!match) return null;
+        const id = Number(match[1]);
+        return Number.isSafeInteger(id) ? { marketplace: 'shop', id } : null;
+    }
+
+    function shopOrderConfirmed(order) {
+        const payment = String(order?.payment_method || '').toLowerCase();
+        const status = String(order?.status || '').toLowerCase();
+        const paymentStatus = String(order?.payment_status || '').toLowerCase();
+        const bad = ['cancelled','canceled','failed','refunded','expired'];
+        if (bad.includes(status)) return false;
+        if (payment === 'cod') return true;
+        return ['paid','captured','success','payment_review'].includes(paymentStatus);
+    }
+
+    async function getShopOrders(sellerId) {
+        await ensureOrderSchema();
+        return query(`
+            SELECT
+                'shop:' || oi.id::text AS order_item_id,
+                'shop' AS marketplace,
+                oi.order_id,
+                oi.product_id,
+                oi.product_name,
+                oi.unit_price,
+                oi.quantity,
+                oi.line_total,
+                NULL::integer AS warranty_days_at_purchase,
+                oi.seller_id,
+                oi.fulfilment_location_id,
+                COALESCE(oi.seller_order_status,'new') AS seller_order_status,
+                oi.seller_accepted_at,
+                oi.seller_rejected_at,
+                oi.seller_packed_at,
+                oi.seller_shipped_at,
+                oi.seller_order_note,
+                o.customer_name,
+                o.customer_phone,
+                o.delivery_address,
+                o.payment_method,
+                o.payment_status,
+                o.status AS delivery_status,
+                o.created_at AS ordered_at,
+                p.image_url AS product_image
+            FROM public.cerood_shop_order_items oi
+            JOIN public.cerood_shop_orders o ON o.id=oi.order_id
+            LEFT JOIN public.cerood_shop_products p ON p.id=oi.product_id
+            WHERE oi.seller_id=?
+              AND LOWER(o.status) NOT IN ('cancelled','canceled','failed','refunded','expired')
+              AND (
+                    LOWER(o.payment_method)='cod'
+                    OR LOWER(COALESCE(o.payment_status,'')) IN ('paid','captured','success','payment_review')
+              )
+            ORDER BY o.created_at DESC,oi.id DESC
+            LIMIT 100
+        `,[sellerId]);
+    }
+
+    async function changeShopItem(item, sellerId, field, value) {
+        await ensureOrderSchema();
+        let client;
+        try {
+            client = await db.getClient();
+            await client.query('BEGIN');
+            await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`shop-order-item:${item.id}`]);
+
+            const itemRows = await client.query(`
+                SELECT oi.id,oi.order_id,oi.product_id,oi.variant_id,oi.quantity,oi.seller_id,
+                       COALESCE(oi.seller_order_status,'new') AS seller_order_status,
+                       o.payment_method,o.payment_status,o.status
+                  FROM public.cerood_shop_order_items oi
+                  JOIN public.cerood_shop_orders o ON o.id=oi.order_id
+                 WHERE oi.id=$1 AND oi.seller_id=$2
+                 FOR UPDATE OF oi
+            `,[item.id,sellerId]);
+
+            const current = itemRows[0];
+            if (!current || !shopOrderConfirmed(current)) {
+                await client.query('ROLLBACK');
+                return [];
+            }
+
+            if (field === 'decision') {
+                if (!['accepted','rejected'].includes(value) || current.seller_order_status !== 'new') {
+                    await client.query('ROLLBACK');
+                    return [];
+                }
+
+                const rows = await client.query(`
+                    UPDATE public.cerood_shop_order_items
+                       SET seller_order_status=$1,
+                           seller_accepted_at=CASE WHEN $1='accepted' THEN NOW() ELSE seller_accepted_at END,
+                           seller_rejected_at=CASE WHEN $1='rejected' THEN NOW() ELSE seller_rejected_at END
+                     WHERE id=$2 AND seller_id=$3
+                     RETURNING id,order_id,seller_order_status,seller_accepted_at,seller_rejected_at
+                `,[value,item.id,sellerId]);
+
+                if (value === 'rejected') {
+                    const qty = Number(current.quantity || 0);
+                    if (qty > 0 && current.variant_id) {
+                        await client.query(`
+                            UPDATE public.cerood_product_variants
+                               SET stock=stock+$1,updated_at=NOW()
+                             WHERE id=$2 AND product_id=$3
+                        `,[qty,current.variant_id,current.product_id]);
+                    } else if (qty > 0) {
+                        await client.query(`
+                            UPDATE public.cerood_shop_products
+                               SET stock=stock+$1,updated_at=NOW()
+                             WHERE id=$2
+                        `,[qty,current.product_id]);
+                    }
+                }
+
+                await client.query('COMMIT');
+                return rows.map(row=>({...row,order_item_id:`shop:${row.id}`,marketplace:'shop'}));
+            }
+
+            if (field === 'fulfilment') {
+                const previous = value === 'packed' ? 'accepted' : 'packed';
+                if (!['packed','shipped'].includes(value) || current.seller_order_status !== previous) {
+                    await client.query('ROLLBACK');
+                    return [];
+                }
+                const rows = await client.query(`
+                    UPDATE public.cerood_shop_order_items
+                       SET seller_order_status=$1,
+                           seller_packed_at=CASE WHEN $1='packed' THEN NOW() ELSE seller_packed_at END,
+                           seller_shipped_at=CASE WHEN $1='shipped' THEN NOW() ELSE seller_shipped_at END
+                     WHERE id=$2 AND seller_id=$3 AND COALESCE(seller_order_status,'new')=$4
+                     RETURNING id,order_id,seller_order_status,seller_accepted_at,seller_packed_at,seller_shipped_at
+                `,[value,item.id,sellerId,previous]);
+                await client.query('COMMIT');
+                return rows.map(row=>({...row,order_item_id:`shop:${row.id}`,marketplace:'shop'}));
+            }
+
+            await client.query('ROLLBACK');
+            return [];
+        } catch (error) {
+            if (client) await client.query('ROLLBACK').catch(()=>{});
+            throw error;
+        } finally {
+            if (client) client.release();
+        }
+    }
+
+
+    // ========================================================
     // 1. GET ALL SELLER ORDERS
     // ========================================================
 
@@ -471,6 +637,8 @@ module.exports = function (
             );
 
             try {
+
+                await ensureOrderSchema();
 
                 const sellerId =
                     req.seller.id;
@@ -505,6 +673,8 @@ module.exports = function (
                             oi.seller_id,
 
                             oi.seller_listing_id,
+
+                            oi.fulfilment_location_id,
 
                             COALESCE(
                                 oi.seller_order_status,
@@ -592,7 +762,8 @@ module.exports = function (
 
                 const [
                     cosmeticsOrders,
-                    clothingOrders
+                    clothingOrders,
+                    shopOrders
                 ] = await Promise.all([
 
                     getMarketplaceOrders(
@@ -602,6 +773,10 @@ module.exports = function (
 
                     getMarketplaceOrders(
                         'clothing',
+                        sellerId
+                    ),
+
+                    getShopOrders(
                         sellerId
                     )
 
@@ -626,7 +801,9 @@ module.exports = function (
 
                     ...cosmeticsOrders,
 
-                    ...clothingOrders
+                    ...clothingOrders,
+
+                    ...shopOrders
 
                 ].sort(
 
@@ -638,13 +815,18 @@ module.exports = function (
                 );
 
 
+                const ordersWithShipping =
+                    sellerShipping && typeof sellerShipping.attachShipments === 'function'
+                        ? await sellerShipping.attachShipments(allOrders, sellerId)
+                        : allOrders;
+
                 return res.json({
 
                     success: true,
 
-                    orders: allOrders,
+                    orders: ordersWithShipping,
 
-                    count: allOrders.length
+                    count: ordersWithShipping.length
 
                 });
 
@@ -704,6 +886,34 @@ module.exports = function (
                 )
                     .trim()
                     .toLowerCase();
+
+
+            // ================================================
+            // MAIN STORE DECISION
+            // ================================================
+
+            const shopItem = parseShopItem(rawItemId);
+            if (shopItem) {
+                if (!['accepted','rejected'].includes(decision)) {
+                    return res.status(400).json({success:false,message:'Invalid decision.'});
+                }
+                try {
+                    const rows = await changeShopItem(shopItem, req.seller.id, 'decision', decision);
+                    if (!rows.length) {
+                        return res.status(409).json({success:false,message:'Order unavailable or already decided. Refresh orders.'});
+                    }
+                    return res.json({
+                        success:true,
+                        message:decision==='accepted'
+                            ? 'Main Store order accepted.'
+                            : 'Main Store item rejected and reserved stock restored. Cerood admin must resolve customer cancellation/refund separately.',
+                        order:rows[0]
+                    });
+                } catch (error) {
+                    console.error('Main Store seller decision error:',error);
+                    return res.status(error.status||500).json({success:false,message:error.status?error.message:'Unable to update Main Store seller order.'});
+                }
+            }
 
 
             // ================================================
@@ -1159,6 +1369,35 @@ module.exports = function (
 
 
             // ================================================
+            // MAIN STORE FULFILMENT
+            // ================================================
+
+            const shopItem = parseShopItem(rawItemId);
+            if (shopItem) {
+                if (!['packed','shipped'].includes(nextStatus)) {
+                    return res.status(400).json({success:false,message:'Invalid fulfilment status.'});
+                }
+                try {
+                    if (nextStatus === 'shipped' && sellerShipping && typeof sellerShipping.assertBookedForItem === 'function') {
+                        await sellerShipping.assertBookedForItem(rawItemId, req.seller.id);
+                    }
+                    const rows = await changeShopItem(shopItem, req.seller.id, 'fulfilment', nextStatus);
+                    if (!rows.length) {
+                        return res.status(409).json({success:false,message:'Order unavailable or invalid status transition. Refresh orders.'});
+                    }
+                    return res.json({
+                        success:true,
+                        message:nextStatus==='packed' ? 'Main Store item marked as packed.' : 'Main Store item marked as shipped.',
+                        order:rows[0]
+                    });
+                } catch (error) {
+                    console.error('Main Store seller fulfilment error:',error);
+                    return res.status(error.status||500).json({success:false,message:error.status?error.message:'Unable to update Main Store fulfilment.'});
+                }
+            }
+
+
+            // ================================================
             // COSMETICS / FASHION FULFILMENT
             // ================================================
 
@@ -1190,6 +1429,17 @@ module.exports = function (
 
 
                 try {
+
+                    if (
+                        nextStatus === 'shipped' &&
+                        sellerShipping &&
+                        typeof sellerShipping.assertBookedForItem === 'function'
+                    ) {
+                        await sellerShipping.assertBookedForItem(
+                            rawItemId,
+                            req.seller.id
+                        );
+                    }
 
                     const rows =
                         await changeMarketplaceItem(
@@ -1243,12 +1493,14 @@ module.exports = function (
                         error
                     );
 
-                    return res.status(500).json({
+                    return res.status(error.status || 500).json({
 
                         success: false,
 
                         message:
-                            'Unable to update order fulfilment.'
+                            error.status
+                                ? error.message
+                                : 'Unable to update order fulfilment.'
 
                     });
 
@@ -1326,6 +1578,17 @@ module.exports = function (
             // ================================================
 
             try {
+
+                if (
+                    nextStatus === 'shipped' &&
+                    sellerShipping &&
+                    typeof sellerShipping.assertBookedForItem === 'function'
+                ) {
+                    await sellerShipping.assertBookedForItem(
+                        rawItemId,
+                        req.seller.id
+                    );
+                }
 
                 const sql = `
 
@@ -1465,12 +1728,14 @@ module.exports = function (
                     error
                 );
 
-                return res.status(500).json({
+                return res.status(error.status || 500).json({
 
                     success: false,
 
                     message:
-                        'Unable to update order fulfilment.'
+                        error.status
+                            ? error.message
+                            : 'Unable to update order fulfilment.'
 
                 });
 
