@@ -104,6 +104,15 @@ module.exports = function registerCeroodSellerEkart(
                     `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_alias VARCHAR(120)`,
                     `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_registered_at TIMESTAMPTZ`,
                     `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_registration_error TEXT`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_pickup_serviceable BOOLEAN`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_delivery_serviceable BOOLEAN`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_cod_available BOOLEAN`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_reverse_pickup BOOLEAN`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_reverse_delivery BOOLEAN`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_max_cod_amount NUMERIC(14,2)`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_serviceability_checked_at TIMESTAMPTZ`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_serviceability_raw JSONB`,
+                    `ALTER TABLE public.cerood_seller_locations ADD COLUMN IF NOT EXISTS ekart_serviceability_error TEXT`,
 
                     `ALTER TABLE public.cosmetics_order_items ADD COLUMN IF NOT EXISTS fulfilment_location_id UUID`,
                     `ALTER TABLE public.clothing_order_items ADD COLUMN IF NOT EXISTS fulfilment_location_id UUID`,
@@ -339,6 +348,9 @@ module.exports = function registerCeroodSellerEkart(
         const rows = await query(
             `SELECT l.id,l.seller_id,l.location_name,l.address_line1,l.address_line2,l.city,l.district,l.state,l.pincode,
                     l.is_active,l.is_default,l.ekart_alias,l.ekart_registered_at,l.ekart_registration_error,
+                    l.ekart_pickup_serviceable,l.ekart_delivery_serviceable,l.ekart_cod_available,
+                    l.ekart_reverse_pickup,l.ekart_reverse_delivery,l.ekart_max_cod_amount,
+                    l.ekart_serviceability_checked_at,l.ekart_serviceability_raw,l.ekart_serviceability_error,
                     s.owner_name,s.shop_name,s.phone,s.email,s.gst_number
                FROM public.cerood_seller_locations l
                JOIN public.cerood_sellers s ON s.id=l.seller_id
@@ -355,6 +367,159 @@ module.exports = function registerCeroodSellerEkart(
             throw httpError(409, 'Complete the pickup address (address, state, pincode and seller phone) before booking Ekart.', 'PICKUP_INCOMPLETE');
         }
         return row;
+    }
+
+
+    const serviceabilityCacheHours = () => {
+        const n = Number(process.env.EKART_SERVICEABILITY_CACHE_HOURS || 24);
+        return Number.isFinite(n) && n > 0 && n <= 168 ? n : 24;
+    };
+
+    function serviceabilityCacheFresh(location) {
+        const checked = new Date(location?.ekart_serviceability_checked_at || 0).getTime();
+        if (!checked) return false;
+        return checked > Date.now() - serviceabilityCacheHours() * 60 * 60 * 1000;
+    }
+
+    function publicPickupServiceability(location) {
+        const sellerPickup = typeof location?.ekart_pickup_serviceable === 'boolean'
+            ? location.ekart_pickup_serviceable
+            : null;
+        return {
+            location_id: String(location?.id || ''),
+            pincode: pin6(location?.pincode),
+            seller_pickup: sellerPickup,
+            customer_delivery: typeof location?.ekart_delivery_serviceable === 'boolean'
+                ? location.ekart_delivery_serviceable
+                : null,
+            cod_available: typeof location?.ekart_cod_available === 'boolean'
+                ? location.ekart_cod_available
+                : null,
+            customer_reverse_pickup: typeof location?.ekart_reverse_pickup === 'boolean'
+                ? location.ekart_reverse_pickup
+                : null,
+            seller_reverse_delivery: typeof location?.ekart_reverse_delivery === 'boolean'
+                ? location.ekart_reverse_delivery
+                : null,
+            max_cod_amount: location?.ekart_max_cod_amount == null
+                ? null
+                : Number(location.ekart_max_cod_amount),
+            status: sellerPickup === true ? 'available' : sellerPickup === false ? 'unavailable' : 'unknown',
+            checked_at: location?.ekart_serviceability_checked_at || null,
+            error: clean(location?.ekart_serviceability_error, 500) || null
+        };
+    }
+
+    function parseEkartPincodeServiceability(data, expectedPincode) {
+        if (!data || typeof data.status !== 'boolean' || Number(data.pincode) !== Number(expectedPincode)) {
+            throw httpError(502, 'Ekart returned an invalid pincode serviceability response.', 'EKART_SERVICEABILITY_RESPONSE');
+        }
+        const details = data.details;
+        const hasDetails = details &&
+            ['forward_pickup', 'forward_drop', 'cod', 'reverse_pickup', 'reverse_drop']
+                .every(field => typeof details[field] === 'boolean');
+
+        if (data.status && !hasDetails) {
+            throw httpError(502, 'Ekart returned incomplete serviceability details for this pincode.', 'EKART_SERVICEABILITY_DETAILS');
+        }
+
+        return {
+            seller_pickup: hasDetails ? details.forward_pickup : false,
+            customer_delivery: hasDetails ? details.forward_drop : false,
+            cod_available: hasDetails ? details.cod : false,
+            customer_reverse_pickup: hasDetails ? details.reverse_pickup : false,
+            seller_reverse_delivery: hasDetails ? details.reverse_drop : false,
+            max_cod_amount: hasDetails && Number.isFinite(Number(details.max_cod_amount))
+                ? Number(details.max_cod_amount)
+                : null,
+            raw: data
+        };
+    }
+
+    async function refreshPickupServiceability(location, force = false) {
+        if (!force && serviceabilityCacheFresh(location) &&
+            typeof location.ekart_pickup_serviceable === 'boolean') {
+            return publicPickupServiceability(location);
+        }
+
+        const pincode = pin6(location.pincode);
+        if (!/^[1-9]\d{5}$/.test(pincode)) {
+            throw httpError(409, 'Seller pickup pincode is invalid.', 'PICKUP_PINCODE');
+        }
+
+        try {
+            const response = await ekartAuthedRequest({
+                method: 'GET',
+                url: `/api/v2/serviceability/${encodeURIComponent(pincode)}`,
+                timeout: 15_000,
+                maxContentLength: 512 * 1024
+            });
+            const parsed = parseEkartPincodeServiceability(response.data, pincode);
+            const rows = await query(
+                `UPDATE public.cerood_seller_locations
+                    SET ekart_pickup_serviceable=?,
+                        ekart_delivery_serviceable=?,
+                        ekart_cod_available=?,
+                        ekart_reverse_pickup=?,
+                        ekart_reverse_delivery=?,
+                        ekart_max_cod_amount=?,
+                        ekart_serviceability_checked_at=NOW(),
+                        ekart_serviceability_raw=?::jsonb,
+                        ekart_serviceability_error=NULL,
+                        updated_at=NOW()
+                  WHERE id=? AND seller_id=?
+                  RETURNING id,seller_id,location_name,pincode,is_active,is_default,
+                            ekart_alias,ekart_registered_at,
+                            ekart_pickup_serviceable,ekart_delivery_serviceable,ekart_cod_available,
+                            ekart_reverse_pickup,ekart_reverse_delivery,ekart_max_cod_amount,
+                            ekart_serviceability_checked_at,ekart_serviceability_error`,
+                [
+                    parsed.seller_pickup,
+                    parsed.customer_delivery,
+                    parsed.cod_available,
+                    parsed.customer_reverse_pickup,
+                    parsed.seller_reverse_delivery,
+                    parsed.max_cod_amount,
+                    JSON.stringify(parsed.raw),
+                    location.id,
+                    location.seller_id
+                ]
+            );
+            const saved = rows[0] || {
+                ...location,
+                ekart_pickup_serviceable: parsed.seller_pickup,
+                ekart_delivery_serviceable: parsed.customer_delivery,
+                ekart_cod_available: parsed.cod_available,
+                ekart_reverse_pickup: parsed.customer_reverse_pickup,
+                ekart_reverse_delivery: parsed.seller_reverse_delivery,
+                ekart_max_cod_amount: parsed.max_cod_amount,
+                ekart_serviceability_checked_at: new Date().toISOString(),
+                ekart_serviceability_error: null
+            };
+            return publicPickupServiceability(saved);
+        } catch (error) {
+            const message = safeEkartMessage(error, 'Ekart serviceability check failed.');
+            await query(
+                `UPDATE public.cerood_seller_locations
+                    SET ekart_serviceability_error=?,updated_at=NOW()
+                  WHERE id=? AND seller_id=?`,
+                [message, location.id, location.seller_id]
+            ).catch(() => {});
+            if (error.status) throw error;
+            throw httpError(502, `Ekart serviceability check failed: ${message}`, 'EKART_SERVICEABILITY');
+        }
+    }
+
+    async function requirePickupServiceable(location, force = false) {
+        const result = await refreshPickupServiceability(location, force);
+        if (result.seller_pickup !== true) {
+            throw httpError(
+                409,
+                `Ekart pickup is unavailable from seller pincode ${result.pincode}. Choose another serviceable seller pickup location or use another courier.`,
+                'EKART_PICKUP_UNAVAILABLE'
+            );
+        }
+        return result;
     }
 
     function deterministicAlias(location) {
@@ -987,13 +1152,122 @@ module.exports = function registerCeroodSellerEkart(
         }
     });
 
+
+    app.get('/api/sellers/ekart/locations', requireSellerAuth, async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            await ensureSchema();
+            const configured = Boolean(
+                process.env.EKART_CLIENT_ID &&
+                process.env.EKART_USERNAME &&
+                process.env.EKART_PASSWORD
+            );
+            const locations = await query(
+                `SELECT id,seller_id,location_name,address_line1,address_line2,city,district,state,pincode,
+                        is_active,is_default,ekart_alias,ekart_registered_at,ekart_registration_error,
+                        ekart_pickup_serviceable,ekart_delivery_serviceable,ekart_cod_available,
+                        ekart_reverse_pickup,ekart_reverse_delivery,ekart_max_cod_amount,
+                        ekart_serviceability_checked_at,ekart_serviceability_error
+                   FROM public.cerood_seller_locations
+                  WHERE seller_id=? AND is_active=true
+                  ORDER BY is_default DESC,created_at ASC
+                  LIMIT 50`,
+                [req.seller.id]
+            );
+
+            const enriched = await Promise.all(locations.map(async location => {
+                let ekart;
+                if (!configured) {
+                    ekart = {
+                        ...publicPickupServiceability(location),
+                        status: 'unknown',
+                        error: 'Ekart API credentials are not configured on the server.'
+                    };
+                } else {
+                    try {
+                        ekart = await refreshPickupServiceability(location, false);
+                    } catch (error) {
+                        ekart = {
+                            ...publicPickupServiceability(location),
+                            status: 'unknown',
+                            error: clean(error.message, 500) || 'Unable to verify Ekart pickup serviceability.'
+                        };
+                    }
+                }
+                return {
+                    id: location.id,
+                    location_name: location.location_name,
+                    address_line1: location.address_line1,
+                    address_line2: location.address_line2,
+                    city: location.city,
+                    district: location.district,
+                    state: location.state,
+                    pincode: location.pincode,
+                    is_active: location.is_active,
+                    is_default: location.is_default,
+                    ekart_alias: location.ekart_alias || null,
+                    ekart_registered_at: location.ekart_registered_at || null,
+                    ekart: ekart,
+                    ekart_pickup_serviceable: ekart.seller_pickup,
+                    ekart_serviceability_status: ekart.status,
+                    ekart_serviceability_checked_at: ekart.checked_at,
+                    ekart_serviceability_error: ekart.error
+                };
+            }));
+
+            return res.json({
+                success: true,
+                configured,
+                cache_hours: serviceabilityCacheHours(),
+                locations: enriched
+            });
+        } catch (error) {
+            console.error('Ekart seller locations:', error.code || error.message);
+            return res.status(error.status || 502).json({
+                success: false,
+                message: error.message || 'Unable to load Ekart pickup availability.'
+            });
+        }
+    });
+
+    app.post('/api/sellers/locations/:id/ekart-serviceability', requireSellerAuth, async (req, res) => {
+        res.set('Cache-Control', 'no-store');
+        try {
+            await ensureSchema();
+            const pickup = await loadSellerLocation(req.seller.id, req.params.id);
+            const serviceability = await refreshPickupServiceability(pickup, true);
+            return res.json({
+                success: true,
+                serviceability,
+                message: serviceability.seller_pickup
+                    ? `Ekart pickup is available from ${serviceability.pincode}.`
+                    : `Ekart pickup is unavailable from ${serviceability.pincode}.`
+            });
+        } catch (error) {
+            console.error('Ekart pickup serviceability:', error.code || error.message);
+            return res.status(error.status || 502).json({
+                success: false,
+                code: error.code || undefined,
+                message: error.message || 'Unable to check Ekart pickup serviceability.'
+            });
+        }
+    });
+
     app.post('/api/sellers/locations/:id/ekart-register', requireSellerAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');
         try {
             await ensureSchema();
             const pickup = await loadSellerLocation(req.seller.id, req.params.id);
+            const serviceability = await refreshPickupServiceability(pickup, false).catch(() => publicPickupServiceability(pickup));
             const alias = await ensurePickupAlias(pickup);
-            return res.json({ success: true, alias, message: 'Seller pickup location is registered with Ekart.' });
+            return res.json({
+                success: true,
+                alias,
+                serviceability,
+                message: serviceability.seller_pickup === false
+                    ? 'Pickup address is registered, but Ekart pickup is currently unavailable from this pincode.'
+                    : 'Seller pickup location is registered with Ekart.'
+            });
         } catch (error) {
             console.error('Ekart pickup registration:', error.code || error.message);
             return res.status(error.status || 502).json({ success: false, message: error.message || 'Unable to register Ekart pickup location.' });
@@ -1010,6 +1284,11 @@ module.exports = function registerCeroodSellerEkart(
             if (!ref) throw httpError(400, 'Invalid seller order item.', 'ORDER_ITEM');
             const input = bookingInput(req);
             const pickup = await loadSellerLocation(req.seller.id, input.locationId);
+
+            // Final live pickup check before any AWB reservation. A seller location
+            // may be valid in CEROOD but not currently supported for Ekart first-mile pickup.
+            await requirePickupServiceable(pickup, true);
+
             const parcel = await loadParcel(ref, req.seller.id, input.locationId);
 
             const incomingKey = clean(req.get('Idempotency-Key'), 220);
