@@ -3856,6 +3856,16 @@ require('./cerood-marketplace-catalog')(
     requireAdminAuth
 );
 
+// ==========================================
+// CEROOD SELLER BULK CATALOG IMPORT
+// CSV/XLSX rows are staged into the existing admin QC workflow.
+// ==========================================
+require('./cerood-seller-bulk-catalog')(
+    app,
+    db,
+    requireSellerAuth
+);
+
 
 // ==========================================
 // CEROOD DYNAMIC CATEGORY MANAGEMENT
