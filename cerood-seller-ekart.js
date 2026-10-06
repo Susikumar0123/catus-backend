@@ -934,6 +934,25 @@ module.exports = function registerCeroodSellerEkart(
         ).catch(() => {});
     }
 
+    async function assertNoDelhiveryShipment(parcel) {
+        try {
+            const rows = await query(
+                `SELECT waybill,booking_state
+                   FROM public.cerood_delhivery_shipments
+                  WHERE marketplace=? AND order_id=? AND seller_id=? AND fulfilment_location_id=?
+                  ORDER BY updated_at DESC LIMIT 1`,
+                [parcel.marketplace, parcel.orderId, parcel.sellerId, parcel.fulfilmentLocationId]
+            );
+            const row = rows[0];
+            if (row?.waybill && !['cancelled','failed'].includes(String(row.booking_state || '').toLowerCase())) {
+                throw httpError(409, 'This seller parcel already has a Delhivery AWB. Ekart duplicate booking was blocked.', 'COURIER_ALREADY_BOOKED');
+            }
+        } catch (error) {
+            if (String(error?.code || '') === '42P01' || /cerood_delhivery_shipments.*does not exist/i.test(String(error?.message || ''))) return;
+            throw error;
+        }
+    }
+
     async function serviceabilityCheck(parcel, pickup, input) {
         if (process.env.EKART_SKIP_SERVICEABILITY_CHECK === 'true') return [];
         const payload = {
@@ -1290,6 +1309,7 @@ module.exports = function registerCeroodSellerEkart(
             await requirePickupServiceable(pickup, true);
 
             const parcel = await loadParcel(ref, req.seller.id, input.locationId);
+            await assertNoDelhiveryShipment(parcel);
 
             const incomingKey = clean(req.get('Idempotency-Key'), 220);
             const idempotencyKey = incomingKey || `seller:${req.seller.id}:${shipmentGroupKey(parcel)}`.slice(0, 220);

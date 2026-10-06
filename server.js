@@ -3894,17 +3894,40 @@ const sellerEkartShipping = require('./cerood-seller-ekart')(
 );
 
 // ==========================================
-// CEROOD SELLER DELHIVERY SHIPPING — PHASE 1
-// Per-seller pickup pincode serviceability.
+// CEROOD SELLER DELHIVERY SHIPPING — PHASE 2
+// Per-seller serviceability + warehouse + AWB + pickup + tracking.
 // Delhivery token stays server-side only.
 // ==========================================
 
-require('./cerood-seller-delhivery')(
+const sellerDelhiveryShipping = require('./cerood-seller-delhivery')(
     app,
     db,
     requireSellerAuth,
     requireAdminAuth
 );
+
+// Unified seller-shipping adapter used by Seller Orders.
+// A seller item may be marked shipped only after a valid AWB exists
+// in either Ekart OR Delhivery. Customer delivery status stays admin-controlled.
+const sellerShipping = {
+    ensureSchema: async () => {
+        await sellerEkartShipping.ensureSchema();
+        await sellerDelhiveryShipping.ensureSchema();
+    },
+    attachShipments: async (orders, sellerId) => {
+        let out = await sellerEkartShipping.attachShipments(orders, sellerId);
+        out = await sellerDelhiveryShipping.attachShipments(out, sellerId);
+        return out;
+    },
+    assertBookedForItem: async (orderItemId, sellerId) => {
+        try {
+            return await sellerEkartShipping.assertBookedForItem(orderItemId, sellerId);
+        } catch (error) {
+            if (error?.code !== 'AWB_REQUIRED') throw error;
+        }
+        return sellerDelhiveryShipping.assertBookedForItem(orderItemId, sellerId);
+    }
+};
 
 // ==========================================
 // CEROOD SELLER ORDERS
@@ -3915,7 +3938,7 @@ require('./cerood-seller-orders')(
     app,
     db,
     requireSellerAuth,
-    sellerEkartShipping
+    sellerShipping
 );
 
 
