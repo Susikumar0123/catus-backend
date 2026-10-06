@@ -166,14 +166,11 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
     const b = cleanBase(row, meta.batchId);
 
     if (marketplace === 'general') {
-      const productAttributes = {
-        supplier_sku: b.supplier_sku,
-        source: 'seller_bulk_catalog'
-      };
-      for (const key of ['size', 'color', 'variant', 'shade']) {
-        const value = text(row[key], 250);
-        if (value) productAttributes[key] = value;
-      }
+      // IMPORTANT: product_attributes is reserved for the selected category's
+      // configured specification keys only. Internal import metadata such as
+      // supplier SKU/source must stay top-level, otherwise admin approval
+      // correctly rejects them as invalid category specifications.
+      const productAttributes = {};
       return {
         supplier_sku: b.supplier_sku,
         catalog_batch_id: b.catalog_batch_id,

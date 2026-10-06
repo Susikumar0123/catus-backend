@@ -467,8 +467,26 @@ module.exports = function (
       ? product.product_attributes : {};
     const images = product.product_images && typeof product.product_images === 'object' && !Array.isArray(product.product_images)
       ? product.product_images : {};
+
+    // Older bulk-import rows stored importer metadata inside product_attributes.
+    // Those keys are not customer-facing category specifications and must not
+    // block admin approval. Clean them before schema validation.
+    const bulkImported = String(attributes.source || '') === 'seller_bulk_catalog';
+    for (const reserved of ['supplier_sku', 'source', 'catalog_batch_id']) {
+      delete attributes[reserved];
+    }
+
     for (const key of Object.keys(attributes)) {
-      if (!allowedAttributes.has(key)) throw badRequest(`Invalid product specification: ${key}.`);
+      if (!allowedAttributes.has(key)) {
+        if (bulkImported) {
+          // Generic supplier columns are not automatically category specs.
+          // Drop unknown keys for legacy bulk rows; required configured specs
+          // below are still enforced normally.
+          delete attributes[key];
+          continue;
+        }
+        throw badRequest(`Invalid product specification: ${key}.`);
+      }
     }
     for (const key of Object.keys(images)) {
       if (!allowedImages.has(key)) throw badRequest(`Invalid product image slot: ${key}.`);
