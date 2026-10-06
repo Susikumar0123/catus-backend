@@ -122,21 +122,44 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
 
   async function getGeneralCategory(categoryId) {
     if (!uuid(categoryId)) throw fail('Choose a valid Cerood Main Store category.');
+
+    // Product Import Center reads its category tree from the unified
+    // cerood_product_categories master. Validate against the SAME table here.
+    // The previous legacy cerood_shop_categories lookup caused valid category
+    // UUIDs selected in the seller dashboard to fail during final submit.
     const rows = await query(`
-      SELECT c.id,c.name,c.parent_id,p.name AS parent_name
-      FROM public.cerood_shop_categories c
-      LEFT JOIN public.cerood_shop_categories p
-        ON p.id=c.parent_id
-       AND p.marketplace='general'
-       AND p.is_active=true
-      WHERE c.id=?
-        AND c.marketplace='general'
-        AND c.is_active=true
+      SELECT id,marketplace,parent_id,name,slug,category_level,is_leaf,category_path
+      FROM public.cerood_product_categories
+      WHERE id=?
+        AND marketplace='general'
+        AND is_active=true
       LIMIT 1
     `, [categoryId]);
+
     if (!rows.length) throw fail('Selected Cerood Main Store category is inactive or missing.');
-    if (rows[0].parent_id && !rows[0].parent_name) throw fail('Selected category parent is inactive.');
-    return rows[0];
+
+    const selected = rows[0];
+    const isLeaf = selected.is_leaf === true || String(selected.is_leaf).toLowerCase() === 'true';
+    if (!isLeaf) throw fail('Choose the final Cerood Main Store category.');
+
+    let parentName = null;
+    if (selected.parent_id) {
+      const parents = await query(`
+        SELECT id,name
+        FROM public.cerood_product_categories
+        WHERE id=?
+          AND marketplace='general'
+          AND is_active=true
+        LIMIT 1
+      `, [selected.parent_id]);
+      if (!parents.length) throw fail('Selected category parent is inactive.');
+      parentName = parents[0].name;
+    }
+
+    return {
+      ...selected,
+      parent_name: parentName
+    };
   }
 
   function buildProduct(marketplace, row, meta) {
