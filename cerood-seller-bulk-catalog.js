@@ -120,27 +120,24 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
     };
   }
 
-  async function getGeneralCategory(categoryId) {
-    if (!uuid(categoryId)) throw fail('Choose a valid Cerood Main Store category.');
+  async function getMarketplaceCategory(marketplace, categoryId) {
+    if (!allowedMarketplaces.has(marketplace)) throw fail('Invalid marketplace.');
+    if (!uuid(categoryId)) throw fail('Choose a valid final Cerood category.');
 
-    // Product Import Center reads its category tree from the unified
-    // cerood_product_categories master. Validate against the SAME table here.
-    // The previous legacy cerood_shop_categories lookup caused valid category
-    // UUIDs selected in the seller dashboard to fail during final submit.
     const rows = await query(`
       SELECT id,marketplace,parent_id,name,slug,category_level,is_leaf,category_path
       FROM public.cerood_product_categories
       WHERE id=?
-        AND marketplace='general'
+        AND marketplace=?
         AND is_active=true
       LIMIT 1
-    `, [categoryId]);
+    `, [categoryId, marketplace]);
 
-    if (!rows.length) throw fail('Selected Cerood Main Store category is inactive or missing.');
+    if (!rows.length) throw fail('Selected Cerood category is inactive or missing.');
 
     const selected = rows[0];
     const isLeaf = selected.is_leaf === true || String(selected.is_leaf).toLowerCase() === 'true';
-    if (!isLeaf) throw fail('Choose the final Cerood Main Store category.');
+    if (!isLeaf) throw fail('Choose the final Cerood category.');
 
     let parentName = null;
     if (selected.parent_id) {
@@ -148,35 +145,39 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
         SELECT id,name
         FROM public.cerood_product_categories
         WHERE id=?
-          AND marketplace='general'
+          AND marketplace=?
           AND is_active=true
         LIMIT 1
-      `, [selected.parent_id]);
+      `, [selected.parent_id, marketplace]);
       if (!parents.length) throw fail('Selected category parent is inactive.');
       parentName = parents[0].name;
     }
 
-    return {
-      ...selected,
-      parent_name: parentName
-    };
+    return { ...selected, parent_name: parentName };
   }
 
   function buildProduct(marketplace, row, meta) {
     const b = cleanBase(row, meta.batchId);
+    const incomingAttrs =
+      row.product_attributes &&
+      typeof row.product_attributes === 'object' &&
+      !Array.isArray(row.product_attributes)
+        ? row.product_attributes
+        : {};
+
+    const commonDynamic = {
+      category_id: String(meta.marketplaceCategory.id),
+      product_attributes: incomingAttrs,
+      product_images: {}
+    };
 
     if (marketplace === 'general') {
-      // IMPORTANT: product_attributes is reserved for the selected category's
-      // configured specification keys only. Internal import metadata such as
-      // supplier SKU/source must stay top-level, otherwise admin approval
-      // correctly rejects them as invalid category specifications.
-      const productAttributes = {};
       return {
         supplier_sku: b.supplier_sku,
         catalog_batch_id: b.catalog_batch_id,
         name: b.name,
-        category: meta.generalCategory.parent_name || meta.generalCategory.name,
-        subcategory: meta.generalCategory.parent_id ? meta.generalCategory.name : '',
+        category: meta.marketplaceCategory.parent_name || meta.marketplaceCategory.name,
+        subcategory: meta.marketplaceCategory.parent_id ? meta.marketplaceCategory.name : '',
         brand: b.brand,
         model: text(row.model, 120),
         description: b.description,
@@ -185,9 +186,7 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
         stock: b.stock,
         image_url: b.image_url,
         video_url: b.video_url,
-        category_id: String(meta.generalCategory.id),
-        product_attributes: productAttributes,
-        product_images: {}
+        ...commonDynamic
       };
     }
 
@@ -199,7 +198,8 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
         supplier_sku: b.supplier_sku,
         catalog_batch_id: b.catalog_batch_id,
         name: b.name,
-        category: text(meta.categoryLeaf || b.category, 250),
+        category: meta.marketplaceCategory.parent_name || meta.marketplaceCategory.name,
+        subcategory: meta.marketplaceCategory.parent_id ? meta.marketplaceCategory.name : '',
         brand: b.brand,
         description: b.description,
         variant: explicitVariant || size,
@@ -217,7 +217,8 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
         image_url: b.image_url,
         video_url: b.video_url,
         manufacturer: b.manufacturer,
-        importer: b.importer
+        importer: b.importer,
+        ...commonDynamic
       };
     }
 
@@ -232,7 +233,8 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
       supplier_sku: b.supplier_sku,
       catalog_batch_id: b.catalog_batch_id,
       name: b.name,
-      category: text(meta.categoryLeaf || b.category, 250),
+      category: meta.marketplaceCategory.parent_name || meta.marketplaceCategory.name,
+      subcategory: meta.marketplaceCategory.parent_id ? meta.marketplaceCategory.name : '',
       brand: b.brand,
       description: b.description,
       variant: text(row.variant || row.size, 100),
@@ -250,7 +252,8 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
       image_url: b.image_url,
       video_url: b.video_url,
       manufacturer: b.manufacturer,
-      importer: b.importer
+      importer: b.importer,
+      ...commonDynamic
     };
   }
 
@@ -334,15 +337,14 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
       const finalChunk = body.final_chunk === true;
       const rowOffset = Number.isSafeInteger(Number(body.row_offset)) && Number(body.row_offset) >= 0 ? Number(body.row_offset) : 0;
 
-      let generalCategory = null;
-      if (marketplace === 'general') generalCategory = await getGeneralCategory(categoryId);
+      const marketplaceCategory = await getMarketplaceCategory(marketplace, categoryId);
 
       await query(`
         INSERT INTO public.cerood_catalog_import_batches
           (id,seller_id,marketplace,category_id,category_path,file_name,status)
         VALUES (?, ?, ?, ?::uuid, ?, ?, 'processing')
         ON CONFLICT (id) DO NOTHING
-      `, [batchId, req.seller.id, marketplace, marketplace === 'general' ? categoryId : null, categoryPath || null, fileName || null]);
+      `, [batchId, req.seller.id, marketplace, categoryId, categoryPath || null, fileName || null]);
 
       const owned = await query(`SELECT id,marketplace FROM public.cerood_catalog_import_batches WHERE id=? AND seller_id=? LIMIT 1`, [batchId, req.seller.id]);
       if (!owned.length) throw fail('Bulk batch does not belong to this seller.', 403);
@@ -362,7 +364,7 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
           const product = buildProduct(marketplace, raw, {
             batchId,
             categoryLeaf,
-            generalCategory
+            marketplaceCategory
           });
           const result = await stageSubmission(req.seller.id, marketplace, product);
           if (result.action === 'inserted') inserted++;
