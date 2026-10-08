@@ -3114,6 +3114,114 @@ booked_at
 });
 
 // ==========================================
+// CEROOD HOME SERVICES — FREE BOOKING REQUEST
+// Separate from legacy paid checkout and all shopping APIs.
+// Booking fee is zero; inspection is NOT free.
+// Inspection fee is confirmed with customer BEFORE technician visit.
+// ==========================================
+app.post('/api/home-services/free-bookings', (req, res) => {
+    const b = req.body || {};
+    const phone = String(b.phone || '').replace(/\D/g, '');
+    const name = String(b.customer_name || '').trim().slice(0, 150);
+    const address = String(b.service_address || b.address || '').trim();
+    const district = String(b.service_district || b.district || '').trim();
+    const pincode = String(b.service_pincode || b.pincode || '').trim();
+    const date = String(b.service_date || '').trim();
+    const time = String(b.service_time || '').trim();
+    const rawItems = Array.isArray(b.items) ? b.items : [];
+    const ids = [...new Set(rawItems.map(x => String(x && x.product_id || '').trim()).filter(Boolean))];
+    if (!/^[6-9]\d{9}$/.test(phone) || !name || !address || !district || !/^\d{6}$/.test(pincode) || !ids.length || ids.length > 20 || ids.some(id => id.length > 100)) {
+        return res.status(400).json({ success: false, message: 'Valid customer, address and service details are required.' });
+    }
+    if (date && !/^\d{4}-\d{2}-\d{2}$/.test(date)) {
+        return res.status(400).json({ success: false, message: 'Invalid service date.' });
+    }
+    const placeholders = ids.map(() => '?').join(',');
+    db.query(`SELECT service_id, service_name FROM public.services WHERE service_id IN (${placeholders})`, ids, (lookupErr, rows) => {
+        if (lookupErr) {
+            console.error('Free booking service lookup failed:', lookupErr);
+            return res.status(500).json({ success: false, message: 'Unable to check requested services.' });
+        }
+        if (!rows || rows.length !== ids.length) {
+            return res.status(400).json({ success: false, message: 'One or more services are unavailable.' });
+        }
+        const serviceMap = new Map(rows.map(x => [String(x.service_id), String(x.service_name)]));
+        const orderId = 'CHS-' + crypto.randomUUID();
+        const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status`;
+        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted'];
+        const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(9).fill('?').join(',')}) RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
+        db.query(sql, values, (err, inserted) => {
+            if (err) {
+                console.error('Free booking insert failed:', err);
+                return res.status(500).json({ success: false, message: 'Unable to save booking request.' });
+            }
+            return res.status(201).json({
+                success: true,
+                order_id: inserted && inserted[0] ? inserted[0].order_id : orderId,
+                booking_fee: 0,
+                inspection_fee: null,
+                inspection_fee_status: 'Awaiting Confirmation',
+                repair_quote_status: 'Not Quoted',
+                message: 'Booking request received. Cerood will confirm the paid inspection/visiting charge before scheduling a technician. No repair will start without your approval.'
+            });
+        });
+    });
+});
+
+// CEROOD HOME SERVICES — ADMIN INSPECTION & QUOTATION (authenticated)
+// Only affects bookings explicitly created with quote_after_inspection.
+const ceroodHomeAdminQuery = (sql, params=[]) => new Promise((resolve,reject)=>
+    db.query(sql, params, (error, rows)=>error ? reject(error) : resolve(rows || [])));
+
+app.get('/api/admin/home-services/free-bookings', requireAdminAuth, async (req,res)=>{
+    try {
+        const orders=await ceroodHomeAdminQuery(`SELECT order_id,customer_name,phone,service_name,service_date,service_time,
+            service_address,service_district,status,booking_fee,inspection_fee,inspection_fee_status,
+            inspection_fee_confirmed_at,inspection_completed_at,repair_quote_amount,repair_quote_notes,
+            repair_quote_status,repair_quote_sent_at,repair_quote_responded_at,payment_status
+            FROM public.orders WHERE booking_pricing_model='quote_after_inspection'
+            ORDER BY id DESC LIMIT 250`);
+        return res.json({success:true,orders});
+    } catch(error){console.error('Home booking admin list:',error);return res.status(500).json({success:false,message:'Unable to load bookings.'});}
+});
+
+app.patch('/api/admin/home-services/free-bookings/:orderId/inspection',requireAdminAuth,async(req,res)=>{
+    const orderId=String(req.params.orderId||'');
+    const fee=req.body?.inspection_fee;
+    const amount=Number(fee);
+    if(!orderId.startsWith('CHS-')||!Number.isFinite(amount)||amount<0||amount>100000||fee===null||fee===undefined||String(fee).trim()==='')
+        return res.status(400).json({success:false,message:'Enter a valid inspection charge.'});
+    try {
+        // Setting a fee does not imply customer consent; it remains awaiting confirmation.
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET inspection_fee=?,
+          inspection_fee_status='Awaiting Customer Confirmation',inspection_fee_confirmed_at=NULL
+          WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
+          AND inspection_completed_at IS NULL AND inspection_fee_status IS DISTINCT FROM 'Confirmed'
+          RETURNING order_id,inspection_fee,inspection_fee_status`,[amount,orderId]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Booking not found or inspection already confirmed/completed.'});
+        return res.json({success:true,order:rows[0],message:'Inspection fee saved. Customer confirmation is still required before appointment.'});
+    } catch(error){console.error('Inspection fee update:',error);return res.status(500).json({success:false,message:'Unable to save inspection charge.'});}
+});
+
+app.patch('/api/admin/home-services/free-bookings/:orderId/quotation',requireAdminAuth,async(req,res)=>{
+    const orderId=String(req.params.orderId||'');
+    const amount=Number(req.body?.repair_quote_amount);
+    const notes=String(req.body?.repair_quote_notes||'').trim().slice(0,2000);
+    if(!orderId.startsWith('CHS-')||req.body?.repair_quote_amount==null||String(req.body.repair_quote_amount).trim()===''||!Number.isFinite(amount)||amount<0||amount>10000000)
+        return res.status(400).json({success:false,message:'Enter a valid repair quotation amount.'});
+    try {
+        // Admin drafts a quote; this does not mark it customer-approved or trigger payment.
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET repair_quote_amount=?,repair_quote_notes=?,
+          repair_quote_status='Draft',repair_quote_sent_at=NULL,repair_quote_responded_at=NULL
+          WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
+          AND repair_quote_status IN ('Not Quoted','Draft')
+          RETURNING order_id,repair_quote_amount,repair_quote_notes,repair_quote_status`,[amount,notes,orderId]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Booking not found or quotation is already in progress.'});
+        return res.json({success:true,order:rows[0],message:'Quotation saved as draft. It has not been sent or approved.'});
+    } catch(error){console.error('Repair quote update:',error);return res.status(500).json({success:false,message:'Unable to save quotation.'});}
+});
+
+// ==========================================
 // 4. CREATE ORDER API ROUTE (Checkout)
 // ==========================================
 app.post('/api/orders', async (req, res) => {
