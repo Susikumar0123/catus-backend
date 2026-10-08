@@ -72,6 +72,7 @@ app.use(cors({
 app.use('/api/renewed/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/cosmetics/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/clothing/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
+app.use('/api/home-services/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use(express.json());
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
@@ -3147,9 +3148,11 @@ app.post('/api/home-services/free-bookings', (req, res) => {
         }
         const serviceMap = new Map(rows.map(x => [String(x.service_id), String(x.service_name)]));
         const orderId = 'CHS-' + crypto.randomUUID();
-        const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status`;
-        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted'];
-        const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(9).fill('?').join(',')}) RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
+        const approvalKey = crypto.randomBytes(32).toString('hex');
+        const approvalKeyHash = crypto.createHash('sha256').update(approvalKey).digest('hex');
+        const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status,customer_approval_key_hash`;
+        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted', approvalKeyHash];
+        const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(10).fill('?').join(',')}) RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
         db.query(sql, values, (err, inserted) => {
             if (err) {
                 console.error('Free booking insert failed:', err);
@@ -3159,6 +3162,7 @@ app.post('/api/home-services/free-bookings', (req, res) => {
                 success: true,
                 order_id: inserted && inserted[0] ? inserted[0].order_id : orderId,
                 booking_fee: 0,
+                customer_approval_key: approvalKey,
                 inspection_fee: null,
                 inspection_fee_status: 'Awaiting Confirmation',
                 repair_quote_status: 'Not Quoted',
@@ -3214,11 +3218,207 @@ app.patch('/api/admin/home-services/free-bookings/:orderId/quotation',requireAdm
         const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET repair_quote_amount=?,repair_quote_notes=?,
           repair_quote_status='Draft',repair_quote_sent_at=NULL,repair_quote_responded_at=NULL
           WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
-          AND repair_quote_status IN ('Not Quoted','Draft')
+          AND repair_quote_status IN ('Not Quoted','Draft') AND final_razorpay_order_id IS NULL AND (final_payment_status IS NULL OR final_payment_status='not_started')
           RETURNING order_id,repair_quote_amount,repair_quote_notes,repair_quote_status`,[amount,notes,orderId]);
         if(!rows.length)return res.status(409).json({success:false,message:'Booking not found or quotation is already in progress.'});
         return res.json({success:true,order:rows[0],message:'Quotation saved as draft. It has not been sent or approved.'});
     } catch(error){console.error('Repair quote update:',error);return res.status(500).json({success:false,message:'Unable to save quotation.'});}
+});
+
+// ==========================================
+// CEROOD HOME SERVICES — CUSTOMER CONSENT (STAGING)
+// Customer approval key is issued only once on booking and stored hashed.
+// Do not share approval keys via URL, logs, or admin list.
+// ==========================================
+function chsApprovalKeyHash(raw) {
+    const value = String(raw || '');
+    if (!/^[a-f0-9]{64}$/.test(value)) return null;
+    return crypto.createHash('sha256').update(value).digest('hex');
+}
+function chsCustomerOrder(req) {
+    const id = String(req.body?.order_id || '').trim();
+    const hash = chsApprovalKeyHash(req.body?.customer_approval_key);
+    if (!/^CHS-[0-9a-f-]{36}$/.test(id) || !hash) return null;
+    return { id, hash };
+}
+app.post('/api/home-services/booking-status', async (req,res)=>{
+    const key=chsCustomerOrder(req);
+    if(!key)return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
+    try {
+        const rows=await ceroodHomeAdminQuery(`SELECT order_id,service_name,booking_fee,inspection_fee,inspection_fee_status,
+          inspection_completed_at,repair_quote_amount,repair_quote_notes,repair_quote_status,payment_status
+          FROM public.orders WHERE order_id=? AND customer_approval_key_hash=?
+          AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[key.id,key.hash]);
+        if(!rows.length)return res.status(404).json({success:false,message:'Booking not found or approval key invalid.'});
+        return res.json({success:true,booking:rows[0]});
+    }catch(e){console.error('Customer booking status:',e);return res.status(500).json({success:false,message:'Unable to load booking.'});}
+});
+app.post('/api/home-services/inspection-response',async(req,res)=>{
+    const key=chsCustomerOrder(req), decision=String(req.body?.decision||'').toLowerCase();
+    if(!key||!['accept','reject'].includes(decision))return res.status(400).json({success:false,message:'Valid approval key and decision required.'});
+    try {
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET inspection_fee_status=?,
+          inspection_fee_confirmed_at=CASE WHEN ?='Confirmed' THEN CURRENT_TIMESTAMP ELSE NULL END
+          WHERE order_id=? AND customer_approval_key_hash=? AND booking_pricing_model='quote_after_inspection'
+          AND inspection_fee IS NOT NULL AND inspection_fee_status='Awaiting Customer Confirmation'
+          RETURNING order_id,inspection_fee,inspection_fee_status`,[
+          decision==='accept'?'Confirmed':'Declined',decision==='accept'?'Confirmed':'Declined',key.id,key.hash]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Inspection fee is not awaiting your confirmation.'});
+        return res.json({success:true,booking:rows[0]});
+    }catch(e){console.error('Inspection response:',e);return res.status(500).json({success:false,message:'Unable to record inspection response.'});}
+});
+app.post('/api/home-services/quotation-response',async(req,res)=>{
+    const key=chsCustomerOrder(req), decision=String(req.body?.decision||'').toLowerCase();
+    if(!key||!['accept','reject'].includes(decision))return res.status(400).json({success:false,message:'Valid approval key and decision required.'});
+    try {
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET repair_quote_status=?,repair_quote_responded_at=CURRENT_TIMESTAMP
+          WHERE order_id=? AND customer_approval_key_hash=? AND booking_pricing_model='quote_after_inspection'
+          AND repair_quote_status='Sent' AND repair_quote_amount IS NOT NULL
+          AND inspection_fee_status='Confirmed' AND inspection_completed_at IS NOT NULL
+          RETURNING order_id,repair_quote_amount,repair_quote_status`,[
+          decision==='accept'?'Accepted':'Rejected',key.id,key.hash]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Quotation is not ready for approval.'});
+        return res.json({success:true,booking:rows[0],message:'Response saved. No payment was taken.'});
+    }catch(e){console.error('Quotation response:',e);return res.status(500).json({success:false,message:'Unable to record quotation response.'});}
+});
+app.patch('/api/admin/home-services/free-bookings/:orderId/inspection-completed',requireAdminAuth,async(req,res)=>{
+    try {
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET inspection_completed_at=COALESCE(inspection_completed_at,CURRENT_TIMESTAMP)
+          WHERE order_id=? AND booking_pricing_model='quote_after_inspection' AND inspection_fee_status='Confirmed'
+          RETURNING order_id,inspection_completed_at`,[req.params.orderId]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Inspection requires customer fee confirmation.'});
+        return res.json({success:true,booking:rows[0]});
+    }catch(e){console.error('Inspection completion:',e);return res.status(500).json({success:false,message:'Unable to update inspection.'});}
+});
+app.patch('/api/admin/home-services/free-bookings/:orderId/send-quotation',requireAdminAuth,async(req,res)=>{
+    try {
+        const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET repair_quote_status='Sent',repair_quote_sent_at=CURRENT_TIMESTAMP
+          WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
+          AND inspection_fee_status='Confirmed' AND inspection_completed_at IS NOT NULL
+          AND repair_quote_status='Draft' AND repair_quote_amount IS NOT NULL
+          RETURNING order_id,repair_quote_amount,repair_quote_status`,[req.params.orderId]);
+        if(!rows.length)return res.status(409).json({success:false,message:'Complete confirmed inspection and save a quotation draft first.'});
+        return res.json({success:true,booking:rows[0],message:'Quotation is available for customer review; no notification has been sent automatically.'});
+    }catch(e){console.error('Send quotation:',e);return res.status(500).json({success:false,message:'Unable to publish quotation.'});}
+});
+
+// HOME SERVICES — PAYMENT READINESS (NO CHARGE OR RAZORPAY ORDER)
+// Uses customer-held approval key. This endpoint never marks an order paid.
+app.post('/api/home-services/payment-readiness', async (req, res) => {
+    res.set('Cache-Control', 'no-store');
+    const key = chsCustomerOrder(req);
+    if (!key) return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
+    try {
+        const rows = await ceroodHomeAdminQuery(`SELECT order_id,booking_fee,inspection_fee,
+            inspection_fee_status,inspection_completed_at,repair_quote_amount,repair_quote_status,
+            payment_status,final_payment_status,final_payment_amount
+            FROM public.orders WHERE order_id=? AND customer_approval_key_hash=?
+            AND booking_pricing_model='quote_after_inspection' LIMIT 1`, [key.id,key.hash]);
+        if (!rows.length) return res.status(404).json({success:false,message:'Booking not found.'});
+        const o = rows[0];
+        const quote = Number(o.repair_quote_amount);
+        const eligible = o.inspection_fee_status === 'Confirmed' && !!o.inspection_completed_at &&
+            o.repair_quote_status === 'Accepted' && o.repair_quote_amount != null &&
+            Number.isFinite(quote) && quote >= 0;
+        return res.json({success:true,order_id:o.order_id,ready_for_payment:eligible,
+            approved_repair_amount:eligible?quote:null,
+            inspection_fee:o.inspection_fee,
+            inspection_fee_collection:'Not verified by this endpoint',
+            payment_status:o.final_payment_status||'not_started',
+            message:eligible?'Quotation approved. Online payment is not yet enabled. Cerood will confirm collection instructions.':'Payment is unavailable until inspection and customer quotation approval are complete.'});
+    } catch (error) {
+        console.error('Home payment readiness:',error);
+        return res.status(500).json({success:false,message:'Unable to check payment readiness.'});
+    }
+});
+
+// HOME SERVICES REPAIR PAYMENT — staging, separate from inspection fee and retail.
+// Requires migration.sql and Razorpay credentials. No automatic inspection collection.
+const chsPayQuery=(sql,args=[])=>ceroodHomeAdminQuery(sql,args);
+async function chsFinalizeRepair(razorpayOrderId,paymentId){
+  const payment=await razorpayInstance.payments.fetch(paymentId);
+  const rows=await chsPayQuery(`SELECT order_id,repair_quote_amount,final_payment_status,final_razorpay_payment_id,
+    inspection_fee_status,inspection_completed_at,repair_quote_status
+    FROM public.orders WHERE final_razorpay_order_id=? AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[razorpayOrderId]);
+  if(!rows.length)return 'not_found';
+  const o=rows[0],expected=Math.round(Number(o.repair_quote_amount)*100);
+  if(o.final_payment_status==='paid')return o.final_razorpay_payment_id===paymentId?'paid':'review';
+  if(payment.status!=='captured'||payment.order_id!==razorpayOrderId||payment.currency!=='INR'||Number(payment.amount)!==expected)return 'review';
+  if(o.inspection_fee_status!=='Confirmed'||!o.inspection_completed_at||o.repair_quote_status!=='Accepted')return 'review';
+  const updated=await chsPayQuery(`UPDATE public.orders SET final_payment_status='paid',final_razorpay_payment_id=?,
+    final_paid_at=CURRENT_TIMESTAMP,final_payment_amount=? WHERE order_id=? AND final_razorpay_order_id=?
+    AND final_payment_status='pending' AND repair_quote_status='Accepted'
+    RETURNING order_id`,[paymentId,expected/100,o.order_id,razorpayOrderId]);
+  if(updated.length)return 'paid';
+  const after=await chsPayQuery(`SELECT final_payment_status,final_razorpay_payment_id FROM public.orders WHERE order_id=?`,[o.order_id]);
+  return after[0]?.final_payment_status==='paid'&&after[0]?.final_razorpay_payment_id===paymentId?'paid':'review';
+}
+app.post('/api/home-services/create-repair-payment',async(req,res)=>{
+ res.set('Cache-Control','no-store');const k=chsCustomerOrder(req);
+ if(!k)return res.status(400).json({success:false,message:'Booking and approval key required.'});
+ if(!process.env.RAZORPAY_KEY_ID||!process.env.RAZORPAY_KEY_SECRET)return res.status(503).json({success:false,message:'Payment not configured.'});
+ try{
+  const rows=await chsPayQuery(`SELECT order_id,inspection_fee_status,inspection_completed_at,repair_quote_status,
+    repair_quote_amount,final_payment_status,final_razorpay_order_id FROM public.orders
+    WHERE order_id=? AND customer_approval_key_hash=? AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[k.id,k.hash]);
+  const o=rows[0];if(!o)return res.status(404).json({success:false,message:'Booking not found.'});
+  if(o.final_payment_status==='paid')return res.json({success:true,already_paid:true});
+  if(o.inspection_fee_status!=='Confirmed'||!o.inspection_completed_at||o.repair_quote_status!=='Accepted')return res.status(409).json({success:false,message:'Quotation not eligible for payment.'});
+  const paise=Math.round(Number(o.repair_quote_amount)*100);
+  if(!Number.isSafeInteger(paise)||paise<100||paise>100000000)return res.status(409).json({success:false,message:'Invalid quotation amount. Contact support.'});
+  if(o.final_razorpay_order_id){
+   if(o.final_payment_status!=='pending')return res.status(409).json({success:false,message:'Payment requires support review.'});
+   const existing=await razorpayInstance.orders.fetch(o.final_razorpay_order_id);
+   if(Number(existing.amount)!==paise||existing.currency!=='INR')return res.status(409).json({success:false,message:'Payment amount mismatch. Contact support; do not pay.'});
+   return res.json({success:true,razorpay_order_id:o.final_razorpay_order_id,key_id:process.env.RAZORPAY_KEY_ID,amount:paise,currency:'INR'});
+  }
+  // Atomically claim creation BEFORE contacting Razorpay. This prevents parallel
+  // requests from creating multiple payable orders for one booking.
+  const claimed=await chsPayQuery(`UPDATE public.orders SET final_payment_status='creating',final_payment_amount=?
+   WHERE order_id=? AND customer_approval_key_hash=? AND final_razorpay_order_id IS NULL
+   AND (final_payment_status IS NULL OR final_payment_status='not_started')
+   AND repair_quote_status='Accepted' AND inspection_fee_status='Confirmed' AND inspection_completed_at IS NOT NULL
+   AND ROUND(repair_quote_amount*100)=?
+   RETURNING order_id`,[paise/100,k.id,k.hash,paise]);
+  if(!claimed.length)return res.status(409).json({success:false,message:'A payment request is already being prepared or needs review. Do not retry payment; contact support if it remains pending.'});
+  // A network timeout can mean Razorpay created an order even when we received
+  // no response. Leave 'creating' for manual reconciliation; never auto-retry.
+  const rz=await razorpayInstance.orders.create({amount:paise,currency:'INR',receipt:o.order_id.slice(0,40),notes:{purpose:'home_repair',booking:o.order_id}});
+  const saved=await chsPayQuery(`UPDATE public.orders SET final_razorpay_order_id=?,final_payment_status='pending'
+   WHERE order_id=? AND customer_approval_key_hash=? AND final_razorpay_order_id IS NULL
+   AND final_payment_status='creating' AND final_payment_amount=?
+   RETURNING order_id`,[rz.id,k.id,k.hash,paise/100]);
+  if(!saved.length)return res.status(409).json({success:false,message:'Payment order requires manual reconciliation. Do not pay again.'});
+  return res.json({success:true,razorpay_order_id:rz.id,key_id:process.env.RAZORPAY_KEY_ID,amount:paise,currency:'INR'});
+ }catch(e){console.error('CHS repair payment creation:',e);return res.status(500).json({success:false,message:'Unable to create repair payment.'});}
+});
+app.post('/api/home-services/verify-repair-payment',async(req,res)=>{
+ res.set('Cache-Control','no-store');const k=chsCustomerOrder(req);
+ if(!k)return res.status(400).json({success:false,message:'Booking and approval key required.'});
+ const rid=String(req.body?.razorpay_order_id||''),pid=String(req.body?.razorpay_payment_id||''),sig=String(req.body?.razorpay_signature||'');
+ if(!/^order_[A-Za-z0-9]+$/.test(rid)||!/^pay_[A-Za-z0-9]+$/.test(pid)||!/^[0-9a-f]{64}$/i.test(sig))return res.status(400).json({success:false,message:'Invalid payment fields.'});
+ try{
+  const expected=crypto.createHmac('sha256',process.env.RAZORPAY_KEY_SECRET).update(rid+'|'+pid).digest('hex');
+  if(!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(sig,'hex')))return res.status(401).json({success:false,message:'Signature invalid.'});
+  const rows=await chsPayQuery(`SELECT order_id FROM public.orders WHERE order_id=? AND customer_approval_key_hash=? AND final_razorpay_order_id=?`,[k.id,k.hash,rid]);
+  if(!rows.length)return res.status(404).json({success:false,message:'Payment booking not found.'});
+  const result=await chsFinalizeRepair(rid,pid);
+  return res.status(result==='paid'?200:409).json({success:result==='paid',payment_status:result,message:result==='paid'?'Repair payment verified.':'Payment needs review; do not pay again.'});
+ }catch(e){console.error('CHS repair payment verification:',e);return res.status(503).json({success:false,message:'Verification temporarily unavailable; do not pay again.'});}
+});
+app.post('/api/home-services/razorpay-webhook',async(req,res)=>{
+ try{
+  const secret=process.env.HOME_SERVICES_RAZORPAY_WEBHOOK_SECRET||'',signature=String(req.get('x-razorpay-signature')||'');
+  if(!secret||!Buffer.isBuffer(req.body)||!/^[0-9a-f]{64}$/i.test(signature))return res.sendStatus(401);
+  const expected=crypto.createHmac('sha256',secret).update(req.body).digest('hex');
+  if(!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))return res.sendStatus(401);
+  const event=JSON.parse(req.body.toString('utf8'));
+  if(event.event==='payment.captured'){
+   const p=event.payload?.payment?.entity;
+   if(p?.order_id&&p?.id){const result=await chsFinalizeRepair(p.order_id,p.id);if(result==='review')return res.sendStatus(503);}
+  }
+  return res.json({success:true});
+ }catch(e){console.error('CHS repair webhook:',e);return res.sendStatus(503);}
 });
 
 // ==========================================
