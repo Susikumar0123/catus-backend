@@ -3122,6 +3122,10 @@ booked_at
 // ==========================================
 app.post('/api/home-services/free-bookings', (req, res) => {
     const b = req.body || {};
+    const requestId = String(b.booking_request_id || '').trim();
+    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
+        return res.status(400).json({success:false,message:'Valid booking request ID is required.'});
+    }
     const phone = String(b.phone || '').replace(/\D/g, '');
     const name = String(b.customer_name || '').trim().slice(0, 150);
     const address = String(b.service_address || b.address || '').trim();
@@ -3150,17 +3154,20 @@ app.post('/api/home-services/free-bookings', (req, res) => {
         const orderId = 'CHS-' + crypto.randomUUID();
         const approvalKey = crypto.randomBytes(32).toString('hex');
         const approvalKeyHash = crypto.createHash('sha256').update(approvalKey).digest('hex');
-        const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status,customer_approval_key_hash`;
-        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted', approvalKeyHash];
-        const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(10).fill('?').join(',')}) RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
+        const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status,customer_approval_key_hash,booking_request_id`;
+        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted', approvalKeyHash, requestId];
+        const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(11).fill('?').join(',')}) ON CONFLICT (booking_request_id) DO NOTHING RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
         db.query(sql, values, (err, inserted) => {
             if (err) {
                 console.error('Free booking insert failed:', err);
                 return res.status(500).json({ success: false, message: 'Unable to save booking request.' });
             }
+            if (!inserted || !inserted.length) {
+                return res.status(409).json({success:false, message:'This booking request was already received. Please check your booking confirmation before trying again; do not submit a new request.'});
+            }
             return res.status(201).json({
                 success: true,
-                order_id: inserted && inserted[0] ? inserted[0].order_id : orderId,
+                order_id: inserted[0].order_id,
                 booking_fee: 0,
                 customer_approval_key: approvalKey,
                 inspection_fee: null,
