@@ -6387,6 +6387,12 @@ app.post(
               AND technician_id = ?
               AND COALESCE(is_deleted, 0) = 0
               AND COALESCE(technician_response, 'Pending') = 'Pending'
+              -- For Home Services, technician cannot accept/plan a visit
+              -- before customer confirms the disclosed inspection charge.
+              AND (
+                  booking_pricing_model IS DISTINCT FROM 'quote_after_inspection'
+                  OR inspection_fee_status = 'Confirmed'
+              )
             RETURNING *
         `;
 
@@ -6418,7 +6424,7 @@ app.post(
                     return res.status(400).json({
                         success: false,
                         message:
-                            'Order not found, already responded, or not assigned to you.'
+                            'Order not available for acceptance. For Home Services, customer inspection-fee approval is required first.'
                     });
                 }
 
@@ -6825,6 +6831,10 @@ app.post(
     o.order_id,
     o.technician_id,
     o.status AS order_status,
+    o.booking_pricing_model,
+    o.inspection_fee_status,
+    o.inspection_completed_at,
+    o.repair_quote_status,
     t.status AS technician_status,
     wp.status AS work_proof_status
                 FROM public.orders o
@@ -6888,6 +6898,20 @@ app.post(
         message:
             'Technician account is not active.'
     });
+}
+
+// Home Services only: block repair proof until customer approval.
+// Shopping and older non-quote orders keep their existing behavior.
+if (rows[0].booking_pricing_model === 'quote_after_inspection') {
+    if (rows[0].inspection_fee_status !== 'Confirmed' ||
+        !rows[0].inspection_completed_at ||
+        rows[0].repair_quote_status !== 'Accepted') {
+        return res.status(409).json({
+            success: false,
+            code: 'CUSTOMER_APPROVAL_REQUIRED',
+            message: 'Work proof is locked until inspection is completed and the customer approves the repair quotation.'
+        });
+    }
 }
 
 const existingProofStatus =
