@@ -3253,7 +3253,7 @@ app.post('/api/home-services/booking-status', async (req,res)=>{
     if(!key)return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
     try {
         const rows=await ceroodHomeAdminQuery(`SELECT order_id,service_name,booking_fee,inspection_fee,inspection_fee_status,
-          inspection_completed_at,repair_quote_amount,repair_quote_notes,repair_quote_status,payment_status
+          inspection_completed_at,inspection_fee_confirmed_at,repair_quote_amount,repair_quote_notes,repair_quote_status,repair_quote_responded_at,created_at,payment_status
           FROM public.orders WHERE order_id=? AND customer_approval_key_hash=?
           AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[key.id,key.hash]);
         if(!rows.length)return res.status(404).json({success:false,message:'Booking not found or approval key invalid.'});
@@ -6558,6 +6558,70 @@ app.post(
 // TECHNICIAN - SINGLE ASSIGNED ORDER
 // JWT PROTECTED
 // ==========================================
+
+// CEROOD HOME SERVICES - opt-in technician journey tracking (phase 1).
+// Requires sql/cerood_home_journey_tracking.sql before deployment.
+const chsGpsDb = (sql, values=[]) => new Promise((resolve,reject)=>db.query(sql,values,(e,r)=>e?reject(e):resolve(r)));
+const chsGpsId = v => /^CHS-[0-9a-f-]{36}$/i.test(String(v||''));
+const chsGpsHash = key => crypto.createHash('sha256').update(String(key||'')).digest('hex');
+async function chsGpsOrder(orderId) {
+ const rows=await chsGpsDb(`SELECT order_id,technician_id,status,booking_pricing_model,inspection_fee_status,customer_approval_key_hash FROM public.orders WHERE order_id=? LIMIT 1`,[orderId]);
+ return rows[0];
+}
+app.post('/api/home-services/tracking/technician/:orderId',authenticateTechnician,async(req,res)=>{
+ try {
+  const orderId=req.params.orderId;
+  if(!chsGpsId(orderId))return res.status(400).json({success:false,message:'Invalid booking ID'});
+  const order=await chsGpsOrder(orderId);
+  if(!order||String(order.technician_id)!==String(req.technician.technician_id))return res.status(404).json({success:false,message:'Assigned booking not found'});
+  if(order.booking_pricing_model!=='quote_after_inspection')return res.status(400).json({success:false,message:'Home Services booking required'});
+  const action=String(req.body.action||'');
+  if(!['start','update','arrived','stop'].includes(action))return res.status(400).json({success:false,message:'Invalid tracking action'});
+  if(['start','update','arrived'].includes(action)&&order.inspection_fee_status!=='Confirmed')return res.status(409).json({success:false,message:'Customer must approve inspection charge first'});
+  if(['start','update'].includes(action)&&['Completed','Cancelled','Trash'].includes(String(order.status)))return res.status(409).json({success:false,message:'Booking is closed'});
+  const lat=Number(req.body.latitude),lng=Number(req.body.longitude),accuracy=Number(req.body.accuracy);
+  if(['start','update'].includes(action)&&(!Number.isFinite(lat)||lat < -90||lat>90||!Number.isFinite(lng)||lng < -180||lng>180||!Number.isFinite(accuracy)||accuracy<0||accuracy>10000))return res.status(400).json({success:false,message:'Invalid GPS coordinates'});
+  if(action==='start'){
+   await chsGpsDb(`INSERT INTO public.home_service_journey_tracking (order_id,technician_id,state,latitude,longitude,accuracy_m,started_at,updated_at) VALUES (?,?, 'on_the_way',?,?,?,NOW(),NOW()) ON CONFLICT(order_id) DO UPDATE SET technician_id=EXCLUDED.technician_id,state='on_the_way',latitude=EXCLUDED.latitude,longitude=EXCLUDED.longitude,accuracy_m=EXCLUDED.accuracy_m,started_at=NOW(),updated_at=NOW()`,[orderId,order.technician_id,lat,lng,accuracy]);
+  }else if(action==='update'){
+   const rows=await chsGpsDb(`UPDATE public.home_service_journey_tracking SET latitude=?,longitude=?,accuracy_m=?,updated_at=NOW() WHERE order_id=? AND technician_id=? AND state='on_the_way' RETURNING order_id`,[lat,lng,accuracy,orderId,order.technician_id]);
+   if(!rows.length)return res.status(409).json({success:false,message:'Start journey first'});
+  }else{
+   await chsGpsDb(`UPDATE public.home_service_journey_tracking SET state=?,latitude=NULL,longitude=NULL,accuracy_m=NULL,updated_at=NOW(),ended_at=NOW() WHERE order_id=? AND technician_id=?`,[action==='arrived'?'arrived':'stopped',orderId,order.technician_id]);
+  }
+  res.json({success:true,state:action==='start'||action==='update'?'on_the_way':action==='arrived'?'arrived':'stopped'});
+ }catch(e){console.error('Home GPS technician error:',e.message);res.status(500).json({success:false,message:'Tracking temporarily unavailable'});}
+});
+// Home Services GPS admin read-only monitoring; no customer approval secret exposed.
+app.get('/api/admin/home-services/tracking/:orderId',requireAdminAuth,async(req,res)=>{
+ try{
+  const orderId=String(req.params.orderId||'');
+  if(!chsGpsId(orderId))return res.status(400).json({success:false,message:'Invalid booking ID'});
+  const order=await chsGpsOrder(orderId);
+  if(!order||order.booking_pricing_model!=='quote_after_inspection')return res.status(404).json({success:false,message:'Home Services booking not found'});
+  const rows=await chsGpsDb(`SELECT state,latitude,longitude,accuracy_m,updated_at,started_at,ended_at FROM public.home_service_journey_tracking WHERE order_id=? LIMIT 1`,[orderId]);
+  const t=rows[0];
+  const fresh=t&&t.state==='on_the_way'&&Date.now()-new Date(t.updated_at).getTime()<120000;
+  res.set('Cache-Control','no-store');
+  res.json({success:true,tracking:t?{state:fresh?'on_the_way':t.state==='on_the_way'?'signal_lost':t.state,latitude:fresh?Number(t.latitude):null,longitude:fresh?Number(t.longitude):null,accuracy_m:fresh?Number(t.accuracy_m):null,updated_at:t.updated_at,started_at:t.started_at,ended_at:t.ended_at}:null});
+ }catch(e){console.error('Home GPS admin tracking error:',e.message);res.status(500).json({success:false,message:'Tracking temporarily unavailable'});}
+});
+app.post('/api/home-services/tracking/customer/:orderId',async(req,res)=>{
+ try{
+  const orderId=req.params.orderId,key=String(req.body.customer_approval_key||'');
+  if(!chsGpsId(orderId)||!(/^[0-9a-f]{64}$/i.test(key)))return res.status(400).json({success:false,message:'Invalid credentials'});
+  const order=await chsGpsOrder(orderId);
+  const expected=String(order?.customer_approval_key_hash||'');
+  const actual=chsGpsHash(key);
+  if(!expected||!(/^[0-9a-f]{64}$/i.test(expected))||!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(actual,'hex')))return res.status(403).json({success:false,message:'Booking access denied'});
+  const rows=await chsGpsDb(`SELECT state,latitude,longitude,accuracy_m,updated_at,started_at,ended_at FROM public.home_service_journey_tracking WHERE order_id=? LIMIT 1`,[orderId]);
+  const t=rows[0];
+  const fresh=t&&t.state==='on_the_way'&&Date.now()-new Date(t.updated_at).getTime()<120000;
+  res.set('Cache-Control','no-store');
+  res.json({success:true,tracking:t?{state:fresh?'on_the_way':t.state==='on_the_way'?'signal_lost':t.state,latitude:fresh?Number(t.latitude):null,longitude:fresh?Number(t.longitude):null,accuracy_m:fresh?Number(t.accuracy_m):null,updated_at:t.updated_at,started_at:t.started_at,ended_at:t.ended_at}:null});
+ }catch(e){console.error('Home GPS customer error:',e.message);res.status(500).json({success:false,message:'Tracking temporarily unavailable'});}
+});
+
 app.get(
     '/api/technicians/orders/:orderId',
     authenticateTechnician,
@@ -10405,7 +10469,109 @@ const initDatabase = () => {
  
         console.log('✅ Users table columns verified.'); 
  
-        app.listen(PORT, '0.0.0.0', () => { 
+        
+// ============================================================
+// CEROOD PHASE 5 — ADMIN-CONFIRMED VISIT APPOINTMENT
+// A customer's preferred time is NEVER automatically confirmed.
+// Requires migration: cerood_home_appointment_phase5.sql
+// ============================================================
+const chsAppointmentWindows = new Set([
+  '08:00-10:00','10:00-12:00','12:00-14:00',
+  '14:00-16:00','16:00-18:00','18:00-20:00'
+]);
+function chsAppointmentValidDate(value) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
+  const d = new Date(value+'T00:00:00+05:30');
+  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0,10)===value;
+}
+app.patch('/api/admin/home-services/free-bookings/:orderId/appointment',requireAdminAuth,async(req,res)=>{
+  const orderId=String(req.params.orderId||'');
+  const date=String(req.body?.appointment_date||'').trim();
+  const window=String(req.body?.appointment_window||'').trim();
+  if(!/^CHS-[0-9a-f-]{36}$/i.test(orderId)||!chsAppointmentValidDate(date)||!chsAppointmentWindows.has(window))
+    return res.status(400).json({success:false,message:'Valid Home Services booking, date and time window required.'});
+  const today=new Date(Date.now()+330*60000).toISOString().slice(0,10);
+  if(date<today)return res.status(400).json({success:false,message:'Appointment date cannot be in the past.'});
+  try{
+    const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET
+      appointment_date=?, appointment_window=?, appointment_status='Confirmed',
+      appointment_confirmed_at=CURRENT_TIMESTAMP
+      WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
+      AND inspection_fee_status='Confirmed' AND inspection_completed_at IS NULL
+      AND (appointment_status IS NULL OR appointment_status IN ('Requested','Confirmed'))
+      RETURNING order_id,appointment_date,appointment_window,appointment_status,appointment_confirmed_at`,
+      [date,window,orderId]);
+    if(!rows.length)return res.status(409).json({success:false,message:'Booking missing, inspection fee not approved, or appointment cannot be changed.'});
+    return res.json({success:true,appointment:rows[0],message:'Admin confirmed appointment. Technician capacity must be verified manually before using this action.'});
+  }catch(err){
+    if(err.code==='23505' && (String(err.constraint||'').includes('chs_unique_technician_appointment_slot'))){
+      return res.status(409).json({success:false,message:'This technician already has a confirmed appointment in that date and time window. Choose another slot or technician.'});
+    }
+    console.error('Appointment confirmation:',err);
+    return res.status(500).json({success:false,message:'Unable to confirm appointment.'});
+  }
+});
+// Customer-visible appointment status; authenticated by the existing booking approval key.
+app.post('/api/home-services/appointment-status', async (req,res)=>{
+  res.set('Cache-Control','no-store');
+  const access=chsCustomerOrder(req);
+  if(!access)return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
+  try{
+    const rows=await ceroodHomeAdminQuery(`SELECT order_id,appointment_date,appointment_window,appointment_status,appointment_confirmed_at,
+      technician_id,status FROM public.orders WHERE order_id=? AND customer_approval_key_hash=?
+      AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[access.id,access.hash]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Booking not found.'});
+    const o=rows[0];
+    return res.json({success:true,appointment:{appointment_date:o.appointment_date,appointment_window:o.appointment_window,
+      appointment_status:o.appointment_status,appointment_confirmed_at:o.appointment_confirmed_at},assigned:!!o.technician_id,completed:String(o.status||'').toLowerCase()==='completed'});
+  }catch(e){console.error('Customer appointment status:',e.message);return res.status(500).json({success:false,message:'Appointment status unavailable.'});}
+});
+app.get('/api/admin/home-services/free-bookings/:orderId/appointment',requireAdminAuth,async(req,res)=>{
+  const id=String(req.params.orderId||'');
+  if(!/^CHS-[0-9a-f-]{36}$/i.test(id))return res.status(400).json({success:false,message:'Invalid booking.'});
+  try{
+    const rows=await ceroodHomeAdminQuery(`SELECT order_id,service_date,service_time,appointment_date,appointment_window,
+      appointment_status,appointment_confirmed_at,inspection_fee_status
+      FROM public.orders WHERE order_id=? AND booking_pricing_model='quote_after_inspection'`,[id]);
+    if(!rows.length)return res.status(404).json({success:false,message:'Booking not found.'});
+    return res.json({success:true,booking:rows[0]});
+  }catch(err){console.error('Appointment read:',err);return res.status(500).json({success:false,message:'Unable to load appointment.'});}
+});
+
+// CEROOD PHASE 10 — READ-ONLY ADMIN TECHNICIAN SCHEDULE
+// No booking state is modified by this endpoint.
+app.get('/api/admin/home-services/technician-schedule', requireAdminAuth, async (req,res)=>{
+  res.set('Cache-Control','no-store');
+  const date=String(req.query.date||'').trim();
+  if(!chsAppointmentValidDate(date)) return res.status(400).json({success:false,message:'Valid date (YYYY-MM-DD) required.'});
+  try {
+    const rows=await ceroodHomeAdminQuery(`SELECT order_id, technician_id, service_name,
+      appointment_date, appointment_window, appointment_status, status,
+      inspection_fee_status
+      FROM public.orders
+      WHERE booking_pricing_model='quote_after_inspection'
+      AND appointment_date=? AND appointment_status='Confirmed'
+      AND (status IS NULL OR LOWER(status) NOT IN ('cancelled','canceled'))
+      ORDER BY appointment_window, technician_id, order_id`,[date]);
+    const active=rows.filter(o=>String(o.status||'').toLowerCase()!=='completed');
+    const slots={};
+    for(const o of active){
+      if(!o.technician_id)continue;
+      const key=String(o.technician_id)+'|'+String(o.appointment_window);
+      (slots[key]??=[]).push(o.order_id);
+    }
+    return res.json({success:true,date,appointments:rows.map(o=>({
+      order_id:o.order_id,technician_id:o.technician_id||null,
+      service_name:o.service_name||'Service',appointment_window:o.appointment_window,
+      appointment_status:o.appointment_status,status:o.status,
+      inspection_fee_status:o.inspection_fee_status,
+      conflict:!!o.technician_id && (slots[String(o.technician_id)+'|'+String(o.appointment_window)]||[]).length>1
+    }))});
+  } catch(err){console.error('Technician schedule read:',err.message);
+    return res.status(500).json({success:false,message:'Unable to load technician schedule.'});}
+});
+
+app.listen(PORT, '0.0.0.0', () => { 
             console.log(`✅ Server is running on port ${PORT}`); 
         }); 
     }); 
