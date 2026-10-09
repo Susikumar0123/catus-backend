@@ -45,7 +45,6 @@ const allowedOrigins = [
     'https://cerood.com',
     'https://www.cerood.com',
     'https://catus-frontend-nu.vercel.app',
-    'https://catus-frontend-gfo3giw8f-susikumar0123s-projects.vercel.app',
     'http://localhost:3000',
     'http://127.0.0.1:5500'
 ];
@@ -3122,7 +3121,6 @@ booked_at
 // Inspection fee is confirmed with customer BEFORE technician visit.
 // ==========================================
 app.post('/api/home-services/free-bookings', (req, res) => {
-    res.set('Cache-Control', 'no-store');
     const b = req.body || {};
     const requestId = String(b.booking_request_id || '').trim();
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
@@ -3157,7 +3155,7 @@ app.post('/api/home-services/free-bookings', (req, res) => {
         const approvalKey = crypto.randomBytes(32).toString('hex');
         const approvalKeyHash = crypto.createHash('sha256').update(approvalKey).digest('hex');
         const columns = `order_id,customer_id,product_id,service_name,customer_name,phone,whatsapp,address,district,pincode,amount,status,payment_status,payment_method,booked_at,service_date,service_time,service_address,service_district,service_pincode,booking_fee,booking_pricing_model,inspection_fee_status,repair_quote_status,customer_approval_key_hash,booking_request_id`;
-        const values = [orderId, null, ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted', approvalKeyHash, requestId];
+        const values = [orderId, b.customer_id == null ? null : String(b.customer_id), ids.join(', '), ids.map(id => serviceMap.get(id)).join(', '), name, phone, String(b.whatsapp || ''), address, district, pincode, 0, 'Pending', 'Pending', 'Pay Later', date || null, time || null, address, district, pincode, 0, 'quote_after_inspection', 'Awaiting Confirmation', 'Not Quoted', approvalKeyHash, requestId];
         const sql = `INSERT INTO public.orders (${columns}) VALUES (${Array(14).fill('?').join(',')}, CURRENT_TIMESTAMP, ${Array(11).fill('?').join(',')}) ON CONFLICT (booking_request_id) DO NOTHING RETURNING order_id, booking_fee, inspection_fee_status, repair_quote_status`;
         db.query(sql, values, (err, inserted) => {
             if (err) {
@@ -3181,58 +3179,6 @@ app.post('/api/home-services/free-bookings', (req, res) => {
     });
 });
 
-// Support lookup for lost booking confirmation. Booking request ID is NOT customer authentication.
-// Restricted to authenticated admin; never returns the customer approval key or hash.
-app.get('/api/admin/home-services/booking-by-request/:requestId', requireAdminAuth, async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    const requestId = String(req.params.requestId || '').trim();
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(requestId)) {
-        return res.status(400).json({success:false,message:'Valid booking request ID required.'});
-    }
-    try {
-        const rows = await ceroodHomeAdminQuery(`SELECT order_id, booked_at, status
-          FROM public.orders WHERE booking_request_id=? AND booking_pricing_model='quote_after_inspection'
-          LIMIT 1`, [requestId]);
-        if (!rows.length) return res.status(404).json({success:false,message:'Booking request not found.'});
-        return res.json({success:true,booking:rows[0]});
-    } catch(e) {
-        console.error('Home service booking request lookup failed:', e);
-        return res.status(500).json({success:false,message:'Unable to look up booking.'});
-    }
-});
-
-// Admin-assisted approval-key reset. Only after verifying the customer's identity
-// through the existing business support process; never expose a key in logs or URLs.
-app.post('/api/admin/home-services/free-bookings/:orderId/reset-approval-key', requireAdminAuth, async (req, res) => {
-    res.set('Cache-Control', 'no-store');
-    const orderId = String(req.params.orderId || '').trim();
-    const reason = String(req.body?.reason || '').trim();
-    if (!/^CHS-[0-9a-f-]{36}$/i.test(orderId) || req.body?.identity_verified !== true || reason.length < 10 || reason.length > 500) {
-        return res.status(400).json({success:false,message:'Valid booking ID, verified customer identity and reason (10–500 characters) are required.'});
-    }
-    const newKey = crypto.randomBytes(32).toString('hex');
-    const newHash = crypto.createHash('sha256').update(newKey).digest('hex');
-    try {
-        // One atomic statement: a failed audit insert also rolls back the key rotation.
-        const rows = await ceroodHomeAdminQuery(`WITH rotated AS (
-          UPDATE public.orders SET customer_approval_key_hash=?
-          WHERE order_id=? AND booking_pricing_model='quote_after_inspection' AND customer_approval_key_hash IS NOT NULL
-          RETURNING order_id
-        ), audited AS (
-          INSERT INTO public.chs_approval_key_reset_audit (order_id, reason, admin_actor)
-          SELECT order_id, ?, ? FROM rotated RETURNING order_id
-        ) SELECT order_id FROM audited`, [newHash, orderId, reason,
-          String(req.admin?.email || req.user?.email || req.admin?.id || 'authenticated-admin').slice(0, 200)]);
-        if (!rows.length) return res.status(404).json({success:false,message:'Eligible booking not found.'});
-        res.set('Pragma', 'no-cache');
-        return res.json({success:true,order_id:rows[0].order_id,customer_approval_key:newKey,
-          message:'Old key invalidated. Share the new key privately with the verified customer. It will not be shown again.'});
-    } catch(e) {
-        console.error('Home service approval key reset failed:', e);
-        return res.status(500).json({success:false,message:'Unable to reset approval key.'});
-    }
-});
-
 // CEROOD HOME SERVICES — ADMIN INSPECTION & QUOTATION (authenticated)
 // Only affects bookings explicitly created with quote_after_inspection.
 const ceroodHomeAdminQuery = (sql, params=[]) => new Promise((resolve,reject)=>
@@ -3248,23 +3194,6 @@ app.get('/api/admin/home-services/free-bookings', requireAdminAuth, async (req,r
             ORDER BY id DESC LIMIT 250`);
         return res.json({success:true,orders});
     } catch(error){console.error('Home booking admin list:',error);return res.status(500).json({success:false,message:'Unable to load bookings.'});}
-});
-
-// Direct authenticated booking lookup: avoids the 250-row list limit.
-app.get('/api/admin/home-services/free-bookings/:orderId', requireAdminAuth, async (req,res)=>{
-    const orderId=String(req.params.orderId||'').trim();
-    if(!/^CHS-[0-9a-f-]{36}$/i.test(orderId))
-        return res.status(400).json({success:false,message:'Invalid Home Services booking ID.'});
-    try {
-        const rows=await ceroodHomeAdminQuery(`SELECT order_id,customer_name,phone,service_name,service_date,service_time,
-            service_address,service_district,status,booking_fee,inspection_fee,inspection_fee_status,
-            inspection_fee_confirmed_at,inspection_completed_at,repair_quote_amount,repair_quote_notes,
-            repair_quote_status,repair_quote_sent_at,repair_quote_responded_at,payment_status
-            FROM public.orders WHERE booking_pricing_model='quote_after_inspection' AND order_id=? LIMIT 1`,[orderId]);
-        if(!rows.length)return res.status(404).json({success:false,message:'Home Services booking not found.'});
-        res.set('Cache-Control','no-store');
-        return res.json({success:true,booking:rows[0]});
-    }catch(error){console.error('Home booking admin lookup:',error);return res.status(500).json({success:false,message:'Unable to load booking.'});}
 });
 
 app.patch('/api/admin/home-services/free-bookings/:orderId/inspection',requireAdminAuth,async(req,res)=>{
@@ -3320,7 +3249,6 @@ function chsCustomerOrder(req) {
     return { id, hash };
 }
 app.post('/api/home-services/booking-status', async (req,res)=>{
-    res.set('Cache-Control', 'no-store');
     const key=chsCustomerOrder(req);
     if(!key)return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
     try {
@@ -3333,7 +3261,6 @@ app.post('/api/home-services/booking-status', async (req,res)=>{
     }catch(e){console.error('Customer booking status:',e);return res.status(500).json({success:false,message:'Unable to load booking.'});}
 });
 app.post('/api/home-services/inspection-response',async(req,res)=>{
-    res.set('Cache-Control', 'no-store');
     const key=chsCustomerOrder(req), decision=String(req.body?.decision||'').toLowerCase();
     if(!key||!['accept','reject'].includes(decision))return res.status(400).json({success:false,message:'Valid approval key and decision required.'});
     try {
@@ -3348,7 +3275,6 @@ app.post('/api/home-services/inspection-response',async(req,res)=>{
     }catch(e){console.error('Inspection response:',e);return res.status(500).json({success:false,message:'Unable to record inspection response.'});}
 });
 app.post('/api/home-services/quotation-response',async(req,res)=>{
-    res.set('Cache-Control', 'no-store');
     const key=chsCustomerOrder(req), decision=String(req.body?.decision||'').toLowerCase();
     if(!key||!['accept','reject'].includes(decision))return res.status(400).json({success:false,message:'Valid approval key and decision required.'});
     try {
