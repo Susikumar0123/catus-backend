@@ -1,0 +1,15 @@
+const fs=require('fs');const assert=require('assert');
+const s=fs.readFileSync(__dirname+'/server.js','utf8');
+const m=fs.readFileSync(__dirname+'/migration.sql','utf8');
+const start=s.indexOf("app.post('/api/admin/home-services/free-bookings/:orderId/reset-approval-key'");
+const end=s.indexOf('// CEROOD HOME SERVICES — ADMIN INSPECTION',start);
+const route=s.slice(start,end);
+assert(start>0 && end>start);
+assert(route.includes('requireAdminAuth'));
+assert(route.includes('identity_verified !== true'));
+assert(route.includes('WITH rotated AS (') && route.includes('INSERT INTO public.chs_approval_key_reset_audit'));
+assert(route.includes('SELECT order_id FROM audited'));
+assert(!route.includes('console.log(newKey)'));
+assert(m.includes('CREATE TABLE IF NOT EXISTS public.chs_approval_key_reset_audit'));
+assert(m.includes('REVOKE ALL ON TABLE public.chs_approval_key_reset_audit'));
+console.log('PASS: 7 offline recovery audit guards. Live DB behavior not tested.');
