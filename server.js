@@ -45,6 +45,7 @@ const allowedOrigins = [
     'https://cerood.com',
     'https://www.cerood.com',
     'https://catus-frontend-nu.vercel.app',
+    'https://catus-frontend-gfo3giw8f-susikumar0123s-projects.vercel.app',
     'http://localhost:3000',
     'http://127.0.0.1:5500'
 ];
