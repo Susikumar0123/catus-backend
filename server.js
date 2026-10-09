@@ -3253,7 +3253,7 @@ app.post('/api/home-services/booking-status', async (req,res)=>{
     if(!key)return res.status(400).json({success:false,message:'Booking reference and approval key required.'});
     try {
         const rows=await ceroodHomeAdminQuery(`SELECT order_id,service_name,booking_fee,inspection_fee,inspection_fee_status,
-          inspection_completed_at,inspection_fee_confirmed_at,repair_quote_amount,repair_quote_notes,repair_quote_status,repair_quote_responded_at,created_at,payment_status
+          inspection_completed_at,inspection_fee_confirmed_at,repair_quote_amount,repair_quote_notes,repair_quote_status,repair_quote_responded_at,booked_at AS created_at,payment_status
           FROM public.orders WHERE order_id=? AND customer_approval_key_hash=?
           AND booking_pricing_model='quote_after_inspection' LIMIT 1`,[key.id,key.hash]);
         if(!rows.length)return res.status(404).json({success:false,message:'Booking not found or approval key invalid.'});
@@ -3292,8 +3292,11 @@ app.patch('/api/admin/home-services/free-bookings/:orderId/inspection-completed'
     try {
         const rows=await ceroodHomeAdminQuery(`UPDATE public.orders SET inspection_completed_at=COALESCE(inspection_completed_at,CURRENT_TIMESTAMP)
           WHERE order_id=? AND booking_pricing_model='quote_after_inspection' AND inspection_fee_status='Confirmed'
+          AND technician_id IS NOT NULL AND TRIM(technician_id)<>''
+          AND technician_response='Accepted'
+          AND appointment_status='Confirmed'
           RETURNING order_id,inspection_completed_at`,[req.params.orderId]);
-        if(!rows.length)return res.status(409).json({success:false,message:'Inspection requires customer fee confirmation.'});
+        if(!rows.length)return res.status(409).json({success:false,message:'Inspection requires fee approval, an accepted technician assignment and a confirmed appointment.'});
         return res.json({success:true,booking:rows[0]});
     }catch(e){console.error('Inspection completion:',e);return res.status(500).json({success:false,message:'Unable to update inspection.'});}
 });
@@ -10481,8 +10484,9 @@ const chsAppointmentWindows = new Set([
 ]);
 function chsAppointmentValidDate(value) {
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return false;
-  const d = new Date(value+'T00:00:00+05:30');
-  return !Number.isNaN(d.getTime()) && d.toISOString().slice(0,10)===value;
+  const [y,m,day]=value.split('-').map(Number);
+  const d=new Date(Date.UTC(y,m-1,day));
+  return d.getUTCFullYear()===y && d.getUTCMonth()+1===m && d.getUTCDate()===day;
 }
 app.patch('/api/admin/home-services/free-bookings/:orderId/appointment',requireAdminAuth,async(req,res)=>{
   const orderId=String(req.params.orderId||'');
@@ -10498,13 +10502,16 @@ app.patch('/api/admin/home-services/free-bookings/:orderId/appointment',requireA
       appointment_confirmed_at=CURRENT_TIMESTAMP
       WHERE order_id=? AND booking_pricing_model='quote_after_inspection'
       AND inspection_fee_status='Confirmed' AND inspection_completed_at IS NULL
+      AND technician_id IS NOT NULL AND TRIM(technician_id)<>''
+      AND technician_response='Accepted'
+      AND (status IS NULL OR LOWER(status) NOT IN ('cancelled','canceled','completed'))
       AND (appointment_status IS NULL OR appointment_status IN ('Requested','Confirmed'))
       RETURNING order_id,appointment_date,appointment_window,appointment_status,appointment_confirmed_at`,
       [date,window,orderId]);
-    if(!rows.length)return res.status(409).json({success:false,message:'Booking missing, inspection fee not approved, or appointment cannot be changed.'});
+    if(!rows.length)return res.status(409).json({success:false,message:'Appointment requires an accepted technician assignment, customer-approved inspection fee and an active booking before inspection.'});
     return res.json({success:true,appointment:rows[0],message:'Admin confirmed appointment. Technician capacity must be verified manually before using this action.'});
   }catch(err){
-    if(err.code==='23505' && (String(err.constraint||'').includes('chs_unique_technician_appointment_slot'))){
+    if(err.code==='23505' && (['chs_unique_technician_appointment_slot','cerood_unique_technician_appointment'].some(name=>String(err.constraint||'').includes(name)))){
       return res.status(409).json({success:false,message:'This technician already has a confirmed appointment in that date and time window. Choose another slot or technician.'});
     }
     console.error('Appointment confirmation:',err);
