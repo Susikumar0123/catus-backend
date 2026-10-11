@@ -21,12 +21,12 @@ function register(app,db,auth){
   }
   const finance=(await q(`SELECT count(*) FILTER(WHERE s.status='paid')::int AS paid_records,
    COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='paid'),0) AS recorded_paid,
-   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND NOT EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status<>'rejected')),0) AS prepared_payable,
-   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status<>'rejected')),0) AS held_preparations,
+   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND NOT EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status NOT IN ('rejected','replaced'))),0) AS prepared_payable,
+   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status NOT IN ('rejected','replaced'))),0) AS held_preparations,
    count(*) FILTER(WHERE s.status='void')::int AS cancelled_preparations
    FROM cerood_shop_settlements s WHERE s.seller_id=$1`,[id]))[0];
   finance.recorded_recovered=0;if(await require('./cerood-shop-finance-reconciliation').hasTable(q,'cerood_shop_settlement_recoveries'))finance.recorded_recovered=(await q('SELECT COALESCE(sum(r.recovered_amount),0) AS amount FROM cerood_shop_settlement_recoveries r JOIN cerood_shop_settlements s ON s.id=r.settlement_id WHERE s.seller_id=$1',[id]))[0].amount;finance.retained_paid=(Number(finance.recorded_paid)-Number(finance.recorded_recovered)).toFixed(2);
-  const returns=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE r.status='requested')::int AS needs_response,count(*) FILTER(WHERE r.status NOT IN ('rejected','refunded'))::int AS open FROM cerood_shop_return_requests r JOIN cerood_shop_order_items i ON i.id=r.order_item_id WHERE i.seller_id=$1",[id]))[0];
+  const returns=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE r.status='requested')::int AS needs_response,count(*) FILTER(WHERE r.status NOT IN ('rejected','refunded','replaced'))::int AS open FROM cerood_shop_return_requests r JOIN cerood_shop_order_items i ON i.id=r.order_item_id WHERE i.seller_id=$1",[id]))[0];
   res.json({success:true,catalog,orders,finance,returns,finance_scope:'Recorded Main Store settlements only; verify actual bank receipt. No automatic payout.'});
  }));
  app.get('/api/sellers/workspace/report',auth,handle(async(req,res)=>{

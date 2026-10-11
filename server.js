@@ -12484,6 +12484,7 @@ require('./cerood-shop-payments').register(app,db,razorpayInstance,{address:shop
 require('./cerood-shop-settlements').register(app,db,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-finance-reconciliation').register(app,db,requireAdminAuth);
 require('./cerood-shop-returns').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
+require('./cerood-shop-replacements').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-return-fulfilment').register(app,db,requireAdminAuth);
 require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
 
