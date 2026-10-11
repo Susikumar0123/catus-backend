@@ -1,0 +1,73 @@
+'use strict';
+function register(app,db,auth){
+ const q=(sql,args=[])=>new Promise((resolve,reject)=>db.query(sql,args,(e,r)=>e?reject(e):resolve(r||[])));
+ const handle=fn=>async(req,res)=>{res.set('Cache-Control','no-store');try{await fn(req,res)}catch(e){res.status(e.status||503).json({success:false,message:e.status?e.message:'Seller workspace unavailable. Refresh or contact support with the failing section.'})}};
+ app.get('/api/sellers/workspace/summary',auth,handle(async(req,res)=>{
+  const id=req.seller.id;
+  const catalog=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE approval_status='pending')::int AS pending,count(*) FILTER(WHERE approval_status='rejected')::int AS rejected,count(*) FILTER(WHERE approval_status='approved')::int AS approved FROM cerood_seller_catalog_submissions WHERE seller_id=$1",[id]))[0];
+  const orders=[];
+  for(const [market,items,parent] of [['Main Store','cerood_shop_order_items','cerood_shop_orders'],['Renewed','renewed_order_items','renewed_orders'],['Beauty','cosmetics_order_items','cosmetics_orders'],['Fashion','clothing_order_items','clothing_orders']]){
+   if(!(await q('SELECT to_regclass($1) AS relation',['public.'+items]))[0]?.relation)continue;
+   const row=(await q(`SELECT count(*)::int AS items,
+    count(*) FILTER(WHERE COALESCE(to_jsonb(i)->>'seller_order_status','new')='new' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS new,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='accepted' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS accepted,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='packed' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS packed,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='shipped' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS shipped,
+    count(*) FILTER(WHERE to_jsonb(o)->>'status'='delivered')::int AS delivered
+    FROM ${items} i JOIN ${parent} o ON o.id=i.order_id WHERE to_jsonb(i)->>'seller_id'=$1
+    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded')
+    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))
+    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')`,[String(id)]))[0];orders.push({marketplace:market,...row});
+  }
+  const finance=(await q(`SELECT count(*) FILTER(WHERE s.status='paid')::int AS paid_records,
+   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='paid'),0) AS recorded_paid,
+   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND NOT EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status<>'rejected')),0) AS prepared_payable,
+   COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='pending' AND EXISTS(SELECT 1 FROM cerood_shop_return_requests r WHERE r.order_item_id=s.order_item_id AND r.status<>'rejected')),0) AS held_preparations,
+   count(*) FILTER(WHERE s.status='void')::int AS cancelled_preparations
+   FROM cerood_shop_settlements s WHERE s.seller_id=$1`,[id]))[0];
+  const returns=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE r.status='requested')::int AS needs_response,count(*) FILTER(WHERE r.status NOT IN ('rejected','refunded'))::int AS open FROM cerood_shop_return_requests r JOIN cerood_shop_order_items i ON i.id=r.order_item_id WHERE i.seller_id=$1",[id]))[0];
+  res.json({success:true,catalog,orders,finance,returns,finance_scope:'Recorded Main Store settlements only; verify actual bank receipt. No automatic payout.'});
+ }));
+ app.get('/api/sellers/workspace/report',auth,handle(async(req,res)=>{
+  const range=require('./cerood-seller-shop-report').dates(req.query),markets=[];
+  for(const [market,items,parent] of [['Main Store','cerood_shop_order_items','cerood_shop_orders'],['Renewed','renewed_order_items','renewed_orders'],['Beauty','cosmetics_order_items','cosmetics_orders'],['Fashion','clothing_order_items','clothing_orders']]){
+   if(!(await q('SELECT to_regclass($1) AS relation',['public.'+items]))[0]?.relation)continue;
+   const row=(await q(`SELECT count(DISTINCT i.order_id)::int AS orders,COALESCE(sum(i.quantity),0)::int AS units,COALESCE(sum(i.line_total),0) AS product_value,
+    COALESCE(sum(i.line_total) FILTER(WHERE to_jsonb(o)->>'status'='delivered'),0) AS delivered_value
+    FROM ${items} i JOIN ${parent} o ON o.id=i.order_id WHERE to_jsonb(i)->>'seller_id'=$1
+    AND o.created_at>=($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') AND o.created_at<(($3::date+1)::timestamp AT TIME ZONE 'Asia/Kolkata')
+    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded','expired')
+    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')
+    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))`,[String(req.seller.id),range.from,range.to]))[0];markets.push({marketplace:market,...row});
+  }
+  res.json({success:true,range,markets,note:'IST order dates. Gross purchased product values exclude shipping and refund/commission/tax adjustments; they are not payout or net earnings.'});
+ }));
+ app.get('/api/sellers/workspace/quality',auth,handle(async(req,res)=>{
+  const rows=await q(`SELECT s.id,s.marketplace,s.approval_status,s.rejection_reason,s.published_product_id,s.product_data,s.updated_at,
+   COALESCE((SELECT count(*) FROM cerood_shop_reviews r WHERE r.product_id=s.published_product_id AND r.status='approved'),0)::int AS review_count,
+   (SELECT round(avg(r.rating)::numeric,1) FROM cerood_shop_reviews r WHERE r.product_id=s.published_product_id AND r.status='approved') AS rating
+   FROM cerood_seller_catalog_submissions s WHERE s.seller_id=$1 ORDER BY s.updated_at DESC LIMIT 500`,[req.seller.id]);
+  res.json({success:true,products:rows.map(r=>{
+   const d=r.product_data||{},issues=[];
+   if(!String(d.name||'').trim())issues.push('Product name missing');
+   if(!String(d.description||'').trim())issues.push('Add a clear description');
+   if(!d.image_url&&!Object.values(d.product_images||{}).some(x=>typeof x==='string'?x:!!x?.url))issues.push('Product photo missing');
+   if(!Number.isFinite(Number(d.price))||Number(d.price)<=0)issues.push('Selling price requires attention');
+   if(r.approval_status==='rejected')issues.push(r.rejection_reason||'Correct admin feedback');
+   return {id:r.id,marketplace:r.marketplace,name:d.name||'Untitled',approval_status:r.approval_status,issues,review_count:r.marketplace==='general'?r.review_count:null,rating:r.marketplace==='general'?r.rating:null};
+  })});
+ }));
+ app.get('/api/sellers/workspace/shipments',auth,handle(async(req,res)=>{
+  const shipments=[];
+  for(const [table,courier,key] of [['cerood_ekart_shipments','Ekart','tracking_id'],['cerood_delhivery_shipments','Delhivery','waybill']]){
+   if(!(await q('SELECT to_regclass($1) AS relation',['public.'+table]))[0]?.relation)continue;
+   const rows=await q(`SELECT id,to_jsonb(x)->>'marketplace' AS marketplace,to_jsonb(x)->>'order_id' AS order_id,to_jsonb(x)->>'${key}' AS tracking_number,
+    to_jsonb(x)->>'booking_state' AS booking_state,to_jsonb(x)->>'last_tracking_status' AS tracking_status,
+    to_jsonb(x)->>'last_tracking_at' AS checked_at,to_jsonb(x)->>'booked_at' AS booked_at,to_jsonb(x)->>'cancelled_at' AS cancelled_at
+    FROM ${table} x WHERE to_jsonb(x)->>'seller_id'=$1 ORDER BY created_at DESC LIMIT 200`,[String(req.seller.id)]);
+   shipments.push(...rows.map(r=>({...r,courier})));
+  }
+  shipments.sort((a,b)=>String(b.booked_at||'').localeCompare(String(a.booked_at||'')));res.json({success:true,shipments,scope:'Up to 200 saved bookings per courier. Refresh tracking from the order; courier state remains separate from customer delivery status.'});
+ }));
+}
+module.exports={register};

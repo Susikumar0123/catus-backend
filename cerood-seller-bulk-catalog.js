@@ -508,6 +508,9 @@ module.exports = function registerSellerBulkCatalogRoutes(app, db, requireSeller
     }
 
     const marketplace = String(match.marketplace || '');
+    if (marketplace === 'general') {
+      throw fail('Main Store bulk price/stock updates are unavailable. Use Main Store live stock for quantities and Edit listing with admin approval for prices; option inventory must be updated individually.', 409);
+    }
     const productId = String(match.published_product_id || '');
     const tables = { general: 'cerood_shop_products', clothing: 'clothing_products', cosmetics: 'cosmetics_products' };
     const target = tables[marketplace];

@@ -71,6 +71,7 @@ app.use(cors({
 // Razorpay webhook signatures require ORIGINAL bytes; both routes MUST precede express.json().
 app.use('/api/renewed/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/cosmetics/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
+app.use('/api/shop/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/clothing/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/home-services/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use(express.json());
@@ -12453,7 +12454,8 @@ async function shopOrderWithItems(row,admin=false){
       WHERE i.order_id=? ORDER BY i.id ASC`,[row.id]
   );
   if(!admin)for(const item of items)delete item.seller_order_note;
-  return {...row,items};
+  const parcels=await require('./cerood-shop-shipping').customerParcels(renewedQuery,row.id);
+  return {...row,items,parcels};
 }
 
 // Main Store orders for Common Admin. Protected by app.use('/api/admin', requireAdminAuth).
@@ -12471,8 +12473,17 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
 });
 
 require('./cerood-shop-cancellation').register(app,db,requireAdminAuth);
+require('./cerood-seller-activity').register(app,db,requireSellerAuth);
+require('./cerood-seller-stock').register(app,db,requireSellerAuth);
+require('./cerood-seller-workspace').register(app,db,requireSellerAuth);
+const sellerPriceSchedules=require('./cerood-seller-price-schedules').register(app,db,requireSellerAuth,requireAdminAuth);
+const sellerPriceScheduleTimer=setInterval(()=>sellerPriceSchedules.tick().catch(e=>console.error('Price schedule worker:',e.message)),60000);
+sellerPriceScheduleTimer.unref?.();
+const shopRefundService=require('./cerood-shop-refunds').register(app,db,razorpayInstance,requireAdminAuth);
+require('./cerood-shop-payments').register(app,db,razorpayInstance,{address:shopAddress,items:shopItems,resolve:shopResolveCheckout,matches:shopCheckoutMatches,refunds:shopRefundService},renewedCustomerSession,requireAdminAuth);
 require('./cerood-shop-settlements').register(app,db,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-returns').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
+require('./cerood-shop-return-fulfilment').register(app,db,requireAdminAuth);
 require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
 
 // Admin advances customer delivery independently of seller item fulfilment.
@@ -12589,7 +12600,7 @@ function shopDeliveryFee(){
 function shopCodEnabled(){return process.env.SHOP_COD_ENABLED!=='false';}
 app.get('/api/shop/checkout-status',(req,res)=>{
   res.set('Cache-Control','no-store');
-  res.json({success:true,cod_enabled:shopCodEnabled(),online_enabled:false});
+  res.json({success:true,cod_enabled:shopCodEnabled(),online_enabled:require('./cerood-shop-payments').enabled()});
 });
 app.post('/api/shop/quote',optionalCeroodCustomerSession,async(req,res)=>{
   res.set('Cache-Control','no-store');
@@ -12617,7 +12628,7 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
     const existing=await query('SELECT * FROM public.cerood_shop_orders WHERE request_id=? LIMIT 1',[requestId]);
     if(existing.length){
       const prior=existing[0];
-      if(prior.customer_phone!==address.phone||(prior.customer_id&&String(prior.customer_id)!==String(req.ceroodCustomerId||'')))
+      if(prior.payment_method!=='cod'||prior.customer_phone!==address.phone||(prior.customer_id&&String(prior.customer_id)!==String(req.ceroodCustomerId||'')))
         throw Object.assign(new Error('Checkout request conflicts with an existing order.'),{status:409});
       const savedItems=await query('SELECT * FROM public.cerood_shop_order_items WHERE order_id=? ORDER BY id',[prior.id]);
       if(!shopCheckoutMatches(prior,savedItems,address,items))
