@@ -12440,7 +12440,7 @@ function shopCheckoutMatches(order,savedItems,address,items){
 }
 async function shopOrderWithItems(row,admin=false){
   const items=await renewedQuery(
-    `SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,i.seller_id,
+    `SELECT i.id AS order_item_id,i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,i.seller_id,
             i.variant_id,i.variant_sku,i.variant_values,p.image_url,
             COALESCE(to_jsonb(i)->>'seller_order_status','new') AS seller_order_status,
             to_jsonb(i)->>'seller_accepted_at' AS seller_accepted_at,
@@ -12471,6 +12471,7 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
 });
 
 require('./cerood-shop-cancellation').register(app,db,requireAdminAuth);
+require('./cerood-shop-returns').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
 
 // Admin advances customer delivery independently of seller item fulfilment.
