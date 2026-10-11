@@ -12471,6 +12471,7 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
 });
 
 require('./cerood-shop-cancellation').register(app,db,requireAdminAuth);
+require('./cerood-shop-settlements').register(app,db,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-returns').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
 
