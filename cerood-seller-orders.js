@@ -193,6 +193,8 @@ module.exports = function (
 
                 oi.total_price AS line_total,
 
+                to_jsonb(oi)->'variant' AS variant,
+
                 NULL::integer
                     AS warranty_days_at_purchase,
 
@@ -499,6 +501,9 @@ module.exports = function (
                 oi.unit_price,
                 oi.quantity,
                 oi.line_total,
+                oi.variant_id,
+                oi.variant_sku,
+                oi.variant_values,
                 NULL::integer AS warranty_days_at_purchase,
                 oi.seller_id,
                 oi.fulfilment_location_id,
@@ -537,6 +542,10 @@ module.exports = function (
             client = await db.getClient();
             await client.query('BEGIN');
             await client.query('SELECT pg_advisory_xact_lock(hashtext($1))', [`shop-order-item:${item.id}`]);
+            // Parent order lock precedes item locks, matching admin cancellation.
+            const parentItems = await client.query('SELECT order_id FROM public.cerood_shop_order_items WHERE id=$1 AND seller_id=$2',[item.id,sellerId]);
+            if (!parentItems.length) { await client.query('ROLLBACK'); return []; }
+            await client.query('SELECT id FROM public.cerood_shop_orders WHERE id=$1 FOR UPDATE',[parentItems[0].order_id]);
 
             const itemRows = await client.query(`
                 SELECT oi.id,oi.order_id,oi.product_id,oi.variant_id,oi.quantity,oi.seller_id,
