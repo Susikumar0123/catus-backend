@@ -34,6 +34,7 @@ function createService(db,provider,h){
     if(changed.length!==1)throw bad('Stock changed. Refresh the checkout.',409);
     await c.query(`INSERT INTO cerood_shop_order_items(order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,variant_id,variant_sku,variant_values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)`,[id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
    }
+   await require('./cerood-shop-inventory').syncVariantTotals(c,totals.lines.filter(x=>x.variant_id).map(x=>x.p.id));
    await c.query('COMMIT');done=true;return response(order);
   }finally{try{if(!done)await c.query('ROLLBACK')}finally{c.release()}}
  }
@@ -72,6 +73,7 @@ function createService(db,provider,h){
    if(ids.length)await c.query('SELECT id FROM cerood_shop_products WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',[ids]);
    const variantIds=items.map(i=>i.variant_id).filter(Boolean).sort();if(variantIds.length)await c.query('SELECT id FROM cerood_product_variants WHERE id=ANY($1::uuid[]) ORDER BY id FOR UPDATE',[variantIds]);
    for(const item of items){const restored=item.variant_id?await c.query("UPDATE cerood_product_variants SET stock=stock+$1,updated_at=now() WHERE id=$2 AND product_id=$3 AND marketplace='general' RETURNING id",[item.quantity,item.variant_id,String(item.product_id)]):await c.query('UPDATE cerood_shop_products SET stock=stock+$1,updated_at=now() WHERE id=$2 RETURNING id',[item.quantity,item.product_id]);if(restored.length!==1)throw bad('Inventory recovery needs support review.',409);}
+   await require('./cerood-shop-inventory').syncVariantTotals(c,items.filter(x=>x.variant_id).map(x=>x.product_id));
    await c.query("UPDATE cerood_shop_orders SET status='cancelled',payment_status='expired',stock_restored_at=now(),cancelled_at=now(),cancellation_reason='Unpaid online reservation expired',updated_at=now() WHERE id=$1",[id]);
    await c.query('COMMIT');done=true;return {state:'expired'};
   }finally{try{if(!done)await c.query('ROLLBACK')}finally{c.release()}}

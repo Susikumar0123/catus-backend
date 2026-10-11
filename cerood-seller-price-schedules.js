@@ -13,10 +13,10 @@ const same=(a,b)=>JSON.stringify(canonical(a))===JSON.stringify(canonical(b));
 async function transaction(db,fn){const c=await db.getClient();let done=false;try{await c.query('BEGIN');const result=await fn(c);await c.query('COMMIT');done=true;return result;}finally{try{if(!done)await c.query('ROLLBACK')}finally{c.release()}}}
 async function inventory(c,product,seller){
  const submissions=await c.query("SELECT id,approval_status FROM cerood_seller_catalog_submissions WHERE published_product_id=$1 AND seller_id=$2 ORDER BY id FOR UPDATE",[product,seller]);
- const p=(await c.query("SELECT p.* FROM cerood_shop_products p JOIN cerood_sellers s ON s.id=p.seller_id WHERE p.id=$1 AND p.seller_id=$2 AND s.status='approved' FOR UPDATE OF p",[product,seller]))[0];
- if(!p)throw fail('Owned product or approved seller account not found.',404);
+ const p=(await c.query("SELECT p.*,s.status AS seller_account_status FROM cerood_shop_products p JOIN cerood_sellers s ON s.id=p.seller_id WHERE p.id=$1 AND p.seller_id=$2 FOR UPDATE OF p",[product,seller]))[0];
+ if(!p)throw fail('Owned product or seller account not found.',404);
  const variants=await c.query("SELECT id,price,compare_price FROM cerood_product_variants WHERE marketplace='general' AND product_id=$1 AND is_active=true ORDER BY id FOR UPDATE",[String(product)]);
- return {p,variants,ready:p.status==='published'&&p.approval_status==='approved'&&!submissions.some(s=>s.approval_status==='pending')};
+ return {p,variants,ready:p.seller_account_status==='approved'&&p.status==='published'&&p.approval_status==='approved'&&!submissions.some(s=>s.approval_status==='pending')};
 }
 async function writePrices(c,values){
  await c.query('UPDATE cerood_shop_products SET price=$1,compare_price=$2,updated_at=now() WHERE id=$3',[values.product.price/100,values.product.compare_price==null?null:values.product.compare_price/100,values.product.id]);

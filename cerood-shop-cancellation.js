@@ -36,6 +36,7 @@ async function cancel(db,id,reason){
     :await client.query('UPDATE public.cerood_shop_products SET stock=stock+$1,updated_at=now() WHERE id=$2 RETURNING id',[item.quantity,item.product_id]);
    if(updated.length!==1)throw fail('Inventory option is missing. Cancellation was rolled back.');
   }
+  await require('./cerood-shop-inventory').syncVariantTotals(client,restore.filter(x=>x.variant_id).map(x=>x.product_id));
   const cancelled=await client.query(`UPDATE public.cerood_shop_orders SET status='cancelled',updated_at=now(),cancelled_at=now(),
     cancellation_reason=$1,stock_restored_at=now() WHERE id=$2 RETURNING *`,[reason,id]);
   await client.query('COMMIT');begun=false;return {order:cancelled[0],idempotent:false};

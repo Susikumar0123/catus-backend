@@ -23,7 +23,9 @@ const SOURCE=`WITH activity AS (
 )`;
 function keys(body={}){if(!Array.isArray(body.ids)||!body.ids.length||body.ids.length>100||body.ids.some(x=>typeof x!=='string'||!x.length||x.length>250))throw Object.assign(Error('Select up to 100 activity entries.'),{status:400});return [...new Set(body.ids)];}
 function register(app,db,auth){const q=(sql,args)=>new Promise((resolve,reject)=>db.query(sql,args,(e,r)=>e?reject(e):resolve(r))),handle=fn=>async(req,res)=>{res.set('Cache-Control','no-store');try{await fn(req,res)}catch(e){res.status(e.status||500).json({success:false,message:e.status?e.message:'Seller activity is unavailable. Try again.'})}};
- async function source(){let sql=SOURCE.slice(0,-2);for(const [market,items,orders] of [['renewed','renewed_order_items','renewed_orders'],['cosmetics','cosmetics_order_items','cosmetics_orders'],['clothing','clothing_order_items','clothing_orders']]){
+ async function source(){let sql=SOURCE.slice(0,-2);
+ if((await q('SELECT to_regclass($1) AS relation',['public.cerood_shop_settlement_recoveries']))[0]?.relation)sql+=` UNION ALL SELECT 'recovery:'||r.id::text,'payments','Seller payout recovery recorded',i.product_name,s.id::text,'payments',r.recorded_at FROM cerood_shop_settlement_recoveries r JOIN cerood_shop_settlements s ON s.id=r.settlement_id JOIN cerood_shop_order_items i ON i.id=s.order_item_id WHERE s.seller_id=$1 AND r.recorded_at>=now()-interval '30 days'`;
+ for(const [market,items,orders] of [['renewed','renewed_order_items','renewed_orders'],['cosmetics','cosmetics_order_items','cosmetics_orders'],['clothing','clothing_order_items','clothing_orders']]){
   if(!(await q('SELECT to_regclass($1) AS relation',['public.'+items]))[0]?.relation)continue;
   sql+=` UNION ALL SELECT 'order:${market}:'||i.id::text||':'||COALESCE(to_jsonb(i)->>'seller_order_status','new')||':'||COALESCE(to_jsonb(o)->>'status',''), 'orders',
    '${market} order: '||COALESCE(to_jsonb(i)->>'seller_order_status','new'),COALESCE(to_jsonb(i)->>'product_name','Product'),i.order_id::text,'orders',

@@ -43,7 +43,7 @@ function createService(db,provider){
    const existing=(await c.query('SELECT * FROM cerood_shop_refunds WHERE return_request_id=$1',[id]))[0];
    if(existing){await c.query('COMMIT');done=true;return reconcile(id);}
    if(order.payment_status!=='paid'||order.status!=='delivered'||r.status!=='received'||!r.inspected_at)throw bad('Return or payment changed. Refresh before refunding.');
-   const settlements=await c.query("SELECT id FROM cerood_shop_settlements WHERE order_item_id=$1 AND status<>'void' FOR UPDATE",[link.item_id]);if(settlements.length)throw bad('Seller settlement exists. Reconcile it before issuing this refund.');
+   const settlements=await require('./cerood-shop-finance-reconciliation').refundBlockers(c,link.item_id);if(settlements.length)throw bad('Seller settlement exists. Reconcile it before issuing this refund.');
    const budgets=await c.query("SELECT amount_paise,state FROM cerood_shop_refunds WHERE order_id=$1 AND state<>'failed'",[link.order_id]);
    const reserved=budgets.reduce((n,r)=>n+Number(r.amount_paise),0),inflight=budgets.filter(r=>r.state!=='processed').reduce((n,r)=>n+Number(r.amount_paise),0);
    const external=Number(payment.amount_refunded||0);if(!Number.isSafeInteger(external)||external<0||amount+reserved>Number(payment.amount)||amount+external+inflight>Number(payment.amount))throw bad('Refundable balance is insufficient or held for reconciliation.');

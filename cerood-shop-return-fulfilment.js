@@ -28,13 +28,14 @@ async function processReturn(db,id,body={}){
    const products=await c.query('SELECT id FROM cerood_shop_products WHERE id=$1 FOR UPDATE',[item.product_id]);if(!products.length)throw fail('Product missing. Inventory recovery needs review.');
    const updated=item.variant_id?await c.query("UPDATE cerood_product_variants SET stock=stock+$1,updated_at=now() WHERE id=$2 AND product_id=$3 AND marketplace='general' RETURNING id",[quantity,item.variant_id,String(item.product_id)]):await c.query('UPDATE cerood_shop_products SET stock=stock+$1,updated_at=now() WHERE id=$2 RETURNING id',[quantity,item.product_id]);
    if(updated.length!==1)throw fail('Purchased option is missing. Stock restoration rolled back.');
+   if(item.variant_id)await require('./cerood-shop-inventory').syncVariantTotals(c,[item.product_id]);
   }
   const rows=await c.query(`UPDATE cerood_shop_return_requests SET inspection_result=$1,inspected_at=now(),stock_restored_at=CASE WHEN $1='restock' THEN now() ELSE NULL END,admin_note=$2,status_timestamps=status_timestamps||jsonb_build_object('inspected',now()),admin_updated_at=now(),updated_at=now() WHERE id=$3 RETURNING *`,[body.disposition,note,id]);await c.query('COMMIT');done=true;return {request:rows[0],idempotent:false};
  }
  if(r.request_type!=='return'||order.payment_method!=='cod')throw fail('This action records completed COD return refunds only. Online refunds/exchanges use separate processing.');
  if(r.status==='refunded'){if(r.refund_reference!==reference)throw fail('A different completed refund reference is already recorded.');await c.query('COMMIT');done=true;return {request:r,idempotent:true};}
  if(r.status!=='received'||!r.inspected_at)throw fail('Receive and inspect the item before recording its refund.');
- const settlements=await c.query("SELECT id FROM cerood_shop_settlements WHERE order_item_id=$1 AND status<>'void' FOR UPDATE",[item.id]);if(settlements.length)throw fail('A seller settlement exists. Reconcile it before recording this refund.');
+ const settlements=await require('./cerood-shop-finance-reconciliation').refundBlockers(c,item.id);if(settlements.length)throw fail('A seller settlement exists. Reconcile it before recording this refund.');
  if(!Number.isFinite(Number(item.line_total))||Number(item.line_total)<=0)throw fail('Item refund amount requires review.');
  const rows=await c.query(`UPDATE cerood_shop_return_requests SET status='refunded',refund_amount=$1,refund_reference=$2,refunded_at=now(),admin_note=$3,status_timestamps=status_timestamps||jsonb_build_object('refunded',now()),admin_updated_at=now(),updated_at=now() WHERE id=$4 RETURNING *`,[item.line_total,reference,note,id]);
  await c.query('COMMIT');done=true;return {request:rows[0],idempotent:false};

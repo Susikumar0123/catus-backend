@@ -486,7 +486,7 @@ module.exports = function (
         const bad = ['cancelled','canceled','failed','refunded','expired'];
         if (bad.includes(status)) return false;
         if (payment === 'cod') return true;
-        return ['paid','captured','success','payment_review'].includes(paymentStatus);
+        return ['paid','captured','success'].includes(paymentStatus);
     }
 
     async function getShopOrders(sellerId) {
@@ -528,7 +528,7 @@ module.exports = function (
               AND LOWER(o.status) NOT IN ('cancelled','canceled','failed','refunded','expired')
               AND (
                     LOWER(o.payment_method)='cod'
-                    OR LOWER(COALESCE(o.payment_status,'')) IN ('paid','captured','success','payment_review')
+                    OR LOWER(COALESCE(o.payment_status,'')) IN ('paid','captured','success')
               )
             ORDER BY o.created_at DESC,oi.id DESC
             LIMIT 100
@@ -571,7 +571,7 @@ module.exports = function (
 
                 const rows = await client.query(`
                     UPDATE public.cerood_shop_order_items
-                       SET seller_order_status=$1,
+                       SET seller_order_status=$1::text,
                            seller_accepted_at=CASE WHEN $1='accepted' THEN NOW() ELSE seller_accepted_at END,
                            seller_rejected_at=CASE WHEN $1='rejected' THEN NOW() ELSE seller_rejected_at END
                      WHERE id=$2 AND seller_id=$3
@@ -579,20 +579,15 @@ module.exports = function (
                 `,[value,item.id,sellerId]);
 
                 if (value === 'rejected') {
-                    const qty = Number(current.quantity || 0);
-                    if (qty > 0 && current.variant_id) {
-                        await client.query(`
-                            UPDATE public.cerood_product_variants
-                               SET stock=stock+$1,updated_at=NOW()
-                             WHERE id=$2 AND product_id=$3
-                        `,[qty,current.variant_id,current.product_id]);
-                    } else if (qty > 0) {
-                        await client.query(`
-                            UPDATE public.cerood_shop_products
-                               SET stock=stock+$1,updated_at=NOW()
-                             WHERE id=$2
-                        `,[qty,current.product_id]);
-                    }
+                    const qty = Number(current.quantity);
+                    if (!Number.isSafeInteger(qty) || qty < 1) throw new Error('Purchased quantity requires inventory review.');
+                    const products = await client.query('SELECT id FROM public.cerood_shop_products WHERE id=$1 FOR UPDATE',[current.product_id]);
+                    if (products.length !== 1) throw new Error('Product missing; rejection was rolled back.');
+                    const restored = current.variant_id
+                        ? await client.query("UPDATE public.cerood_product_variants SET stock=stock+$1,updated_at=NOW() WHERE id=$2 AND product_id=$3 AND marketplace='general' RETURNING id",[qty,current.variant_id,current.product_id])
+                        : await client.query('UPDATE public.cerood_shop_products SET stock=stock+$1,updated_at=NOW() WHERE id=$2 RETURNING id',[qty,current.product_id]);
+                    if (restored.length !== 1) throw new Error('Purchased option missing; rejection was rolled back.');
+                    if (current.variant_id) await require('./cerood-shop-inventory').syncVariantTotals(client,[current.product_id]);
                 }
 
                 await client.query('COMMIT');
@@ -607,7 +602,7 @@ module.exports = function (
                 }
                 const rows = await client.query(`
                     UPDATE public.cerood_shop_order_items
-                       SET seller_order_status=$1,
+                       SET seller_order_status=$1::text,
                            seller_packed_at=CASE WHEN $1='packed' THEN NOW() ELSE seller_packed_at END,
                            seller_shipped_at=CASE WHEN $1='shipped' THEN NOW() ELSE seller_shipped_at END
                      WHERE id=$2 AND seller_id=$3 AND COALESCE(seller_order_status,'new')=$4

@@ -12482,6 +12482,7 @@ sellerPriceScheduleTimer.unref?.();
 const shopRefundService=require('./cerood-shop-refunds').register(app,db,razorpayInstance,requireAdminAuth);
 require('./cerood-shop-payments').register(app,db,razorpayInstance,{address:shopAddress,items:shopItems,resolve:shopResolveCheckout,matches:shopCheckoutMatches,refunds:shopRefundService},renewedCustomerSession,requireAdminAuth);
 require('./cerood-shop-settlements').register(app,db,requireSellerAuth,requireAdminAuth);
+require('./cerood-shop-finance-reconciliation').register(app,db,requireAdminAuth);
 require('./cerood-shop-returns').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
 require('./cerood-shop-return-fulfilment').register(app,db,requireAdminAuth);
 require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
@@ -12659,6 +12660,7 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
         [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,
          line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
     }
+    await require('./cerood-shop-inventory').syncVariantTotals(client,lines.filter(x=>x.variant_id).map(x=>x.p.id));
     const savedItems=await query('SELECT * FROM public.cerood_shop_order_items WHERE order_id=? ORDER BY id',[order.id]);
     await client.query('COMMIT');committed=true;
     return res.status(201).json({success:true,order:{...order,items:savedItems}});
