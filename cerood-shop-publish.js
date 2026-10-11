@@ -56,9 +56,18 @@ async function publish(db,submission,product) {
       [submission.id,submission.seller_id,JSON.stringify(submission.product_data),submission.published_product_id||null]);
     if(!pending.length)throw error('Submission changed during approval. Refresh and retry.',409);
     const productId=submission.published_product_id||submission.id;
-    const existing=await client.query('SELECT id,seller_id,status FROM public.cerood_shop_products WHERE id=$1 FOR UPDATE',[productId]);
+    const existing=await client.query('SELECT id,seller_id,status,stock FROM public.cerood_shop_products WHERE id=$1 FOR UPDATE',[productId]);
     if(existing.length&&(!submission.published_product_id||existing[0].status!=='draft'||String(existing[0].seller_id)!==String(submission.seller_id)))throw error('Existing product conflicts with this submission.',409);
     if(!existing.length&&submission.published_product_id)throw error('Previously published product is missing.',409);
+    const old=await client.query(`SELECT id,variant_values,stock FROM public.cerood_product_variants WHERE marketplace='general' AND product_id=$1 ORDER BY id FOR UPDATE`,[String(productId)]);
+    // Catalog approval must not replenish units already sold or reserved.
+    product={...product,product_variants:product.product_variants.map(v=>({...v}))};
+    if(existing.length){
+      if(Boolean(old.length)!==Boolean(product.product_variants.length))throw error('Existing standard/variant inventory cannot be converted through a catalog edit. Contact support.',409);
+      for(const v of product.product_variants){const previous=v.id?old.find(x=>String(x.id)===String(v.id)):old.find(x=>combination(x.variant_values)===combination(v.variant_values));if(previous)v.stock=Number(previous.stock);}
+      product.stock=product.product_variants.length?product.product_variants.reduce((n,v)=>n+Number(v.stock),0):Number(existing[0].stock);
+    }else if(product.product_variants.length)product.stock=product.product_variants.reduce((n,v)=>n+Number(v.stock),0);
+    if(!Number.isSafeInteger(Number(product.stock))||Number(product.stock)<0||Number(product.stock)>1000000)throw error('Combined stock must be a whole number between 0 and 1000000.');
     const columns=['category_id','name','category','subcategory','brand','model','description','price','compare_price','stock','image_url','video_url','product_attributes','product_images'];
     const values=columns.map(k=>['product_attributes','product_images'].includes(k)?JSON.stringify(product[k]):product[k]);
     if(existing.length) {
@@ -67,7 +76,7 @@ async function publish(db,submission,product) {
       await client.query(`INSERT INTO public.cerood_shop_products(id,seller_id,${columns.join(',')},status,approval_status)
         VALUES($1,$2,${columns.map((k,i)=>`$${i+3}${['product_attributes','product_images'].includes(k)?'::jsonb':''}`).join(',')},'published','approved')`,[productId,submission.seller_id,...values]);
     }
-    const old=await client.query(`SELECT id,variant_values FROM public.cerood_product_variants WHERE marketplace='general' AND product_id=$1 FOR UPDATE`,[String(productId)]);
+
     const byId=new Map(old.map(v=>[String(v.id),v]));
     const byOptions=new Map(old.map(v=>[combination(v.variant_values),v]));
     const selected=new Set();
@@ -85,7 +94,7 @@ async function publish(db,submission,product) {
     // Retire removed variants instead of deleting references from past orders.
     await client.query(`UPDATE public.cerood_product_variants SET is_active=false,updated_at=now()
       WHERE marketplace='general' AND product_id=$1 AND NOT(id=ANY($2::uuid[]))`,[String(productId),[...selected]]);
-    await client.query(`UPDATE public.cerood_seller_catalog_submissions SET approval_status='approved',published_product_id=$1,rejection_reason=NULL,updated_at=now() WHERE id=$2`,[productId,submission.id]);
+    await client.query(`UPDATE public.cerood_seller_catalog_submissions SET approval_status='approved',published_product_id=$1,rejection_reason=NULL,product_data=$3::jsonb,updated_at=now() WHERE id=$2`,[productId,submission.id,JSON.stringify({...submission.product_data,stock:product.stock,product_variants:product.product_variants})]);
     await client.query('COMMIT');begun=false;return productId;
   }finally {
     if(begun)await client.query('ROLLBACK').catch(()=>{});
