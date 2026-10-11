@@ -4266,6 +4266,8 @@ const sellerShipping = {
 // Renewed + Cosmetics + Fashion + Main Store
 // ==========================================
 
+require('./cerood-seller-shop-report').register(app, db, requireSellerAuth);
+
 require('./cerood-seller-orders')(
     app,
     db,
@@ -12469,6 +12471,7 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
 });
 
 require('./cerood-shop-cancellation').register(app,db,requireAdminAuth);
+require('./cerood-shop-reviews').register(app,db,requireAdminAuth,renewedCustomerSession);
 
 // Admin advances customer delivery independently of seller item fulfilment.
 app.patch('/api/admin/shop/orders/:id/tracking', requireAdminAuth, async(req,res)=>{
@@ -12477,12 +12480,27 @@ app.patch('/api/admin/shop/orders/:id/tracking', requireAdminAuth, async(req,res
   const status=String(req.body?.status||'');
   if(!shopUuid(req.params.id)||!stages.includes(status))
     return res.status(400).json({success:false,message:'Valid order and delivery stage required.'});
+  const trackingFields=['courier_name','tracking_number','tracking_url'];
+  const trackingValues=trackingFields.map(key=>Object.hasOwn(req.body||{},key)?String(req.body[key]??'').trim():null);
+  if(trackingValues.some((value,i)=>value!==null&&value.length>[100,120,500][i]))
+    return res.status(400).json({success:false,message:'Courier/tracking details are too long.'});
+  if(trackingValues[2]){
+    try{const link=new URL(trackingValues[2]);if(link.protocol!=='https:'||link.username||link.password)throw Error('Invalid URL');}
+    catch{return res.status(400).json({success:false,message:'Tracking link must be a valid HTTPS URL without credentials.'});}
+  }
   try{
     const rows=await renewedQuery(`UPDATE public.cerood_shop_orders
-      SET status=?,updated_at=NOW()
+      SET status=?,updated_at=NOW(),
+        status_timestamps=COALESCE(status_timestamps,'{}'::jsonb)||jsonb_build_object(?::text,
+          COALESCE(jsonb_extract_path(status_timestamps,?::text),to_jsonb(NOW()))),
+        delivered_at=CASE WHEN ?::text='delivered' THEN COALESCE(delivered_at,NOW()) ELSE delivered_at END,
+        courier_name=CASE WHEN ?::boolean THEN ?::text ELSE courier_name END,
+        tracking_number=CASE WHEN ?::boolean THEN ?::text ELSE tracking_number END,
+        tracking_url=CASE WHEN ?::boolean THEN ?::text ELSE tracking_url END
       WHERE id=? AND (payment_method='cod' OR payment_status='paid')
         AND array_position(?::text[],status) <= array_position(?::text[],?::text)
-      RETURNING id,status,updated_at`,[status,req.params.id,stages,stages,status]);
+      RETURNING id,status,updated_at,status_timestamps,delivered_at,courier_name,tracking_number,tracking_url`,
+      [status,status,status,status,...trackingValues.flatMap(value=>[value!==null,value]),req.params.id,stages,stages,status]);
     if(!rows.length)return res.status(409).json({success:false,message:'Order cannot advance: refresh orders and check payment/current stage.'});
     return res.json({success:true,order:rows[0]});
   }catch(error){
