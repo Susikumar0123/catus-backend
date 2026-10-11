@@ -1,4 +1,5 @@
 'use strict';
+const shopPublish = require('./cerood-shop-publish');
 // ============================================================
 // CEROOD MARKETPLACE CATALOG
 // Cosmetics + Fashion + Cerood Main Store
@@ -179,6 +180,8 @@ module.exports = function (
       for (const key of generalFields) {
         product[key] = data[key] ?? '';
       }
+      product.product_attributes = data.product_attributes ?? {};
+      product.product_images = data.product_images ?? {};
       for (const key of [
         'name',
         'category',
@@ -248,10 +251,15 @@ module.exports = function (
         product.product_images = {};
       }
       for (const [key, value] of Object.entries(product.product_images)) {
+        if (key === 'gallery') {
+          if (!Array.isArray(value) || value.length > 9 || value.some(url => typeof url !== 'string' || !/^https:\/\//i.test(url) || url.length > 2048)) throw badRequest('Supply up to 9 HTTPS gallery images.');
+          continue;
+        }
         if (!/^[a-z0-9_]{1,80}$/i.test(key)) throw badRequest('Invalid product image slot.');
         if (!/^https:\/\//i.test(String(value || ''))) throw badRequest('All product image URLs must use HTTPS.');
         product.product_images[key] = cleanText(value, 2048);
       }
+      product.product_variants = data.product_variants ?? data.variants ?? [];
       return product;
     }
     // ==========================================================
@@ -489,6 +497,7 @@ module.exports = function (
       }
     }
     for (const key of Object.keys(images)) {
+      if (key === 'gallery' && marketplace === 'general') continue;
       if (!allowedImages.has(key)) throw badRequest(`Invalid product image slot: ${key}.`);
     }
     for (const row of resolved.attributes) {
@@ -503,6 +512,7 @@ module.exports = function (
     }
     product.product_attributes = attributes;
     product.product_images = images;
+    if (marketplace === 'general') product.product_variants = shopPublish.validateVariants(product.product_variants, resolved.attributes);
     return product;
   }
   app.get('/api/sellers/product-categories', requireSellerAuth, async (req,res) => {
@@ -1147,239 +1157,8 @@ module.exports = function (
         if (
           submission.marketplace === 'general'
         ) {
-          const existing = await query(
-            `
-            SELECT
-              id,
-              seller_id,
-              status
-            FROM public.cerood_shop_products
-            WHERE id = ?
-            LIMIT 1
-            `,
-            [productId]
-          );
-          // ====================================================
-          // APPROVE EDITED MAIN STORE PRODUCT
-          // ====================================================
-          if (existing.length) {
-            const old = existing[0];
-            if (
-              old.status !== 'draft' ||
-              String(old.seller_id) !==
-                String(submission.seller_id) ||
-              String(
-                submission.published_product_id || ''
-              ) !== String(old.id)
-            ) {
-              return res.status(409).json({
-                success: false,
-                message:
-                  'Existing Main Store product conflicts with this submission.'
-              });
-            }
-            const updated = await query(
-              `
-              WITH changed_product AS (
-                UPDATE public.cerood_shop_products
-                SET
-                  category_id = ?::uuid,
-                  name = ?,
-                  category = ?,
-                  subcategory = ?,
-                  brand = ?,
-                  model = ?,
-                  description = ?,
-                  price = ?,
-                  compare_price = ?,
-                  stock = ?,
-                  image_url = ?,
-                  video_url = ?,
-                  product_attributes = ?::jsonb,
-                  product_images = ?::jsonb,
-                  status = 'published',
-                  approval_status = 'approved',
-                  updated_at = NOW()
-                WHERE id = ?
-                  AND seller_id = ?
-                  AND status = 'draft'
-                  AND EXISTS (
-                    SELECT 1
-                    FROM
-                      public.cerood_seller_catalog_submissions
-                    WHERE id = ?
-                      AND approval_status = 'pending'
-                      AND published_product_id = ?
-                  )
-                RETURNING id
-              ),
-              approved AS (
-                UPDATE
-                  public.cerood_seller_catalog_submissions
-                SET
-                  approval_status = 'approved',
-                  rejection_reason = NULL,
-                  updated_at = NOW()
-                WHERE id = ?
-                  AND approval_status = 'pending'
-                  AND EXISTS (
-                    SELECT 1
-                    FROM changed_product
-                  )
-                RETURNING published_product_id
-              )
-              SELECT
-                published_product_id AS id
-              FROM approved
-              `,
-              [
-                product.category_id,
-                product.name,
-                product.category,
-                product.subcategory,
-                product.brand,
-                product.model,
-                product.description,
-                product.price,
-                product.compare_price,
-                product.stock,
-                product.image_url,
-                product.video_url || null,
-                JSON.stringify(
-                  product.product_attributes
-                ),
-                JSON.stringify(product.product_images),
-                productId,
-                submission.seller_id,
-                submission.id,
-                submission.published_product_id,
-                submission.id
-              ]
-            );
-            if (!updated.length) {
-              return res.status(409).json({
-                success: false,
-                message:
-                  'Main Store product changed during approval.'
-              });
-            }
-            return res.json({
-              success: true,
-              product_id: updated[0].id
-            });
-          }
-          // ====================================================
-          // PUBLISH BRAND-NEW MAIN STORE PRODUCT
-          // ====================================================
-          if (submission.published_product_id) {
-            return res.status(409).json({
-              success: false,
-              message:
-                'Previously published product is missing. Contact admin.'
-            });
-          }
-          const published = await query(
-            `
-            WITH claimed AS (
-              UPDATE
-                public.cerood_seller_catalog_submissions
-              SET
-                approval_status = 'approved',
-                published_product_id = id,
-                rejection_reason = NULL,
-                updated_at = NOW()
-              WHERE id = ?
-                AND approval_status = 'pending'
-                AND published_product_id IS NULL
-                AND NOT EXISTS (
-                  SELECT 1
-                  FROM public.cerood_shop_products
-                  WHERE id = ?
-                )
-              RETURNING
-                id,
-                seller_id
-            ),
-            inserted AS (
-              INSERT INTO
-                public.cerood_shop_products
-              (
-                id,
-                seller_id,
-                category_id,
-                name,
-                category,
-                subcategory,
-                brand,
-                model,
-                description,
-                price,
-                compare_price,
-                stock,
-                image_url,
-                video_url,
-                product_attributes,
-                product_images,
-                status,
-                approval_status
-              )
-              SELECT
-                claimed.id,
-                claimed.seller_id,
-                ?::uuid,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?,
-                ?::jsonb,
-                ?::jsonb,
-                'published',
-                'approved'
-              FROM claimed
-              RETURNING id
-            )
-            SELECT id
-            FROM inserted
-            `,
-            [
-              submission.id,
-              submission.id,
-              product.category_id,
-              product.name,
-              product.category,
-              product.subcategory,
-              product.brand,
-              product.model,
-              product.description,
-              product.price,
-              product.compare_price,
-              product.stock,
-              product.image_url,
-              product.video_url || null,
-              JSON.stringify(
-                product.product_attributes
-              ),
-              JSON.stringify(product.product_images)
-            ]
-          );
-          if (!published.length) {
-            return res.status(409).json({
-              success: false,
-              message:
-                'Product changed during approval. Refresh and retry.'
-            });
-          }
-          return res.json({
-            success: true,
-            product_id: published[0].id
-          });
+          const publishedId = await shopPublish.publish(db, submission, product);
+          return res.json({success:true,product_id:publishedId});
         }
         // ======================================================
         // COSMETICS / FASHION APPROVAL
@@ -1590,6 +1369,14 @@ module.exports = function (
   // Customer-facing read-only endpoints. Home Services / Renewed
   // routes are intentionally untouched.
   // ============================================================
+  async function attachShopVariants(products){
+    if(!products.length)return products;
+    const ids=products.map(p=>p.id);
+    const variants=await query(`SELECT id,product_id,sku,variant_values,price,compare_price,stock,is_active
+      FROM public.cerood_product_variants WHERE marketplace='general' AND is_active=true
+      AND product_id IN (${ids.map(()=>'?').join(',')}) ORDER BY id`,ids);
+    return products.map(p=>({...p,variants:variants.filter(v=>String(v.product_id)===String(p.id))}));
+  }
   app.get('/api/shop/products', async (req, res) => {
     try {
       const products = await query(`
@@ -1603,7 +1390,7 @@ module.exports = function (
         ORDER BY created_at DESC
         LIMIT 500
       `);
-      return res.json({ success: true, products });
+      return res.json({ success: true, products:await attachShopVariants(products) });
     } catch (error) {
       return handleError(res, error);
     }
@@ -1629,7 +1416,7 @@ module.exports = function (
       if (!products.length) {
         return res.status(404).json({ success: false, message: 'Product not found.' });
       }
-      return res.json({ success: true, product: products[0] });
+      return res.json({ success: true, product:(await attachShopVariants(products))[0] });
     } catch (error) {
       return handleError(res, error);
     }

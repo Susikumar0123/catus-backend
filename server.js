@@ -12394,7 +12394,7 @@ function shopAddress(body){
   };
   if(!out.name) throw Object.assign(new Error('Customer name is required.'),{status:400});
   if(!/^[6-9]\d{9}$/.test(out.phone)) throw Object.assign(new Error('Enter a valid 10-digit mobile number.'),{status:400});
-  if(!out.house||!out.village||!out.district||!out.state||!/^\d{6}$/.test(out.pincode))
+  if(!out.house||!out.village||!out.district||!out.state||!/^[1-9]\d{5}$/.test(out.pincode))
     throw Object.assign(new Error('Complete delivery address is required.'),{status:400});
   return out;
 }
@@ -12429,14 +12429,28 @@ function shopItems(body){
   }
   return [...merged.values()];
 }
-async function shopOrderWithItems(row){
+function shopCheckoutMatches(order,savedItems,address,items){
+  let stored=order.delivery_address;
+  if(typeof stored==='string'){try{stored=JSON.parse(stored);}catch{return false;}}
+  if(!stored||Object.keys(address).some(key=>String(stored[key]||'')!==String(address[key]||'')))return false;
+  const signature=rows=>rows.map(row=>[String(row.product_id).toLowerCase(),String(row.variant_id||'').toLowerCase(),Number(row.quantity)].join(':')).sort().join('|');
+  return signature(savedItems)===signature(items);
+}
+async function shopOrderWithItems(row,admin=false){
   const items=await renewedQuery(
-    `SELECT product_id,product_name,unit_price,quantity,line_total,seller_id,
-            variant_id,variant_sku,variant_values
-       FROM public.cerood_shop_order_items
-      WHERE order_id=?
-      ORDER BY id ASC`,[row.id]
+    `SELECT i.product_id,i.product_name,i.unit_price,i.quantity,i.line_total,i.seller_id,
+            i.variant_id,i.variant_sku,i.variant_values,p.image_url,
+            COALESCE(to_jsonb(i)->>'seller_order_status','new') AS seller_order_status,
+            to_jsonb(i)->>'seller_accepted_at' AS seller_accepted_at,
+            to_jsonb(i)->>'seller_rejected_at' AS seller_rejected_at,
+            to_jsonb(i)->>'seller_packed_at' AS seller_packed_at,
+            to_jsonb(i)->>'seller_shipped_at' AS seller_shipped_at,
+            to_jsonb(i)->>'seller_order_note' AS seller_order_note
+       FROM public.cerood_shop_order_items i
+       LEFT JOIN public.cerood_shop_products p ON p.id=i.product_id
+      WHERE i.order_id=? ORDER BY i.id ASC`,[row.id]
   );
+  if(!admin)for(const item of items)delete item.seller_order_note;
   return {...row,items};
 }
 
@@ -12446,7 +12460,7 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
   try{
     const rows=await renewedQuery(`SELECT * FROM public.cerood_shop_orders ORDER BY created_at DESC LIMIT 300`);
     const orders=[];
-    for(const row of rows) orders.push(await shopOrderWithItems(row));
+    for(const row of rows) orders.push(await shopOrderWithItems(row,true));
     return res.json({success:true,orders});
   }catch(error){
     console.error('Main Store admin orders:',error.message);
@@ -12454,50 +12468,61 @@ app.get('/api/admin/shop/orders', async(req,res)=>{
   }
 });
 
-app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
+require('./cerood-shop-cancellation').register(app,db,requireAdminAuth);
+
+// Admin advances customer delivery independently of seller item fulfilment.
+app.patch('/api/admin/shop/orders/:id/tracking', requireAdminAuth, async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const stages=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];
+  const status=String(req.body?.status||'');
+  if(!shopUuid(req.params.id)||!stages.includes(status))
+    return res.status(400).json({success:false,message:'Valid order and delivery stage required.'});
   try{
-    const requestId=shopCleanText(req.body?.request_id,80);
-    if(!shopUuid(requestId)) return res.status(400).json({success:false,message:'Invalid checkout request.'});
-    const address=shopAddress(req.body?.address);
-    const items=shopItems(req.body?.items);
+    const rows=await renewedQuery(`UPDATE public.cerood_shop_orders
+      SET status=?,updated_at=NOW()
+      WHERE id=? AND (payment_method='cod' OR payment_status='paid')
+        AND array_position(?::text[],status) <= array_position(?::text[],?::text)
+      RETURNING id,status,updated_at`,[status,req.params.id,stages,stages,status]);
+    if(!rows.length)return res.status(409).json({success:false,message:'Order cannot advance: refresh orders and check payment/current stage.'});
+    return res.json({success:true,order:rows[0]});
+  }catch(error){
+    console.error('Main Store delivery update:',error.message);
+    return res.status(503).json({success:false,message:'Unable to update delivery.'});
+  }
+});
 
-    const existing=await renewedQuery(
-      `SELECT * FROM public.cerood_shop_orders WHERE request_id=? LIMIT 1`,[requestId]
-    );
-    if(existing.length){
-      return res.json({success:true,order:await shopOrderWithItems(existing[0]),idempotent:true});
-    }
-
+// Shared authoritative pricing. Transactional callers lock product rows in a stable order.
+async function shopResolveCheckout(query,items,lock=false){
     const ids=[...new Set(items.map(x=>x.product_id))];
     const placeholders=ids.map(()=>'?').join(',');
-    const products=await renewedQuery(
-      `SELECT id,seller_id,name,price,stock,status,approval_status
+    const products=await query(
+      `SELECT id,seller_id,name,price,stock,status,approval_status,image_url
          FROM public.cerood_shop_products
-        WHERE id IN (${placeholders})`,ids
+        WHERE id IN (${placeholders}) ORDER BY id ${lock ? 'FOR UPDATE' : ''}`,ids
     );
     if(products.length!==ids.length)
-      return res.status(409).json({success:false,message:'One or more products are no longer available.'});
+      throw Object.assign(new Error('One or more products are no longer available.'),{status:409});
 
     const byId=new Map(products.map(p=>[String(p.id),p]));
     const variantIds=[...new Set(items.map(x=>x.variant_id).filter(Boolean))];
     let variantById=new Map();
     if(variantIds.length){
       const vp=variantIds.map(()=>'?').join(',');
-      const rows=await renewedQuery(
+      const rows=await query(
         `SELECT id,marketplace,product_id,sku,variant_values,price,compare_price,stock,is_active
            FROM public.cerood_product_variants
-          WHERE id IN (${vp}) AND is_active=true`,variantIds
+          WHERE id IN (${vp}) AND is_active=true ORDER BY id ${lock ? 'FOR UPDATE' : ''}`,variantIds
       );
       variantById=new Map(rows.map(v=>[String(v.id),v]));
       if(rows.length!==variantIds.length)
-        return res.status(409).json({success:false,message:'A selected product option is no longer available.'});
+        throw Object.assign(new Error('A selected product option is no longer available.'),{status:409});
     }
 
     // If a product has active variants, checkout must identify the exact variant.
-    const variantProductRows=await renewedQuery(
+    const variantProductRows=await query(
       `SELECT DISTINCT product_id
          FROM public.cerood_product_variants
-        WHERE product_id IN (${placeholders}) AND is_active=true`,ids
+        WHERE product_id IN (${placeholders}) AND marketplace='general' AND is_active=true`,ids
     );
     const productsWithVariants=new Set(variantProductRows.map(x=>String(x.product_id)));
 
@@ -12506,108 +12531,131 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
     for(const item of items){
       const p=byId.get(item.product_id);
       if(!p||p.status!=='published'||p.approval_status!=='approved')
-        return res.status(409).json({success:false,message:'A product is not available for purchase.'});
+        throw Object.assign(new Error('A product is not available for purchase.'),{status:409});
 
       let variant=null;
       if(productsWithVariants.has(item.product_id)){
         if(!item.variant_id)
-          return res.status(409).json({success:false,message:`Choose an available option for ${p.name||'this product'}.`});
+          throw Object.assign(new Error(`Choose an available option for ${p.name||'this product'}.`),{status:409});
         variant=variantById.get(item.variant_id);
-        if(!variant||String(variant.product_id)!==String(p.id)||variant.is_active===false)
-          return res.status(409).json({success:false,message:`Selected option is invalid for ${p.name||'this product'}.`});
+        if(!variant||variant.marketplace!=='general'||String(variant.product_id)!==String(p.id)||variant.is_active===false)
+          throw Object.assign(new Error(`Selected option is invalid for ${p.name||'this product'}.`),{status:409});
       }else if(item.variant_id){
-        return res.status(409).json({success:false,message:`This product does not use the selected option.`});
+        throw Object.assign(new Error(`This product does not use the selected option.`),{status:409});
       }
 
       const price=Number(variant?.price ?? p.price);
       const stock=Number(variant ? variant.stock : p.stock);
       if(!Number.isFinite(price)||price<=0||!Number.isFinite(stock)||stock<item.quantity)
-        return res.status(409).json({success:false,message:`Insufficient stock for ${p.name||'a product'}${variant?.sku?' ('+variant.sku+')':''}.`});
-      const lineTotal=price*item.quantity; subtotal+=lineTotal;
+        throw Object.assign(new Error(`Insufficient stock for ${p.name||'a product'}${variant?.sku?' ('+variant.sku+')':''}.`),{status:409});
+      const unitPrice=Math.round(price*100)/100;
+      const lineTotal=Math.round(unitPrice*100)*item.quantity/100; subtotal=Math.round((subtotal+lineTotal)*100)/100;
       lines.push({
-        p,variant,quantity:item.quantity,unit_price:price,line_total:lineTotal,
+        p,variant,quantity:item.quantity,unit_price:unitPrice,line_total:lineTotal,
         variant_id:variant?String(variant.id):null,
         variant_sku:variant?shopCleanText(variant.sku,120)||null:null,
         variant_values:variant?shopVariantValues(variant.variant_values):{}
       });
     }
 
-    const deliveryFee=Math.max(0,Number(process.env.SHOP_DELIVERY_FEE||0)||0);
-    const total=subtotal+deliveryFee;
-    const orderRows=await renewedQuery(
-      `INSERT INTO public.cerood_shop_orders
-       (request_id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
-        subtotal,delivery_fee,total,currency,status,payment_method,payment_status)
-       VALUES (?::uuid,?,?,?,?,?::jsonb,?,?,?,'INR','confirmed','cod','cod_pending')
-       RETURNING *`,
-      [
-        requestId,
-        req.ceroodCustomerId||null,
-        address.name,
-        address.phone,
-        shopCleanText(req.body?.email,200)||null,
-        JSON.stringify(address),
-        subtotal,deliveryFee,total
-      ]
-    );
-    const order=orderRows[0];
+    const deliveryFee=shopDeliveryFee();
+    return {lines,subtotal,delivery_fee:deliveryFee,total:Math.round((subtotal+deliveryFee)*100)/100};
+}
+function shopDeliveryFee(){
+  const fee=Number(process.env.SHOP_DELIVERY_FEE||0);
+  if(!Number.isFinite(fee)||fee<0)throw Object.assign(new Error('Delivery pricing is unavailable.'),{status:503});
+  return Math.round(fee*100)/100;
+}
+function shopCodEnabled(){return process.env.SHOP_COD_ENABLED!=='false';}
+app.get('/api/shop/checkout-status',(req,res)=>{
+  res.set('Cache-Control','no-store');
+  res.json({success:true,cod_enabled:shopCodEnabled(),online_enabled:false});
+});
+app.post('/api/shop/quote',optionalCeroodCustomerSession,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  try{
+    shopAddress(req.body?.address);
+    const result=await shopResolveCheckout(renewedQuery,shopItems(req.body?.items));
+    return res.json({success:true,subtotal:result.subtotal,delivery_fee:result.delivery_fee,total:result.total,
+      items:result.lines.map(l=>({product_id:l.p.id,name:l.p.name,image_url:l.p.image_url,quantity:l.quantity,
+        unit_price:l.unit_price,line_total:l.line_total,variant_id:l.variant_id,variant_sku:l.variant_sku,variant_values:l.variant_values}))});
+  }catch(error){return res.status(error.status||503).json({success:false,message:error.status?error.message:'Unable to check delivery and price.'});}
+});
 
-    try{
-      for(const line of lines){
-        let changed;
-        if(line.variant){
-          changed=await renewedQuery(
-            `UPDATE public.cerood_product_variants
-                SET stock=stock-?,updated_at=NOW()
-              WHERE id=? AND product_id=? AND is_active=true AND stock>=?
-              RETURNING id`,
-            [line.quantity,line.variant_id,line.p.id,line.quantity]
-          );
-        }else{
-          changed=await renewedQuery(
-            `UPDATE public.cerood_shop_products
-                SET stock=stock-?,updated_at=NOW()
-              WHERE id=? AND status='published' AND approval_status='approved' AND stock>=?
-              RETURNING id`,
-            [line.quantity,line.p.id,line.quantity]
-          );
-        }
-        if(!changed.length) throw new Error(`Stock changed for ${line.p.name||'product'}.`);
-        await renewedQuery(
-          `INSERT INTO public.cerood_shop_order_items
-           (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,
-            variant_id,variant_sku,variant_values)
-           VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?,?::uuid,?,?::jsonb)`,
-          [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,
-           line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]
-        );
-      }
-    }catch(inner){
-      // Compensate stock already reserved and remove the incomplete order.
-      const inserted=await renewedQuery(
-        `SELECT product_id,quantity,variant_id FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]
-      ).catch(()=>[]);
-      for(const x of inserted){
-        if(x.variant_id){
-          await renewedQuery(
-            `UPDATE public.cerood_product_variants SET stock=stock+?,updated_at=NOW() WHERE id=? AND product_id=?`,
-            [Number(x.quantity)||0,x.variant_id,x.product_id]
-          ).catch(()=>{});
-        }else{
-          await renewedQuery(`UPDATE public.cerood_shop_products SET stock=stock+?,updated_at=NOW() WHERE id=?`,
-            [Number(x.quantity)||0,x.product_id]).catch(()=>{});
-        }
-      }
-      await renewedQuery(`DELETE FROM public.cerood_shop_order_items WHERE order_id=?`,[order.id]).catch(()=>{});
-      await renewedQuery(`DELETE FROM public.cerood_shop_orders WHERE id=?`,[order.id]).catch(()=>{});
-      throw inner;
+app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  let client,committed=false;
+  try{
+    if(!shopCodEnabled())return res.status(503).json({success:false,message:'Cash on Delivery is currently unavailable.'});
+    const requestId=shopCleanText(req.body?.request_id,80);
+    if(!shopUuid(requestId))return res.status(400).json({success:false,message:'Invalid checkout request.'});
+    const address=shopAddress(req.body?.address),items=shopItems(req.body?.items);
+    client=await db.getClient();
+    const query=(sql,params=[])=>{let n=0;return client.query(sql.replace(/\?/g,()=>'$'+(++n)),params);};
+    await client.query('BEGIN');
+    await client.query('SELECT pg_advisory_xact_lock(hashtext($1))',[requestId]);
+    const existing=await query('SELECT * FROM public.cerood_shop_orders WHERE request_id=? LIMIT 1',[requestId]);
+    if(existing.length){
+      const prior=existing[0];
+      if(prior.customer_phone!==address.phone||(prior.customer_id&&String(prior.customer_id)!==String(req.ceroodCustomerId||'')))
+        throw Object.assign(new Error('Checkout request conflicts with an existing order.'),{status:409});
+      const savedItems=await query('SELECT * FROM public.cerood_shop_order_items WHERE order_id=? ORDER BY id',[prior.id]);
+      if(!shopCheckoutMatches(prior,savedItems,address,items))
+        throw Object.assign(new Error('This checkout request already belongs to a different cart or address. Check My Orders before starting a new checkout.'),{status:409});
+      await client.query('COMMIT');committed=true;
+      return res.json({success:true,order:{...prior,items:savedItems},idempotent:true});
     }
-
-    return res.status(201).json({success:true,order:await shopOrderWithItems(order)});
+    const {lines,subtotal,delivery_fee:deliveryFee,total}=await shopResolveCheckout(query,items,true);
+    if(req.body?.expected_total!=null&&(!Number.isFinite(Number(req.body.expected_total))||Math.abs(Number(req.body.expected_total)-total)>0.005))
+      throw Object.assign(new Error('Price changed. Check delivery and confirm the new total before ordering.'),{status:409});
+    const rows=await query(`INSERT INTO public.cerood_shop_orders
+      (request_id,customer_id,customer_name,customer_phone,customer_email,delivery_address,
+       subtotal,delivery_fee,total,currency,status,payment_method,payment_status)
+      VALUES (?::uuid,?,?,?,?,?::jsonb,?,?,?,'INR','confirmed','cod','cod_pending') RETURNING *`,
+      [requestId,req.ceroodCustomerId||null,address.name,address.phone,shopCleanText(req.body?.email,200)||null,
+       JSON.stringify(address),subtotal,deliveryFee,total]);
+    const order=rows[0];
+    for(const line of lines){
+      const changed=line.variant
+        ? await query(`UPDATE public.cerood_product_variants SET stock=stock-?,updated_at=NOW()
+            WHERE id=? AND product_id=? AND is_active=true AND stock>=? RETURNING id`,[line.quantity,line.variant_id,line.p.id,line.quantity])
+        : await query(`UPDATE public.cerood_shop_products SET stock=stock-?,updated_at=NOW()
+            WHERE id=? AND status='published' AND approval_status='approved' AND stock>=? RETURNING id`,[line.quantity,line.p.id,line.quantity]);
+      if(!changed.length)throw Object.assign(new Error('Stock changed. Refresh your cart and try again.'),{status:409});
+      await query(`INSERT INTO public.cerood_shop_order_items
+        (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,variant_id,variant_sku,variant_values)
+        VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?,?::uuid,?,?::jsonb)`,
+        [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,
+         line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
+    }
+    const savedItems=await query('SELECT * FROM public.cerood_shop_order_items WHERE order_id=? ORDER BY id',[order.id]);
+    await client.query('COMMIT');committed=true;
+    return res.status(201).json({success:true,order:{...order,items:savedItems}});
   }catch(error){
-    console.error('Main Store COD checkout:',error);
-    return res.status(error.status||503).json({success:false,message:error.status?error.message:'Unable to place Main Store order.'});
+    console.error('Main Store COD checkout:',error.message);
+    return res.status(error.status||503).json({success:false,message:error.status?error.message:'Unable to place Main Store order. Retry the same checkout request.'});
+  }finally{
+    if(client){if(!committed)await client.query('ROLLBACK').catch(()=>{});client.release();}
   }
+});
+
+// Guest receipt UUID is a secret capability; phone/order ID alone never grants access.
+app.post('/api/shop/device-orders',async(req,res)=>{
+  res.set('Cache-Control','no-store');
+  const receipts=req.body?.receipts;
+  if(!Array.isArray(receipts)||receipts.length>30||receipts.some(x=>!shopUuid(x?.id)||!shopUuid(x?.request_id)))
+    return res.status(400).json({success:false,message:'Invalid device receipts.'});
+  try{
+    const orders=[];
+    for(const x of receipts){
+      const rows=await renewedQuery(`SELECT id,customer_name,subtotal,delivery_fee,total,currency,status,
+        payment_method,payment_status,created_at,updated_at FROM public.cerood_shop_orders
+        WHERE id=? AND request_id=? AND payment_method='cod' LIMIT 1`,[x.id,x.request_id]);
+      if(rows.length)orders.push(await shopOrderWithItems(rows[0]));
+    }
+    orders.sort((a,b)=>new Date(b.created_at)-new Date(a.created_at));
+    return res.json({success:true,orders});
+  }catch(error){return res.status(503).json({success:false,message:'Order history temporarily unavailable.'});}
 });
 
 app.get('/api/shop/customer-orders',renewedCustomerSession,async(req,res)=>{
@@ -12745,7 +12793,7 @@ function ceroodAddressPayload(body) {
     };
 
     if (!out.full_name || !out.address_line1 || !out.state ||
-        !/^[6-9]\d{9}$/.test(out.phone) || !/^\d{6}$/.test(out.pincode)) {
+        !/^[6-9]\d{9}$/.test(out.phone) || !/^[1-9]\d{5}$/.test(out.pincode)) {
         const error = new Error('Enter a valid name, mobile number, address, state and pincode.');
         error.status = 400;
         throw error;
@@ -12880,7 +12928,7 @@ app.delete('/api/customer/addresses/:id', renewedCustomerSession, async (req, re
     }
 });
 
-app.post('/api/renewed/customer-login',(req,res)=>{
+app.post(['/api/customer/login','/api/renewed/customer-login'],(req,res)=>{
   res.set('Cache-Control','no-store');
   const phone=String(req.body?.phone||'').trim(),password=String(req.body?.password||'');
   if(!/^[6-9]\d{9}$/.test(phone)||!password||password.length>256)
@@ -14100,7 +14148,7 @@ app.post('/api/cosmetics/create-razorpay-order',optionalCeroodCustomerSession, a
   const id=String(req.body?.request_id||'').trim();
   if(!/^[0-9a-f]{8}(-[0-9a-f]{4}){3}-[0-9a-f]{12}$/i.test(id))
    return res.status(400).json({success:false,message:'Valid checkout request ID required.'});
-  if(process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true') {
+  if(!req.ceroodCustomerPhone && process.env.COSMETICS_GUEST_CHECKOUT_ENABLED!=='true') {
    const token=String(req.body?.accessToken||'').trim();
    if(!token||token.length>8192)return res.status(401).json({success:false,message:'Verify mobile OTP before ordering.'});
    const verified=await verifyMsg91AccessToken(token);
@@ -14351,7 +14399,7 @@ app.get('/api/admin/cosmetics/orders',async(req,res)=>{
  try{const rows=await cosmeticsDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at FROM public.cosmetics_orders ORDER BY created_at DESC LIMIT 200`);return res.json({success:true,orders:rows});}catch(e){return beautyErr(res,e);}
 });
 app.patch('/api/admin/cosmetics/orders/:id/tracking',async(req,res)=>{
- try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status_timestamps=CASE WHEN status IS DISTINCT FROM ? THEN jsonb_set(COALESCE(status_timestamps,'{}'::jsonb),ARRAY[?]::text[],to_jsonb(NOW()),true) ELSE status_timestamps END,status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') RETURNING id,status,tracking_number,courier_name,tracking_url,status_timestamps`,[status,status,status,courier,number,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
+ try{if(!/^[0-9a-f-]{36}$/i.test(req.params.id))return res.status(400).json({success:false,message:'Invalid order ID.'});const status=String(req.body?.status||'').trim(),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))return res.status(400).json({success:false,message:'Invalid delivery status.'});const courier=String(req.body?.courier_name||'').trim().slice(0,100),number=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))return res.status(400).json({success:false,message:'Tracking URL must use HTTPS.'});const rows=await cosmeticsDb(`UPDATE public.cosmetics_orders SET status_timestamps=CASE WHEN status IS DISTINCT FROM ? THEN jsonb_set(COALESCE(status_timestamps,'{}'::jsonb),ARRAY[?]::text[],to_jsonb(NOW()),true) ELSE status_timestamps END,status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') AND array_position(ARRAY['confirmed','processing','packed','shipped','out_for_delivery','delivered']::text[],status) <= array_position(ARRAY['confirmed','processing','packed','shipped','out_for_delivery','delivered']::text[],?) RETURNING id,status,tracking_number,courier_name,tracking_url,status_timestamps`,[status,status,status,courier,number,url,req.params.id,status]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){return beautyErr(res,e);}
 });
 
 
@@ -14503,7 +14551,7 @@ app.post('/api/clothing/create-razorpay-order',optionalCeroodCustomerSession,asy
  try{let {address,counts}=fashionRequest(req.body||{});address=bindCheckoutToCeroodCustomer(req,address);const id=String(req.body?.request_id||'');if(!fashionUUID(id))fashionBad('Valid checkout request ID required.');await fashionVerifiedCustomer(req.body,address,req);
  c=await db.getClient();await c.query('BEGIN');await c.query('SELECT pg_advisory_xact_lock(hashtext($1))',[id]);const existing=await c.query('SELECT id,customer_phone,payment_method,payment_status,razorpay_order_id,total FROM public.clothing_orders WHERE id=$1 FOR UPDATE',[id]);
  if(existing.length){const o=existing[0];await c.query('COMMIT');if(o.customer_phone!==address.phone||o.payment_method!=='razorpay')fashionBad('Checkout request conflict.',409);if(o.payment_status==='paid')return res.json({success:true,already_paid:true,order_id:id,total:Number(o.total)});if(o.payment_status==='payment_review'||!o.razorpay_order_id)fashionBad('Payment requires support review.',409);return res.json({success:true,order_id:id,razorpay_order_id:o.razorpay_order_id,key_id:process.env.RAZORPAY_KEY_ID,amount:Math.round(Number(o.total)*100),currency:'INR',total:Number(o.total)});}
- const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]),t=fashionTotals(products,counts);t=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',t);
+ const ids=[...counts.keys()],products=await c.query('SELECT id,name,variant,price,stock,status FROM public.clothing_products WHERE id=ANY($1::text[]) ORDER BY id FOR UPDATE',[ids]);let t=fashionTotals(products,counts);t=await ceroodApplyMarketplacePrepaidDiscount(c,'clothing',t);
  const r=await fashionRazorpay().orders.create({amount:Math.round(t.total*100),currency:'INR',receipt:id,notes:{business:'cerood_fashion',fashion_order_id:id}});
  await c.query(`INSERT INTO public.clothing_orders(id,request_id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,discount,total,payment_method,payment_status,status,razorpay_order_id) VALUES($1,$2,$3,$4,$5::jsonb,$6,$7,$8,$9,'razorpay','pending','pending',$10)`,[id,id,address.full_name,address.phone,JSON.stringify(address),t.subtotal,t.delivery_fee,t.discount,t.total,r.id]);
  for (const line of t.items) {
@@ -14564,7 +14612,7 @@ app.post('/api/clothing/verify-razorpay-payment',async(req,res)=>{res.set('Cache
 app.post('/api/clothing/recover-razorpay-payment',async(req,res)=>{res.set('Cache-Control','no-store');try{const id=String(req.body?.order_id||''),phone=String(req.body?.phone||'');if(!fashionUUID(id)||!/^[6-9]\d{9}$/.test(phone))fashionBad('Valid order ID and phone required.');const rows=await clothingDb(`SELECT id,customer_phone,total,payment_status,razorpay_order_id FROM public.clothing_orders WHERE id=? AND payment_method='razorpay'`,[id]);if(!rows.length||rows[0].customer_phone!==phone)fashionBad('Order not found.',404);const o=rows[0];if(o.payment_status==='paid')return res.json({success:true,paid:true,order_id:id,total:Number(o.total)});if(o.payment_status==='payment_review')return res.json({success:true,paid:false,payment_state:'payment_review',order_id:id});if(!fashionOnlineOn())fashionBad('Fashion recovery temporarily unavailable.',503);const payments=await fashionRazorpay().orders.fetchPayments(o.razorpay_order_id),captured=(payments.items||[]).find(x=>x.status==='captured'&&x.order_id===o.razorpay_order_id);if(!captured)return res.json({success:true,paid:false,order_id:id});const state=await fashionFinalize(o.razorpay_order_id,captured.id);res.json({success:true,paid:state==='paid',payment_state:state,order_id:id,total:Number(o.total)});}catch(e){fashionFail(res,e);}});
 app.post('/api/clothing/razorpay-webhook',async(req,res)=>{try{const secret=process.env.CLOTHING_RAZORPAY_WEBHOOK_SECRET||'',signature=String(req.get('x-razorpay-signature')||'');if(!secret||!Buffer.isBuffer(req.body)||!/^[0-9a-f]{64}$/i.test(signature))return res.sendStatus(401);const expected=crypto.createHmac('sha256',secret).update(req.body).digest('hex');if(!crypto.timingSafeEqual(Buffer.from(expected,'hex'),Buffer.from(signature,'hex')))return res.sendStatus(401);const event=JSON.parse(req.body.toString('utf8'));if(event.event==='payment.captured'){const p=event.payload?.payment?.entity;if(p?.order_id&&p?.id){const state=await fashionFinalize(p.order_id,p.id);if(state==='not_captured')return res.sendStatus(503);}}return res.json({success:true});}catch(e){console.error('Fashion webhook:',e.message);return res.sendStatus(503);}});
 app.get('/api/admin/clothing/orders',async(req,res)=>{try{const rows=await clothingDb(`SELECT id,customer_name,customer_phone,delivery_address,subtotal,delivery_fee,total,payment_method,payment_status,status,tracking_number,courier_name,tracking_url,created_at FROM public.clothing_orders ORDER BY created_at DESC LIMIT 300`);res.json({success:true,orders:rows});}catch(e){fashionFail(res,e);}});
-app.patch('/api/admin/clothing/orders/:id/tracking',async(req,res)=>{try{if(!fashionUUID(req.params.id))fashionBad('Invalid Fashion order ID.');const status=String(req.body?.status||''),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))fashionBad('Invalid delivery status.');const courier=String(req.body?.courier_name||'').trim().slice(0,100),tracking=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))fashionBad('Tracking URL must use HTTPS.');const rows=await clothingDb(`UPDATE public.clothing_orders SET status_timestamps=CASE WHEN status IS DISTINCT FROM ? THEN jsonb_set(COALESCE(status_timestamps,'{}'::jsonb),ARRAY[?]::text[],to_jsonb(NOW()),true) ELSE status_timestamps END,status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') RETURNING id,status,tracking_number,courier_name,tracking_url,status_timestamps`,[status,status,status,courier,tracking,url,req.params.id]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){fashionFail(res,e);}});
+app.patch('/api/admin/clothing/orders/:id/tracking',async(req,res)=>{try{if(!fashionUUID(req.params.id))fashionBad('Invalid Fashion order ID.');const status=String(req.body?.status||''),allowed=['confirmed','processing','packed','shipped','out_for_delivery','delivered'];if(!allowed.includes(status))fashionBad('Invalid delivery status.');const courier=String(req.body?.courier_name||'').trim().slice(0,100),tracking=String(req.body?.tracking_number||'').trim().slice(0,120),url=String(req.body?.tracking_url||'').trim().slice(0,500);if(url&&!/^https:\/\//i.test(url))fashionBad('Tracking URL must use HTTPS.');const rows=await clothingDb(`UPDATE public.clothing_orders SET status_timestamps=CASE WHEN status IS DISTINCT FROM ? THEN jsonb_set(COALESCE(status_timestamps,'{}'::jsonb),ARRAY[?]::text[],to_jsonb(NOW()),true) ELSE status_timestamps END,status=?,courier_name=?,tracking_number=?,tracking_url=?,updated_at=NOW() WHERE id=? AND (payment_method='cod' OR payment_status='paid') AND array_position(ARRAY['confirmed','processing','packed','shipped','out_for_delivery','delivered']::text[],status) <= array_position(ARRAY['confirmed','processing','packed','shipped','out_for_delivery','delivered']::text[],?) RETURNING id,status,tracking_number,courier_name,tracking_url,status_timestamps`,[status,status,status,courier,tracking,url,req.params.id,status]);return rows.length?res.json({success:true,order:rows[0]}):res.status(404).json({success:false,message:'Order not found.'});}catch(e){fashionFail(res,e);}});
 
 
 

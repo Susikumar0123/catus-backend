@@ -128,7 +128,7 @@ module.exports = function registerCeroodCategories(
                         attribute_schema,
                         sort_order
 
-                    FROM public.cerood_shop_categories
+                    FROM public.cerood_product_categories
 
                     WHERE marketplace = $1
                       AND is_active = true
@@ -190,7 +190,7 @@ module.exports = function registerCeroodCategories(
                     `
                     SELECT *
 
-                    FROM public.cerood_shop_categories
+                    FROM public.cerood_product_categories
 
                     WHERE (
                         $1::text = ''
@@ -312,27 +312,37 @@ module.exports = function registerCeroodCategories(
                 const rows = await query(
 
                     `
-                    INSERT INTO public.cerood_shop_categories
+                    WITH parent AS (
+                        SELECT id,category_level,category_path,name
+                        FROM public.cerood_product_categories
+                        WHERE id=$2::uuid AND marketplace=$1 AND is_active=true
+                        FOR UPDATE
+                    ), inserted AS (
+                    INSERT INTO public.cerood_product_categories
                     (
                         marketplace,
                         parent_id,
                         name,
                         slug,
                         attribute_schema,
-                        sort_order
+                        sort_order,
+                        category_level,
+                        is_leaf,
+                        category_path
                     )
-
-                    VALUES
-                    (
-                        $1,
-                        $2,
-                        $3,
-                        $4,
-                        $5::jsonb,
-                        $6
-                    )
-
+                    SELECT $1,$2::uuid,$3,$4,$5::jsonb,$6,
+                        COALESCE((SELECT category_level+1 FROM parent),1),true,
+                        CASE WHEN $2::uuid IS NULL THEN $3::text
+                             ELSE (SELECT COALESCE(category_path,name)||' > '||$3::text FROM parent) END
+                    WHERE $2::uuid IS NULL OR EXISTS(SELECT 1 FROM parent)
                     RETURNING *
+                    ), updated_parent AS (
+                        UPDATE public.cerood_product_categories
+                        SET is_leaf=false,updated_at=now()
+                        WHERE id=$2::uuid AND EXISTS(SELECT 1 FROM inserted)
+                        RETURNING id
+                    )
+                    SELECT * FROM inserted
                     `,
 
                     [
@@ -353,6 +363,8 @@ module.exports = function registerCeroodCategories(
 
                 );
 
+
+                if (!rows.length) throw bad('Choose an active parent category in the same marketplace.');
 
                 return res
                     .status(201)
@@ -570,7 +582,7 @@ module.exports = function registerCeroodCategories(
                 const rows = await query(
 
                     `
-                    UPDATE public.cerood_shop_categories
+                    UPDATE public.cerood_product_categories
 
                     SET
                         ${sets},
