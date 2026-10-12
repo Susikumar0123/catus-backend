@@ -2,6 +2,30 @@
 function register(app,db,auth){
  const q=(sql,args=[])=>new Promise((resolve,reject)=>db.query(sql,args,(e,r)=>e?reject(e):resolve(r||[])));
  const handle=fn=>async(req,res)=>{res.set('Cache-Control','no-store');try{await fn(req,res)}catch(e){res.status(e.status||503).json({success:false,message:e.status?e.message:'Seller workspace unavailable. Refresh or contact support with the failing section.'})}};
+ app.get('/api/sellers/workspace/payment-review',auth,handle(async(req,res)=>{
+  const raw=String(req.query?.page??'1');
+  if(!/^[1-9]\d{0,5}$/.test(raw))throw Object.assign(Error('Choose a valid payment review page.'),{status:400});
+  const page=Number(raw),limit=20,parts=[];
+  for(const [source,items,parent] of [['shop','cerood_shop_order_items','cerood_shop_orders'],['renewed','renewed_order_items','renewed_orders'],['cosmetics','cosmetics_order_items','cosmetics_orders'],['clothing','clothing_order_items','clothing_orders']]){
+   const relations=(await q('SELECT to_regclass($1) AS items,to_regclass($2) AS orders',['public.'+items,'public.'+parent]))[0];
+   if(!relations?.items||!relations?.orders)continue;
+   const shop=source==='shop';
+   parts.push(`SELECT '${source}'::text AS source,i.id::text AS order_item_id,i.order_id::text AS order_id,
+    to_jsonb(i)->>'product_name' AS product_name,to_jsonb(i)->>'quantity' AS quantity,to_jsonb(i)->>'line_total' AS product_value,
+    to_jsonb(o)->>'created_at' AS created_at,to_jsonb(o)->>'payment_method' AS payment_method,
+    ${shop?"CASE WHEN EXISTS(SELECT 1 FROM public.cerood_shop_return_requests r WHERE r.order_item_id=i.id AND r.status NOT IN ('rejected','replaced')) THEN 'return_review' ELSE 'not_prepared' END":"'legacy_review'::text"} AS review_reason
+    FROM public.${items} i JOIN public.${parent} o ON o.id=i.order_id
+    WHERE to_jsonb(i)->>'seller_id'=$1 AND to_jsonb(o)->>'status'='delivered'
+    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')
+    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))
+    ${shop?'AND NOT EXISTS(SELECT 1 FROM public.cerood_shop_settlements s WHERE s.order_item_id=i.id)':''}`);
+  }
+  if(!parts.length)return res.json({success:true,items:[],page,total:0,page_size:limit,has_more:false});
+  const cte='WITH review AS ('+parts.join(' UNION ALL ')+') ',id=String(req.seller.id);
+  const total=Number((await q(cte+'SELECT count(*)::int AS total FROM review',[id]))[0].total);
+  const rows=await q(cte+'SELECT * FROM review ORDER BY created_at DESC NULLS LAST,source,order_item_id LIMIT $2 OFFSET $3',[id,limit,(page-1)*limit]);
+  res.json({success:true,items:rows,page,total,page_size:limit,has_more:page*limit<total,note:'Delivered items for payment review, not a payable balance. Legacy items may already have been paid outside this ledger. COD receipt, returns and agreed deductions must be verified by admin.'});
+ }));
  app.get('/api/sellers/workspace/summary',auth,handle(async(req,res)=>{
   const id=req.seller.id;
   const catalog=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE approval_status='pending')::int AS pending,count(*) FILTER(WHERE approval_status='rejected')::int AS rejected,count(*) FILTER(WHERE approval_status='approved')::int AS approved FROM cerood_seller_catalog_submissions WHERE seller_id=$1",[id]))[0];
@@ -15,7 +39,7 @@ function register(app,db,auth){
     count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='shipped' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS shipped,
     count(*) FILTER(WHERE to_jsonb(o)->>'status'='delivered')::int AS delivered
     FROM ${items} i JOIN ${parent} o ON o.id=i.order_id WHERE to_jsonb(i)->>'seller_id'=$1
-    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded')
+    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded','expired')
     AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))
     AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')`,[String(id)]))[0];orders.push({marketplace:market,...row});
   }
