@@ -27,7 +27,7 @@ function register(app,db,auth){
    FROM cerood_shop_settlements s WHERE s.seller_id=$1`,[id]))[0];
   finance.recorded_recovered=0;if(await require('./cerood-shop-finance-reconciliation').hasTable(q,'cerood_shop_settlement_recoveries'))finance.recorded_recovered=(await q('SELECT COALESCE(sum(r.recovered_amount),0) AS amount FROM cerood_shop_settlement_recoveries r JOIN cerood_shop_settlements s ON s.id=r.settlement_id WHERE s.seller_id=$1',[id]))[0].amount;finance.retained_paid=(Number(finance.recorded_paid)-Number(finance.recorded_recovered)).toFixed(2);
   const returns=(await q("SELECT count(*)::int AS total,count(*) FILTER(WHERE r.status='requested')::int AS needs_response,count(*) FILTER(WHERE r.status NOT IN ('rejected','refunded','replaced'))::int AS open FROM cerood_shop_return_requests r JOIN cerood_shop_order_items i ON i.id=r.order_item_id WHERE i.seller_id=$1",[id]))[0];
-  res.json({success:true,catalog,orders,finance,returns,finance_scope:'Recorded Main Store settlements only; verify actual bank receipt. No automatic payout.'});
+  res.json({success:true,catalog,orders,finance,returns,finance_scope:'Recorded connected-store settlements only; verify actual bank receipt. No automatic payout.',payment_coverage:{ledger_source:'shop',legacy_delivered_items:orders.filter(r=>r.marketplace!=='Main Store').reduce((n,r)=>n+Number(r.delivered||0),0),automatic_payout:false}});
  }));
  app.get('/api/sellers/workspace/report',auth,handle(async(req,res)=>{
   const range=require('./cerood-seller-shop-report').dates(req.query),markets=[];
