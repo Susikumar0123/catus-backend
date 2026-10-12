@@ -1,4 +1,5 @@
 'use strict';
+const accounting=require('./cerood-order-accounting');
 function register(app,db,auth){
  const q=(sql,args=[])=>new Promise((resolve,reject)=>db.query(sql,args,(e,r)=>e?reject(e):resolve(r||[])));
  const handle=fn=>async(req,res)=>{res.set('Cache-Control','no-store');try{await fn(req,res)}catch(e){res.status(e.status||503).json({success:false,message:e.status?e.message:'Seller workspace unavailable. Refresh or contact support with the failing section.'})}};
@@ -11,13 +12,13 @@ function register(app,db,auth){
    if(!relations?.items||!relations?.orders)continue;
    const shop=source==='shop';
    parts.push(`SELECT '${source}'::text AS source,i.id::text AS order_item_id,i.order_id::text AS order_id,
-    to_jsonb(i)->>'product_name' AS product_name,to_jsonb(i)->>'quantity' AS quantity,to_jsonb(i)->>'line_total' AS product_value,
+    to_jsonb(i)->>'product_name' AS product_name,to_jsonb(i)->>'quantity' AS quantity,${accounting.itemValue()} AS product_value,
     to_jsonb(o)->>'created_at' AS created_at,to_jsonb(o)->>'payment_method' AS payment_method,
     ${shop?"CASE WHEN EXISTS(SELECT 1 FROM public.cerood_shop_return_requests r WHERE r.order_item_id=i.id AND r.status NOT IN ('rejected','replaced')) THEN 'return_review' ELSE 'not_prepared' END":"'legacy_review'::text"} AS review_reason
     FROM public.${items} i JOIN public.${parent} o ON o.id=i.order_id
-    WHERE to_jsonb(i)->>'seller_id'=$1 AND to_jsonb(o)->>'status'='delivered'
-    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')
-    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))
+    WHERE to_jsonb(i)->>'seller_id'=$1 AND ${accounting.delivery(source)}='delivered'
+    AND ${accounting.eligible(source)}
+    AND COALESCE(to_jsonb(o)->>'fulfillment_outcome','') NOT IN ('rto','customer_returned')
     ${shop?'AND NOT EXISTS(SELECT 1 FROM public.cerood_shop_settlements s WHERE s.order_item_id=i.id)':''}`);
   }
   if(!parts.length)return res.json({success:true,items:[],page,total:0,page_size:limit,has_more:false});
@@ -33,15 +34,13 @@ function register(app,db,auth){
   for(const [market,items,parent] of [['Main Store','cerood_shop_order_items','cerood_shop_orders'],['Renewed','renewed_order_items','renewed_orders'],['Beauty','cosmetics_order_items','cosmetics_orders'],['Fashion','clothing_order_items','clothing_orders']]){
    if(!(await q('SELECT to_regclass($1) AS relation',['public.'+items]))[0]?.relation)continue;
    const row=(await q(`SELECT count(*)::int AS items,
-    count(*) FILTER(WHERE COALESCE(to_jsonb(i)->>'seller_order_status','new')='new' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS new,
-    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='accepted' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS accepted,
-    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='packed' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS packed,
-    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='shipped' AND COALESCE(to_jsonb(o)->>'status','')<>'delivered')::int AS shipped,
-    count(*) FILTER(WHERE to_jsonb(o)->>'status'='delivered')::int AS delivered
+    count(*) FILTER(WHERE COALESCE(to_jsonb(i)->>'seller_order_status','new')='new' AND ${accounting.delivery(market)}<>'delivered')::int AS new,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='accepted' AND ${accounting.delivery(market)}<>'delivered')::int AS accepted,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='packed' AND ${accounting.delivery(market)}<>'delivered')::int AS packed,
+    count(*) FILTER(WHERE to_jsonb(i)->>'seller_order_status'='shipped' AND ${accounting.delivery(market)}<>'delivered')::int AS shipped,
+    count(*) FILTER(WHERE ${accounting.delivery(market)}='delivered')::int AS delivered
     FROM ${items} i JOIN ${parent} o ON o.id=i.order_id WHERE to_jsonb(i)->>'seller_id'=$1
-    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded','expired')
-    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))
-    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')`,[String(id)]))[0];orders.push({marketplace:market,...row});
+    AND ${accounting.eligible(market)}`,[String(id)]))[0];orders.push({marketplace:market,...row});
   }
   const finance=(await q(`SELECT count(*) FILTER(WHERE s.status='paid')::int AS paid_records,
    COALESCE(sum(s.gross_amount-s.deductions) FILTER(WHERE s.status='paid'),0) AS recorded_paid,
@@ -57,15 +56,13 @@ function register(app,db,auth){
   const range=require('./cerood-seller-shop-report').dates(req.query),markets=[];
   for(const [market,items,parent] of [['Main Store','cerood_shop_order_items','cerood_shop_orders'],['Renewed','renewed_order_items','renewed_orders'],['Beauty','cosmetics_order_items','cosmetics_orders'],['Fashion','clothing_order_items','clothing_orders']]){
    if(!(await q('SELECT to_regclass($1) AS relation',['public.'+items]))[0]?.relation)continue;
-   const row=(await q(`SELECT count(DISTINCT i.order_id)::int AS orders,COALESCE(sum(i.quantity),0)::int AS units,COALESCE(sum(i.line_total),0) AS product_value,
-    COALESCE(sum(i.line_total) FILTER(WHERE to_jsonb(o)->>'status'='delivered'),0) AS delivered_value
+   const row=(await q(`SELECT count(DISTINCT i.order_id)::int AS orders,COALESCE(sum(i.quantity),0)::int AS units,COALESCE(sum(${accounting.itemValue()}),0) AS product_value,
+    COALESCE(sum(${accounting.itemValue()}) FILTER(WHERE ${accounting.delivery(market)}='delivered'),0) AS delivered_value
     FROM ${items} i JOIN ${parent} o ON o.id=i.order_id WHERE to_jsonb(i)->>'seller_id'=$1
     AND o.created_at>=($2::date::timestamp AT TIME ZONE 'Asia/Kolkata') AND o.created_at<(($3::date+1)::timestamp AT TIME ZONE 'Asia/Kolkata')
-    AND COALESCE(to_jsonb(o)->>'status','') NOT IN ('pending','payment_review','cancelled','canceled','failed','refunded','expired')
-    AND COALESCE(to_jsonb(i)->>'seller_order_status','new') NOT IN ('rejected','cancelled')
-    AND (to_jsonb(o)->>'payment_method'='cod' OR to_jsonb(o)->>'payment_status' IN ('paid','captured','success'))`,[String(req.seller.id),range.from,range.to]))[0];markets.push({marketplace:market,...row});
+    AND ${accounting.eligible(market)}`,[String(req.seller.id),range.from,range.to]))[0];markets.push({marketplace:market,...row});
   }
-  res.json({success:true,range,markets,note:'IST order dates. Gross purchased product values exclude shipping and refund/commission/tax adjustments; they are not payout or net earnings.'});
+  res.json({success:true,range,markets,note:'IST order dates. Saved item values include item-level discounts where recorded; order-level discounts, shipping, refunds, commission and tax are not allocated. These values are not payout or net earnings.'});
  }));
  app.get('/api/sellers/workspace/quality',auth,handle(async(req,res)=>{
   const rows=await q(`SELECT s.id,s.marketplace,s.approval_status,s.rejection_reason,s.published_product_id,s.product_data,s.updated_at,
