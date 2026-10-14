@@ -75,6 +75,23 @@ app.use('/api/shop/razorpay-webhook', express.raw({type:'application/json',limit
 app.use('/api/clothing/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/home-services/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use(express.json());
+
+// Reject unresolved template placeholders rather than serving an indexable page.
+app.use((req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'HEAD') return next();
+    let pathname;
+    try { pathname = decodeURIComponent(req.path); }
+    catch (_) { return res.status(400).set('X-Robots-Tag', 'noindex').send('Invalid URL'); }
+    const unresolved = /[{}]|\$\{|<|>/.test(pathname);
+    const badSeoQuery = req.path.startsWith('/api/seo-') &&
+        ['state', 'district', 'location', 'service'].some(key =>
+            req.query[key] != null && !/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(String(req.query[key])));
+    if (unresolved || badSeoQuery) {
+        return res.status(404).set('X-Robots-Tag', 'noindex').set('Cache-Control', 'no-store').send('Page not found');
+    }
+    next();
+});
+
 app.get('/health', (req, res) => {
     res.status(200).send('OK');
 });
