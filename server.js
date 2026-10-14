@@ -9303,7 +9303,13 @@ app.get('/api/sitemap/:page', (req, res) => {
         location_name AS name,
         location_slug AS slug,
         district,
-        state
+        state,
+        ROW_NUMBER() OVER (
+            PARTITION BY
+                TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER(TRIM(state)), '[^a-z0-9]+', '-', 'g')),
+                TRIM(BOTH '-' FROM REGEXP_REPLACE(LOWER(TRIM(district)), '[^a-z0-9]+', '-', 'g'))
+            ORDER BY LOWER(TRIM(state)), LOWER(TRIM(district)), id
+        ) AS district_hub_rank
     FROM public.seo_locations
     WHERE is_active = TRUE
       AND location_slug IS NOT NULL
@@ -9378,6 +9384,8 @@ if (page === 1) {
     const districtHubSet = new Set();
 
     (locations || []).forEach(location => {
+        // Emit each district hub only with its first location across all batches.
+        if (Number(location.district_hub_rank) !== 1) return;
 
         const stateSlug =
             sitemapSlugify(location.state);
