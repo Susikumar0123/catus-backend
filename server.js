@@ -8928,20 +8928,28 @@ function sitemapEscapeXml(value) {
 // ==========================================
 const CEROOD_STORE_SITEMAP_PAGE_SIZE = 10000;
 const CEROOD_STORE_SITEMAPS = Object.freeze({
-    renewed: {
-        table: 'public.renewed_products',
-        filter: "status = 'published'",
-        productPath: '/renewed-product.html'
-    },
-    beauty: {
-        table: 'public.cosmetics_products',
-        filter: "status = 'published' AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE)",
-        productPath: '/cosmetics-product.html'
-    },
-    fashion: {
-        table: 'public.clothing_products',
-        filter: "status = 'published'",
-        productPath: '/clothing-product.html'
+    ecommerce: {
+        // All departments share the existing shop-product page.
+        // Keep the store discriminator because IDs can overlap across tables.
+        table: `(SELECT id::text AS id, updated_at, 'general'::text AS store
+                   FROM public.cerood_shop_products
+                  WHERE status = 'published' AND approval_status = 'approved'
+                 UNION ALL
+                 SELECT id::text, updated_at, 'renewed'::text
+                   FROM public.renewed_products
+                  WHERE status = 'published'
+                    AND (seller_id IS NULL OR approval_status = 'approved')
+                 UNION ALL
+                 SELECT id::text, updated_at, 'beauty'::text
+                   FROM public.cosmetics_products
+                  WHERE status = 'published'
+                    AND (expiry_date IS NULL OR expiry_date >= CURRENT_DATE)
+                 UNION ALL
+                 SELECT id::text, updated_at, 'fashion'::text
+                   FROM public.clothing_products
+                  WHERE status = 'published') AS ecommerce_products`,
+        filter: 'TRUE',
+        productPath: '/shop-product.html'
     }
 });
 const ceroodSitemapQuery = (sql, params = []) => new Promise((resolve, reject) => {
@@ -8949,7 +8957,8 @@ const ceroodSitemapQuery = (sql, params = []) => new Promise((resolve, reject) =
 });
 
 app.get('/api/sitemaps/:division/:page.xml', async (req, res) => {
-    const cfg = CEROOD_STORE_SITEMAPS[req.params.division];
+    const cfg = Object.prototype.hasOwnProperty.call(CEROOD_STORE_SITEMAPS, req.params.division)
+        ? CEROOD_STORE_SITEMAPS[req.params.division] : null;
     const rawPage = String(req.params.page || '');
     if (!cfg || !/^[1-9]\d{0,7}$/.test(rawPage)) {
         return res.status(404).type('text/plain').send('Sitemap not found');
@@ -8965,15 +8974,16 @@ app.get('/api/sitemaps/:division/:page.xml', async (req, res) => {
         }
         const offset = (page - 1) * CEROOD_STORE_SITEMAP_PAGE_SIZE;
         const products = await ceroodSitemapQuery(
-            `SELECT id, updated_at FROM ${cfg.table} WHERE ${cfg.filter}
-             ORDER BY id LIMIT ? OFFSET ?`,
+            `SELECT id, updated_at, store FROM ${cfg.table} WHERE ${cfg.filter}
+             ORDER BY store, id LIMIT ? OFFSET ?`,
             [CEROOD_STORE_SITEMAP_PAGE_SIZE, offset]
         );
         const base = 'https://www.cerood.com';
         const xml = '<?xml version="1.0" encoding="UTF-8"?>\n' +
             '<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n' +
             products.map(p => {
-                const loc = `${base}${cfg.productPath}?id=${encodeURIComponent(String(p.id))}`;
+                const storeQuery = p.store === 'general' ? '' : `&store=${encodeURIComponent(p.store)}`;
+                const loc = `${base}${cfg.productPath}?id=${encodeURIComponent(String(p.id))}${storeQuery}`;
                 const date = p.updated_at ? new Date(p.updated_at) : null;
                 const lastmod = date && !Number.isNaN(date.getTime())
                     ? `\n    <lastmod>${date.toISOString()}</lastmod>` : '';
