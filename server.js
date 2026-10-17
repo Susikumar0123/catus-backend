@@ -8841,8 +8841,13 @@ app.get(
             const location =
                 encodeURIComponent(req.params.location);
 
-            const newUrl =
-                `https://www.cerood.com/${state}/${district}/${location}/${encodeURIComponent(slug)}`;
+            // Match the canonical district URL already emitted by the sitemap.
+            // Avoid a district/district duplicate and a second redirect hop.
+            const sameLocation = String(req.params.district).trim().toLowerCase() ===
+                String(req.params.location).trim().toLowerCase();
+            const newUrl = sameLocation
+                ? `https://www.cerood.com/${state}/${district}/${encodeURIComponent(slug)}`
+                : `https://www.cerood.com/${state}/${district}/${location}/${encodeURIComponent(slug)}`;
 
             return res.redirect(301, newUrl);
         });
@@ -9353,11 +9358,7 @@ app.get('/api/sitemap/:page', (req, res) => {
 
 // Static pages only in sitemap-1
 if (page === 1) {
-    // Common Cerood homepage and separate Home Services homepage.
-    urls.push(
-        `${frontendBase}/`
-    );
-
+    // Only list the final homepage; / currently redirects to Home Services.
     urls.push(
         `${frontendBase}/home-services.html`
     );
@@ -9487,7 +9488,7 @@ urls.push(seoUrl);
                             const xml =
                                 `<?xml version="1.0" encoding="UTF-8"?>\n` +
                                 `<urlset xmlns="http://www.sitemaps.org/schemas/sitemap/0.9">\n` +
-                                urls
+                                [...new Set(urls)]
                                     .map(url =>
                                         `  <url>\n` +
                                         `    <loc>${sitemapEscapeXml(url)}</loc>\n` +
