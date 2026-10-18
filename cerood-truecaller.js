@@ -34,6 +34,8 @@ module.exports = function mountTruecaller(app, h) {
   if(!enabled())return res.status(503).json({success:false,message:'Truecaller is not configured.'});
   const id=String(req.body?.requestId||'');if(!/^[A-Za-z0-9_-]{43}$/.test(id))bad('Invalid request ID.');
   await prepare();
+  // Truecaller handshake has no access token. Acknowledge without completing login.
+  if(req.body?.status==='flow_invoked')return res.json({success:true});
   if(req.body?.status==='user_rejected'){
    await query("UPDATE public.cerood_truecaller_requests SET status='rejected',token_box=NULL WHERE request_id=? AND status='pending' AND expires_at>NOW()",[id]);return res.json({success:true});
   }
