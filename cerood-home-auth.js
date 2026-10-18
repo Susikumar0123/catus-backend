@@ -330,5 +330,7 @@ module.exports = function registerCeroodHomeServiceAuth(app, db, helpers = {}) {
 
     require('./cerood-truecaller')(app, { query, ensureSchema, sessionSecret, createSession, publicCustomer, bcrypt });
 
+    require('./cerood-google-auth')(app, { query, ensureSchema, sessionSecret, createSession, publicCustomer, requireHomeAuth });
+
     return { ensureSchema, requireHomeAuth };
 };
