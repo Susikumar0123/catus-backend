@@ -10,6 +10,7 @@ module.exports = function mountCeroodNotify(app, db, requireAdminAuth) {
   const fail = (res,e) => {console.error('Cerood Notify:',e.message);return res.status(500).json({success:false,message:'Notification service unavailable. Check server configuration and database migration.'});};
   const tokenHash = t => crypto.createHash('sha256').update(t).digest('hex');
   const validUrl = value => {try{const u=new URL(value,origin);return u.protocol==='https:'&&['cerood.com','www.cerood.com'].includes(u.hostname)?u.href:null;}catch{return null;}};
+  const validImage = value => {try{const u=new URL(value);return u.protocol==='https:'&&!u.username&&!u.password&&u.href.length<=2048?u.href:null;}catch{return null;}};
   const validSub = s => s && typeof s.endpoint==='string' && s.endpoint.startsWith('https://') && s.endpoint.length<2048 && s.keys && typeof s.keys.p256dh==='string' && typeof s.keys.auth==='string' && s.keys.p256dh.length<500 && s.keys.auth.length<200;
   const division = x => ['all','services','renewed','beauty','fashion'].includes(x)?x:'all';
   app.get('/api/notify/config',(req,res)=>res.json({success:true,enabled:configured,publicKey:configured?process.env.VAPID_PUBLIC_KEY:null}));
@@ -36,12 +37,15 @@ module.exports = function mountCeroodNotify(app, db, requireAdminAuth) {
     if(!configured)return res.status(503).json({success:false,message:'Configure VAPID keys on Render first.'});
     const title=String(req.body?.title||'').trim(),body=String(req.body?.body||'').trim(),d=division(req.body?.division),url=validUrl(req.body?.url);
     if(!title||title.length>75||!body||body.length>180||!url||!['all','services','renewed','beauty','fashion'].includes(req.body?.division))return res.status(400).json({success:false,message:'Title (1–75), message (1–180), division and cerood.com HTTPS link required.'});
+    const imageInput=String(req.body?.image||'').trim(),image=imageInput?validImage(imageInput):null;
+    const actionTitle=String(req.body?.actionTitle||'View details').trim();
+    if((imageInput&&!image)||!actionTitle||actionTitle.length>30)return res.status(400).json({success:false,message:'Use an HTTPS banner image URL (max 2048 characters) and button text (1–30 characters).'});
     const targets=await query(`SELECT endpoint,p256dh,auth FROM public.cerood_push_subscriptions WHERE active=true AND (?='all' OR division=? OR division='all') ORDER BY updated_at DESC LIMIT 501`,[d,d]);
     if(targets.length>500)return res.status(409).json({success:false,message:'Campaign exceeds 500 subscribers. Batch delivery not enabled yet.'});
     const result=await query('INSERT INTO public.cerood_push_campaigns(division,title,body,url,delivered,failed) VALUES (?,?,?,?,0,0) RETURNING id',[d,title,body,url]);
     const campaignId=result[0].id;let delivered=0,failed=0;
     for(const t of targets){try{
-      await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,url,tag:'cerood-campaign-'+campaignId}),{TTL:86400,urgency:'high'});
+      await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,url,...(image?{image}:{}),actions:[{action:'open',title:actionTitle}],tag:'cerood-campaign-'+campaignId}),{TTL:86400,urgency:'high'});
       delivered++;
     }catch(e){failed++;if([404,410].includes(e.statusCode))await query('UPDATE public.cerood_push_subscriptions SET active=false WHERE endpoint=?',[t.endpoint]);}}
     await query('UPDATE public.cerood_push_campaigns SET delivered=?,failed=? WHERE id=?',[delivered,failed,campaignId]);
