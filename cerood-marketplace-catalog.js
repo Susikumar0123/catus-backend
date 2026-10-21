@@ -517,8 +517,19 @@ module.exports = function (
   }
   // Load active schema rows once per request instead of querying every category
   // and each of its ancestors. Keep single-category validation reads unchanged.
-  async function loadCategorySnapshot(marketplace) {
-    const categories = await query(
+  async function loadCategorySnapshot(marketplace, trace = () => {}) {
+    const timedQuery = async (stage,sql,args) => {
+      trace(stage+'-start');
+      try {
+        const rows=await query(sql,args);
+        trace(stage+'-done',{rows:rows.length});
+        return rows;
+      } catch(error) {
+        trace(stage+'-error',{code:String(error.code||'unknown')});
+        throw error;
+      }
+    };
+    const categories = await timedQuery('categories', 
       `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
               category_level,is_leaf,category_path
        FROM public.cerood_product_categories
@@ -527,13 +538,13 @@ module.exports = function (
     );
     if (!categories.length) return {rows:[],categories:new Map(),attributes:new Map(),imageSlots:new Map()};
     const [attributes,imageSlots] = await Promise.all([
-      query(`SELECT a.id,a.category_id,a.attribute_key,a.label,a.input_type,a.unit,a.options,
+      timedQuery('attributes',`SELECT a.id,a.category_id,a.attribute_key,a.label,a.input_type,a.unit,a.options,
                     a.placeholder,a.is_required,a.is_variant,a.sort_order
              FROM public.cerood_product_attributes a
              JOIN public.cerood_product_categories c ON c.id=a.category_id
              WHERE a.is_active=true AND c.is_active=true AND c.marketplace=?
              ORDER BY a.sort_order ASC,a.label ASC`, [marketplace]),
-      query(`SELECT s.id,s.category_id,s.slot_key,s.label,s.description,s.is_required,s.sort_order
+      timedQuery('image-slots',`SELECT s.id,s.category_id,s.slot_key,s.label,s.description,s.is_required,s.sort_order
              FROM public.cerood_category_image_slots s
              JOIN public.cerood_product_categories c ON c.id=s.category_id
              WHERE s.is_active=true AND c.is_active=true AND c.marketplace=?
@@ -555,7 +566,9 @@ module.exports = function (
     try {
       const marketplace = cleanText(req.query.marketplace,50);
       if (!marketplaces.has(marketplace)) throw badRequest('Choose Cosmetics, Fashion or Cerood Main Store.');
-      const snapshot = await loadCategorySnapshot(marketplace);
+      const trace=req.ceroodCatalogTrace || (()=>{});
+      trace('authenticated-handler',{marketplace,implementation:'bulk-schema-v1'});
+      const snapshot = await loadCategorySnapshot(marketplace,trace);
       const categories = snapshot.rows;
       const result=[];
       for (const category of categories) {
@@ -563,6 +576,7 @@ module.exports = function (
         result.push({...category,attributes:resolved.attributes,image_slots:resolved.image_slots,
           schema_chain:resolved.chain.map(row=>String(row.id))});
       }
+      trace('schema-resolved',{categories:result.length});
       return res.json({success:true,marketplace,categories:result});
     } catch(error) { return handleError(res,error); }
   });
@@ -571,7 +585,9 @@ module.exports = function (
     try {
       const marketplace=cleanText(req.query.marketplace || 'general',50);
       if (marketplace!=='general') throw badRequest('Use /api/sellers/product-categories for this marketplace.');
-      const snapshot = await loadCategorySnapshot(marketplace);
+      const trace=req.ceroodCatalogTrace || (()=>{});
+      trace('authenticated-handler',{marketplace,implementation:'bulk-schema-v1'});
+      const snapshot = await loadCategorySnapshot(marketplace,trace);
       const categories = snapshot.rows;
       const result=[];
       for (const category of categories) {
@@ -580,6 +596,7 @@ module.exports = function (
           attribute_schema:resolved.attributes,image_schema:resolved.image_slots,
           schema_chain:resolved.chain.map(row=>String(row.id))});
       }
+      trace('schema-resolved',{categories:result.length});
       return res.json({success:true,categories:result});
     } catch(error) { return handleError(res,error); }
   });

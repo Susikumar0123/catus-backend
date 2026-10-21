@@ -49,6 +49,25 @@ const allowedOrigins = [
     'http://127.0.0.1:5500'
 ];
 
+// Temporary, read-only diagnostics for the seller category timeout.
+// No request headers, credentials, bodies or user details are recorded.
+app.use((req,res,next) => {
+    if (!['/api/sellers/product-categories','/api/sellers/shop-categories'].includes(req.path)) return next();
+    const started=Date.now();
+    const requestId=crypto.randomUUID();
+    req.ceroodCatalogTrace=(stage,details={}) => console.log('[catalog-diag-v1]',JSON.stringify({
+        requestId,stage,ms:Date.now()-started,...details
+    }));
+    req.ceroodCatalogTrace('request-start',{method:req.method,path:req.path,
+        origin:String(req.get('origin')||'').slice(0,200)});
+    let finished=false;
+    const timer=setTimeout(()=>req.ceroodCatalogTrace('still-waiting'),10000);
+    timer.unref?.();
+    res.once('finish',()=>{finished=true;clearTimeout(timer);req.ceroodCatalogTrace('response-finish',{status:res.statusCode});});
+    res.once('close',()=>{clearTimeout(timer);if(!finished)req.ceroodCatalogTrace('connection-closed');});
+    next();
+});
+
 app.use(cors({
     origin: function (origin, callback) {
 
@@ -61,6 +80,7 @@ app.use(cors({
             return callback(null, true);
         }
 
+        console.warn('[cors-origin-rejected]',JSON.stringify({origin:String(origin).slice(0,200)}));
         return callback(
             new Error('Not allowed by CORS')
         );
