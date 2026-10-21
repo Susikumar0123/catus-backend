@@ -407,7 +407,7 @@ module.exports = function (
   // Clothing + Cosmetics + Cerood Main Store.
   // Renewed remains isolated in cerood-seller-products.js.
   // ============================================================
-  async function resolveMarketplaceCategorySchema(categoryId, marketplace) {
+  async function resolveMarketplaceCategorySchema(categoryId, marketplace, snapshot = null) {
     if (!marketplaces.has(marketplace)) throw badRequest('Invalid marketplace.');
     if (!isUUID(categoryId)) throw badRequest('Invalid category schema reference.');
     const chain = [];
@@ -417,7 +417,7 @@ module.exports = function (
       if (!isUUID(currentId)) throw badRequest('Invalid category schema reference.');
       if (seen.has(currentId)) throw badRequest('Category schema inheritance cycle detected.');
       seen.add(currentId);
-      const rows = await query(
+      const rows = snapshot ? [snapshot.categories.get(currentId)].filter(Boolean) : await query(
         `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
                 category_level,is_leaf,category_path
          FROM public.cerood_product_categories
@@ -432,14 +432,14 @@ module.exports = function (
     }
     const ids = chain.map(row => String(row.id));
     const placeholders = ids.map(() => '?').join(',');
-    const attributes = await query(
+    const attributes = snapshot ? ids.flatMap(id => snapshot.attributes.get(id) || []) : await query(
       `SELECT id,category_id,attribute_key,label,input_type,unit,options,
               placeholder,is_required,is_variant,sort_order
        FROM public.cerood_product_attributes
        WHERE is_active=true AND category_id IN (${placeholders})
        ORDER BY sort_order ASC,label ASC`, ids
     );
-    const imageSlots = await query(
+    const imageSlots = snapshot ? ids.flatMap(id => snapshot.imageSlots.get(id) || []) : await query(
       `SELECT id,category_id,slot_key,label,description,is_required,sort_order
        FROM public.cerood_category_image_slots
        WHERE is_active=true AND category_id IN (${placeholders})
@@ -515,20 +515,51 @@ module.exports = function (
     if (marketplace === 'general') product.product_variants = shopPublish.validateVariants(product.product_variants, resolved.attributes);
     return product;
   }
+  // Load active schema rows once per request instead of querying every category
+  // and each of its ancestors. Keep single-category validation reads unchanged.
+  async function loadCategorySnapshot(marketplace) {
+    const categories = await query(
+      `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
+              category_level,is_leaf,category_path
+       FROM public.cerood_product_categories
+       WHERE marketplace=? AND is_active=true
+       ORDER BY category_level ASC,sort_order ASC,name ASC`, [marketplace]
+    );
+    if (!categories.length) return {rows:[],categories:new Map(),attributes:new Map(),imageSlots:new Map()};
+    const [attributes,imageSlots] = await Promise.all([
+      query(`SELECT a.id,a.category_id,a.attribute_key,a.label,a.input_type,a.unit,a.options,
+                    a.placeholder,a.is_required,a.is_variant,a.sort_order
+             FROM public.cerood_product_attributes a
+             JOIN public.cerood_product_categories c ON c.id=a.category_id
+             WHERE a.is_active=true AND c.is_active=true AND c.marketplace=?
+             ORDER BY a.sort_order ASC,a.label ASC`, [marketplace]),
+      query(`SELECT s.id,s.category_id,s.slot_key,s.label,s.description,s.is_required,s.sort_order
+             FROM public.cerood_category_image_slots s
+             JOIN public.cerood_product_categories c ON c.id=s.category_id
+             WHERE s.is_active=true AND c.is_active=true AND c.marketplace=?
+             ORDER BY s.sort_order ASC,s.label ASC`, [marketplace])
+    ]);
+    const group = rows => {
+      const grouped = new Map();
+      for (const row of rows) {
+        const key=String(row.category_id);
+        if (!grouped.has(key)) grouped.set(key,[]);
+        grouped.get(key).push(row);
+      }
+      return grouped;
+    };
+    return {rows:categories,categories:new Map(categories.map(row=>[String(row.id),row])),
+      attributes:group(attributes),imageSlots:group(imageSlots)};
+  }
   app.get('/api/sellers/product-categories', requireSellerAuth, async (req,res) => {
     try {
       const marketplace = cleanText(req.query.marketplace,50);
       if (!marketplaces.has(marketplace)) throw badRequest('Choose Cosmetics, Fashion or Cerood Main Store.');
-      const categories = await query(
-        `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
-                category_level,is_leaf,category_path
-         FROM public.cerood_product_categories
-         WHERE marketplace=? AND is_active=true
-         ORDER BY category_level ASC,sort_order ASC,name ASC`, [marketplace]
-      );
+      const snapshot = await loadCategorySnapshot(marketplace);
+      const categories = snapshot.rows;
       const result=[];
       for (const category of categories) {
-        const resolved=await resolveMarketplaceCategorySchema(category.id,marketplace);
+        const resolved=await resolveMarketplaceCategorySchema(category.id,marketplace,snapshot);
         result.push({...category,attributes:resolved.attributes,image_slots:resolved.image_slots,
           schema_chain:resolved.chain.map(row=>String(row.id))});
       }
@@ -540,16 +571,11 @@ module.exports = function (
     try {
       const marketplace=cleanText(req.query.marketplace || 'general',50);
       if (marketplace!=='general') throw badRequest('Use /api/sellers/product-categories for this marketplace.');
-      const categories=await query(
-        `SELECT id,marketplace,parent_id,schema_parent_id,name,slug,sort_order,
-                category_level,is_leaf,category_path
-         FROM public.cerood_product_categories
-         WHERE marketplace='general' AND is_active=true
-         ORDER BY category_level ASC,sort_order ASC,name ASC`
-      );
+      const snapshot = await loadCategorySnapshot(marketplace);
+      const categories = snapshot.rows;
       const result=[];
       for (const category of categories) {
-        const resolved=await resolveMarketplaceCategorySchema(category.id,'general');
+        const resolved=await resolveMarketplaceCategorySchema(category.id,'general',snapshot);
         result.push({...category,attributes:resolved.attributes,image_slots:resolved.image_slots,
           attribute_schema:resolved.attributes,image_schema:resolved.image_slots,
           schema_chain:resolved.chain.map(row=>String(row.id))});
