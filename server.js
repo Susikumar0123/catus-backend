@@ -41,6 +41,25 @@ function ceroodShoppingDeliveryFee(subtotal) {
 const app = express();
 const PORT = process.env.PORT || 10000;
 
+// ==========================================
+// CEROOD LOCAL DISCOVERY — ISOLATED OTP ROUTES
+// Feature-gated; does not change Home Service, Shopping or existing MSG91 login.
+// These routes MUST be available through a same-origin proxy on the Sites domain
+// for Secure HttpOnly cookies. Do not point browser fetch directly at Render.
+// Register them BEFORE the general CORS middleware: they are same-origin only.
+// ==========================================
+if (process.env.LOCAL_DISCOVERY_OTP_ENABLED === 'true') {
+    // Apply a smaller JSON body limit ONLY to Local Discovery OTP requests.
+    app.use('/api/local/auth', (req, res, next) => {
+        res.set('Cache-Control', 'private, no-store');
+        res.set('X-Content-Type-Options', 'nosniff');
+        next();
+    });
+    app.use('/api/local/auth', express.json({ limit: '16kb' }));
+    require('./local-discovery/mount')(app, db);
+}
+
+
 const allowedOrigins = [
     'https://cerood.com',
     'https://www.cerood.com',
