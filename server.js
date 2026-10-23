@@ -48,16 +48,45 @@ const PORT = process.env.PORT || 10000;
 // for Secure HttpOnly cookies. Do not point browser fetch directly at Render.
 // Register them BEFORE the general CORS middleware: they are same-origin only.
 // ==========================================
+// Local-only CORS guard runs even while OTP is disabled, so these requests
+// never fall through to the unrelated global CORS error handler.
+const localDiscoveryOrigin = String(process.env.LOCAL_DISCOVERY_ORIGIN ||
+    'https://cerood-local-discovery.susikumar.chatgpt.site').replace(/\/$/, '');
+app.use('/api/local/auth', (req, res, next) => {
+    res.set('Cache-Control', 'private, no-store');
+    res.set('X-Content-Type-Options', 'nosniff');
+    res.vary('Origin');
+    const origin = req.get('origin');
+    if (origin && origin !== localDiscoveryOrigin) {
+        return res.status(403).json({error: 'Origin rejected'});
+    }
+    if (origin) {
+        res.set('Access-Control-Allow-Origin', localDiscoveryOrigin);
+        res.set('Access-Control-Allow-Credentials', 'true');
+    }
+    if (req.method === 'OPTIONS') {
+        const method = req.get('access-control-request-method');
+        const headers = String(req.get('access-control-request-headers') || '')
+            .toLowerCase().split(',').map(h => h.trim()).filter(Boolean);
+        if (!['GET', 'POST'].includes(method) ||
+            headers.some(h => !['content-type', 'x-cerood-local-client'].includes(h))) {
+            return res.status(403).json({error: 'Preflight rejected'});
+        }
+        res.set('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.set('Access-Control-Allow-Headers', 'Content-Type, X-Cerood-Local-Client');
+        return res.sendStatus(204);
+    }
+    if (process.env.LOCAL_DISCOVERY_OTP_ENABLED !== 'true') {
+        return res.status(503).json({error: 'Mobile OTP is not enabled', code: 'OTP_DISABLED'});
+    }
+    next();
+});
 if (process.env.LOCAL_DISCOVERY_OTP_ENABLED === 'true') {
-    // Apply a smaller JSON body limit ONLY to Local Discovery OTP requests.
-    app.use('/api/local/auth', (req, res, next) => {
-        res.set('Cache-Control', 'private, no-store');
-        res.set('X-Content-Type-Options', 'nosniff');
-        next();
-    });
     app.use('/api/local/auth', express.json({ limit: '16kb' }));
     require('./local-discovery/mount')(app, db);
 }
+// Prevent unknown auth routes from reaching the general CORS middleware.
+app.use('/api/local/auth', (req, res) => res.status(404).json({error: 'Auth route not found'}));
 
 
 const allowedOrigins = [
