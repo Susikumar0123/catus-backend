@@ -50,18 +50,17 @@ const PORT = process.env.PORT || 10000;
 // ==========================================
 // Local-only CORS guard runs even while OTP is disabled, so these requests
 // never fall through to the unrelated global CORS error handler.
-const localDiscoveryOrigin = String(process.env.LOCAL_DISCOVERY_ORIGIN ||
-    'https://cerood-local-discovery.susikumar.chatgpt.site').replace(/\/$/, '');
+const localDiscoveryOriginPolicy = require('./local-discovery/origin-policy').createOriginPolicy(process.env);
 app.use('/api/local/auth', (req, res, next) => {
     res.set('Cache-Control', 'private, no-store');
     res.set('X-Content-Type-Options', 'nosniff');
     res.vary('Origin');
     const origin = req.get('origin');
-    if (origin && origin !== localDiscoveryOrigin) {
+    if (origin && !localDiscoveryOriginPolicy.allows(origin)) {
         return res.status(403).json({error: 'Origin rejected'});
     }
     if (origin) {
-        res.set('Access-Control-Allow-Origin', localDiscoveryOrigin);
+        res.set('Access-Control-Allow-Origin', origin);
         res.set('Access-Control-Allow-Credentials', 'true');
     }
     if (req.method === 'OPTIONS') {

@@ -18,13 +18,10 @@ function reject(res, status, error) { return res.status(status).json({error}); }
 
 function createHandlers({db, env = process.env, widgetVerifier = null, logger = console}) {
   if (!db || typeof db.query !== 'function') throw new Error('db.query is required');
-  const origin = String(env.LOCAL_DISCOVERY_ORIGIN || '').replace(/\/$/, '');
-  if (!/^https:\/\/[^/]+$/.test(origin) && !/^http:\/\/localhost(?::\d+)?$/.test(origin)) {
-    throw new Error('Exact LOCAL_DISCOVERY_ORIGIN is required');
-  }
+  const originPolicy = require('./origin-policy').createOriginPolicy(env,{requirePrimary:true});
   const secret = String(env.LOCAL_DISCOVERY_RATE_SECRET || '');
   if (secret.length < 32) throw new Error('LOCAL_DISCOVERY_RATE_SECRET must be 32+ characters');
-  const secure = origin.startsWith('https:');
+  const secure = originPolicy.secure;
   const verifier = widgetVerifier || createWidgetVerifier({authKey: env.MSG91_AUTH_KEY});
   const safe = f => async (req,res) => {
     try { return await f(req,res); }
@@ -33,7 +30,7 @@ function createHandlers({db, env = process.env, widgetVerifier = null, logger = 
   function allowMutation(req,res) {
     if (req.get('x-cerood-local-client') !== 'web') { reject(res,403,'Invalid client'); return false; }
     const requestOrigin = req.get('origin');
-    if (requestOrigin && requestOrigin !== origin) { reject(res,403,'Origin rejected'); return false; }
+    if (requestOrigin && !originPolicy.allows(requestOrigin)) { reject(res,403,'Origin rejected'); return false; }
     return true;
   }
   async function rateLimit(req, type, limit) {
