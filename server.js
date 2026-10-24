@@ -2016,7 +2016,7 @@ app.post('/api/login-password', (req, res) => {
 // CEROOD HOME SERVICES — SEPARATE CUSTOMER AUTH
 // Separate customer table/session from Cerood Shopping.
 // ==========================================
-require('./cerood-home-auth')(
+const ceroodHomeCustomerAuth = require('./cerood-home-auth')(
     app,
     db,
     {
@@ -2024,6 +2024,7 @@ require('./cerood-home-auth')(
         extractVerifiedPhoneFromMsg91
     }
 );
+require('./cerood-home-admin-customers')(app, db, requireAdminAuth, ceroodHomeCustomerAuth);
 
 
 // ==========================================
