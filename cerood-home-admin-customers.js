@@ -59,5 +59,14 @@ module.exports=function registerHomeCustomerAdmin(app,db,requireAdminAuth,homeAu
    const notification=await personalPush.notifyRejected(id);
    res.json({success:true,order:rows[0],notification});
   }catch(error){safeError(res,error);}
+ }); app.patch('/api/admin/home-services/orders/:orderId/cancel',requireAdminAuth,async(req,res)=>{
+  try{const id=String(req.params.orderId||'').trim();if(!id||id.length>150)return res.status(400).json({success:false,message:'Valid booking ID is required.'});
+   // No delete, refund or payment mutation. Completed work requires separate review.
+   const rows=await query(`UPDATE public.orders SET status='Cancelled'
+    WHERE order_id=? AND LOWER(COALESCE(status,'')) NOT IN ('completed') RETURNING order_id,status`,[id]);
+   if(!rows.length)return res.status(409).json({success:false,message:'Booking not found or already completed. Completed work requires separate review.'});
+   const notification=await personalPush.notifyOrderStatus(id,'status');
+   res.json({success:true,order:rows[0],notification});
+  }catch(error){safeError(res,error);}
  });
 };

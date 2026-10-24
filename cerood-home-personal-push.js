@@ -1,5 +1,6 @@
 'use strict';
 const crypto=require('node:crypto');
+const OrderEvents=require('./cerood-home-order-events');
 module.exports=function(app,db,adminAuth,homeAuth,options={}){
  const webpush=options.webpush||require('web-push');
  const query=(sql,args=[])=>new Promise((resolve,reject)=>db.query(sql,args,(err,rows)=>err?reject(err):resolve(rows||[])));
@@ -14,7 +15,7 @@ module.exports=function(app,db,adminAuth,homeAuth,options={}){
  // Management-token proof allows clean logout even after a Home session expires.
  app.post('/api/notify/home-unlink',async(req,res)=>{try{await ensure();const endpoint=await proof(req.body);if(!endpoint)return res.status(403).json({success:false,message:'Browser subscription proof required.'});await query('DELETE FROM public.cerood_home_push_devices WHERE endpoint=?',[endpoint]);res.json({success:true});}catch(e){error(res,e);}});
  app.get('/api/home-services/customer/notifications',homeAuth.requireHomeAuth,async(req,res)=>{try{await ensure();const notifications=await query('SELECT id,order_id,title,body,created_at FROM public.cerood_home_notifications WHERE customer_id=? ORDER BY created_at DESC LIMIT 30',[req.homeServiceCustomer.id]);res.set('Cache-Control','private, no-store');res.json({success:true,notifications});}catch(e){error(res,e);}});
- async function send(customerId,{title,body,orderId=null,key}){
+ async function send(customerId,{title,body,orderId=null,key,image=null}){
   await ensure();const id=crypto.randomUUID();
   const inserted=await query(`INSERT INTO public.cerood_home_notifications(id,customer_id,order_id,title,body,request_key) VALUES (?,?,?,?,?,?) ON CONFLICT(request_key) DO NOTHING RETURNING id`,[id,customerId,orderId,title,body,key]);
   if(!inserted.length)return {status:'already_recorded',accepted:0,failed:0};
@@ -23,7 +24,7 @@ module.exports=function(app,db,adminAuth,homeAuth,options={}){
    if(configured()){
     // Dedicated owner mapping; no division/all audience and no caller endpoints.
     const targets=await query(`SELECT s.endpoint,s.p256dh,s.auth FROM public.cerood_home_push_devices d JOIN public.cerood_push_subscriptions s ON s.endpoint=d.endpoint WHERE d.customer_id=? AND d.expires_at>NOW() AND s.active=true ORDER BY d.updated_at DESC LIMIT 20`,[customerId]);
-    await Promise.all(targets.map(async t=>{if(!allowed(t.endpoint)){failed++;return;}try{await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,url:'/home-services.html#cerood-dashboard-bookings',tag:'cerood-home-'+id}),{TTL:3600,urgency:'high',timeout:10000});accepted++;}catch(e){failed++;if([404,410].includes(Number(e.statusCode)))await query('UPDATE public.cerood_push_subscriptions SET active=false,updated_at=NOW() WHERE endpoint=?',[t.endpoint]);}}));
+    await Promise.all(targets.map(async t=>{if(!allowed(t.endpoint)){failed++;return;}try{await webpush.sendNotification({endpoint:t.endpoint,keys:{p256dh:t.p256dh,auth:t.auth}},JSON.stringify({title,body,...(OrderEvents.imageURL(image)?{image:OrderEvents.imageURL(image)}:{}),url:'/home-services.html#cerood-dashboard-bookings',tag:'cerood-home-'+id}),{TTL:3600,urgency:'high',timeout:10000});accepted++;}catch(e){failed++;if([404,410].includes(Number(e.statusCode)))await query('UPDATE public.cerood_push_subscriptions SET active=false,updated_at=NOW() WHERE endpoint=?',[t.endpoint]);}}));
     status=accepted?(failed?'partial':'accepted'):targets.length?'failed':'inbox_only';
    }else status='push_not_configured';
   }catch(e){status='failed';console.error('Home targeted push delivery:',e.code||e.message);}
@@ -32,9 +33,32 @@ module.exports=function(app,db,adminAuth,homeAuth,options={}){
  }
  app.get('/api/admin/home-services/customers/:customerId/notifications',adminAuth,async(req,res)=>{try{await ensure();const id=String(req.params.customerId);const customer=(await query('SELECT id,name,phone FROM public.cerood_home_service_customers WHERE id::text=? LIMIT 1',[id]))[0];if(!customer)return res.status(404).json({success:false,message:'Registered Home Service customer not found.'});const devices=await query(`SELECT COUNT(*)::int AS total FROM public.cerood_home_push_devices d JOIN public.cerood_push_subscriptions s ON s.endpoint=d.endpoint WHERE d.customer_id=? AND d.expires_at>NOW() AND s.active=true`,[customer.id]);const notifications=await query('SELECT id,order_id,title,body,status,accepted,failed,created_at FROM public.cerood_home_notifications WHERE customer_id=? ORDER BY created_at DESC LIMIT 20',[customer.id]);res.set('Cache-Control','private, no-store');res.json({success:true,customer,pushConfigured:configured(),activeDevices:Number(devices[0]?.total||0),notifications});}catch(e){error(res,e);}});
  app.post('/api/admin/home-services/customers/:customerId/notifications',adminAuth,async(req,res)=>{try{await ensure();const id=String(req.params.customerId),title=String(req.body?.title||'').trim(),body=String(req.body?.body||'').trim(),request=String(req.body?.request_id||'');if(!title||title.length>75||!body||body.length>180||!(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i).test(request))return res.status(400).json({success:false,message:'Enter title (1–75), message (1–180) and a valid request ID.'});const customer=(await query('SELECT id FROM public.cerood_home_service_customers WHERE id::text=? LIMIT 1',[id]))[0];if(!customer)return res.status(404).json({success:false,message:'Registered Home Service customer not found.'});res.json({success:true,notification:await send(customer.id,{title,body,key:'manual:'+customer.id+':'+request})});}catch(e){error(res,e);}});
- async function notifyRejected(orderId){
-  try{await ensure();const rows=await query(`SELECT c.id FROM public.orders o JOIN public.cerood_home_service_customers c ON (o.customer_id::text=c.id::text OR (NULLIF(BTRIM(o.customer_id::text),'') IS NULL AND RIGHT(regexp_replace(COALESCE(o.phone::text,''),'[^0-9]','','g'),10)=c.phone)) WHERE o.order_id=? AND LOWER(o.status)='rejected' LIMIT 1`,[orderId]);if(!rows.length)return {status:'no_registered_customer',accepted:0,failed:0};return await send(rows[0].id,{title:'Cerood booking update',body:'Your service booking was rejected. Open My Bookings to view the update or contact Cerood support.',orderId,key:'rejected:'+orderId});}
-  catch(e){console.error('Home rejection notification:',e.code||e.message);return {status:'notification_failed',accepted:0,failed:0};}
+ async function getOrder(orderId){
+  await ensure();
+  const rows=await query(`SELECT o.*,c.id AS registered_customer_id,c.name AS registered_customer_name,c.phone AS registered_customer_phone,
+    (SELECT image_url FROM public.services s WHERE s.service_id::text=BTRIM(split_part(o.product_id::text,',',1)) LIMIT 1) AS service_image_url
+    FROM public.orders o LEFT JOIN public.cerood_home_service_customers c ON (o.customer_id::text=c.id::text OR (NULLIF(BTRIM(o.customer_id::text),'') IS NULL AND RIGHT(regexp_replace(COALESCE(o.phone::text,''),'[^0-9]','','g'),10)=c.phone)) WHERE o.order_id=? LIMIT 1`,[orderId]);
+  return rows[0];
  }
- return {notifyRejected,ensure};
+ async function notifyOrderStatus(orderId,event='status'){
+  try{const order=await getOrder(orderId);if(!order)return {status:'order_not_found',accepted:0,failed:0};if(!order.registered_customer_id)return {status:'no_registered_customer',accepted:0,failed:0};const payload=OrderEvents.describe(order,event);if(!payload)return {status:'no_customer_event',accepted:0,failed:0};return await send(order.registered_customer_id,payload);}
+  catch(e){console.error('Home order notification:',e.code||e.message);return {status:'notification_failed',accepted:0,failed:0};}
+ }
+ async function orderSummary(id){const order=await getOrder(id);if(!order)return null;const customer=order.registered_customer_id?{id:order.registered_customer_id,name:order.registered_customer_name,phone:order.registered_customer_phone}:null;const devices=customer?await query(`SELECT COUNT(*)::int AS total FROM public.cerood_home_push_devices d JOIN public.cerood_push_subscriptions s ON s.endpoint=d.endpoint WHERE d.customer_id=? AND d.expires_at>NOW() AND s.active=true`,[customer.id]):[];const notifications=await query('SELECT id,order_id,title,body,status,accepted,failed,created_at FROM public.cerood_home_notifications WHERE order_id=? ORDER BY created_at DESC LIMIT 20',[id]);return {customer,order:{order_id:id,service_name:order.service_name,status:order.status,image_url:OrderEvents.imageURL(order.service_image_url)},pushConfigured:configured(),activeDevices:Number(devices[0]?.total||0),notifications};}
+ app.get('/api/admin/home-services/orders/:orderId/notifications',adminAuth,async(req,res)=>{try{const data=await orderSummary(String(req.params.orderId));if(!data)return res.status(404).json({success:false,message:'Booking not found.'});res.set('Cache-Control','private, no-store');res.json({success:true,...data});}catch(e){error(res,e);}});
+ app.post('/api/admin/home-services/orders/:orderId/notifications',adminAuth,async(req,res)=>{try{
+  const id=String(req.params.orderId),order=await getOrder(id);if(!order)return res.status(404).json({success:false,message:'Booking not found.'});if(!order.registered_customer_id)return res.status(409).json({success:false,message:'This booking is not linked to a registered Home Service customer.'});
+  const title=String(req.body?.title||'').trim(),body=String(req.body?.body||'').trim(),request=String(req.body?.request_id||'');if(!title||title.length>75||!body||body.length>180||!(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i).test(request))return res.status(400).json({success:false,message:'Enter a valid title, message and request ID.'});
+  res.json({success:true,notification:await send(order.registered_customer_id,{title,body,orderId:id,key:'order-manual:'+id+':'+request,image:order.service_image_url})});
+ }catch(e){error(res,e);}});
+ // These middleware hooks run BEFORE existing write handlers. Read/preview clicks
+ // never enter them. Only a successful persisted response can emit an event.
+ function afterSave(event){return function(req,res,next){const original=res.json.bind(res);let handled=false;res.json=function(payload){if(handled||!payload?.success||res.statusCode>=400)return original(payload);handled=true;const id=String(payload.order_id||payload.order?.order_id||payload.booking?.order_id||req.params?.orderId||req.body?.order_id||'');if(!id)return original(payload);Promise.resolve(notifyOrderStatus(id,event)).then(notification=>original({...payload,...(event==='send-quotation'?{message:'Quotation saved. Notification status: '+notification.status}:{}),notification})).catch(()=>original({...payload,notification:{status:'notification_failed',accepted:0,failed:0}}));return res;};next();};}
+ app.post('/api/admin/update-status',adminAuth,afterSave('status'));
+ app.post('/api/admin/assign-technician-manual',adminAuth,afterSave('status'));
+ for(const event of ['inspection','appointment','inspection-completed','send-quotation'])app.patch('/api/admin/home-services/free-bookings/:orderId/'+event,adminAuth,afterSave(event));
+ app.post('/api/home-services/free-bookings',homeAuth.requireHomeAuth,afterSave('status'));
+ // Existing approval-key validation remains in the original customer handlers.
+ for(const event of ['inspection-response','quotation-response'])app.post('/api/home-services/'+event,afterSave(event));
+ return {notifyRejected:id=>notifyOrderStatus(id,'status'),notifyOrderStatus,ensure};
 };
