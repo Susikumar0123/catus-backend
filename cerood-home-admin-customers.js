@@ -1,10 +1,11 @@
 'use strict';
 // Home Services only. Never joins shopping users or returns password/session fields.
-module.exports=function registerHomeCustomerAdmin(app,db,requireAdminAuth,homeAuth){
+module.exports=function registerHomeCustomerAdmin(app,db,requireAdminAuth,homeAuth,options={}){
  if(typeof homeAuth?.requireHomeAuth!=='function'||typeof homeAuth?.ensureSchema!=='function')throw Error('Home customer auth helpers are required.');
  const query=(sql,args=[])=>new Promise((resolve,reject)=>db.query(sql,args,(err,rows)=>err?reject(err):resolve(rows||[])));
  const phoneSQL=column=>`RIGHT(regexp_replace(COALESCE(${column}::text,''),'[^0-9]','','g'),10)`;
  const link=`(o.customer_id::text=c.id::text OR (NULLIF(BTRIM(o.customer_id::text),'') IS NULL AND ${phoneSQL('o.phone')}=c.phone))`;
+ const personalPush=options.personalPush||require('./cerood-home-personal-push')(app,db,requireAdminAuth,homeAuth);
  const safeError=(res,error)=>{console.error('Home customer admin:',error.code||error.message);return res.status(500).json({success:false,message:'Unable to load Home Service customer data.'});};
  // Enforce the existing Home Service JWT before the original booking handler.
  // Address/contact fields may differ; account ownership always comes from the server.
@@ -55,7 +56,8 @@ module.exports=function registerHomeCustomerAdmin(app,db,requireAdminAuth,homeAu
    const rows=await query(`UPDATE public.orders SET status='Rejected'
     WHERE order_id=? AND LOWER(COALESCE(status,'')) NOT IN ('completed') RETURNING order_id,status`,[id]);
    if(!rows.length)return res.status(409).json({success:false,message:'Booking not found or already completed. Completed work requires separate review.'});
-   res.json({success:true,order:rows[0]});
+   const notification=await personalPush.notifyRejected(id);
+   res.json({success:true,order:rows[0],notification});
   }catch(error){safeError(res,error);}
  });
 };
