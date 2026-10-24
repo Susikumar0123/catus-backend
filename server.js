@@ -8,6 +8,7 @@ const multer = require('multer');
 const path = require('path');
 const sharp = require('sharp');
 const db = require('./db');
+const ceroodHomeConversions = require('./cerood-home-conversions');
 const axios = require('axios');
 require('dotenv').config();
 
@@ -3251,6 +3252,12 @@ app.post('/api/home-services/free-bookings', (req, res) => {
             if (!inserted || !inserted.length) {
                 return res.status(409).json({success:false, message:'This booking request was already received. Please check your booking confirmation before trying again; do not submit a new request.'});
             }
+            // Non-blocking attribution: booking success does not depend on analytics availability.
+            void ceroodHomeConversions.recordBooking(db, {
+                order_id: inserted[0].order_id,
+                booking_request_id: requestId,
+                conversion: b.conversion
+            }).catch(e => console.error('[cerood-conversion] booking tracking failed:', e.message));
             return res.status(201).json({
                 success: true,
                 order_id: inserted[0].order_id,
@@ -4744,6 +4751,8 @@ require('./cerood-seller-media')(
 
 // Cerood Notify Stage 1 — existing admin auth, no changes to order/payment handlers.
 require('./notify-routes')(app, db, requireAdminAuth);
+// Home Service conversion analytics: separate from existing checkout, payments and orders.
+ceroodHomeConversions.register(app, db, requireAdminAuth);
 
 // CEROOD PARTNERSHIP LEADS — public intake; admin access protected by existing middleware.
 const partnerTypes = ['apartment', 'hotel', 'pg-hostel', 'other'];
