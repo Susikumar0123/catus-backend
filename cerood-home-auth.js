@@ -218,9 +218,9 @@ module.exports = function registerCeroodHomeServiceAuth(app, db, helpers = {}) {
 
             if (!accessToken) throw fail(400, 'OTP verification token is missing.');
             if (!/^[6-9]\d{9}$/.test(phone)) throw fail(400, 'Invalid mobile number.');
-            if (!name) throw fail(400, 'Name is required.');
+            // Profile name is optional at signup; booking collects customer details.
             if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw fail(400, 'Enter a valid email address.');
-            if (!/^\d{6}$/.test(pincode)) throw fail(400, 'Invalid pincode.');
+            if (pincode && !/^\d{6}$/.test(pincode)) throw fail(400, 'Invalid pincode.');
             if (password.length < 4) throw fail(400, 'Password must be at least 4 characters.');
 
             await verifiedPhone(accessToken, phone);
@@ -294,6 +294,26 @@ module.exports = function registerCeroodHomeServiceAuth(app, db, helpers = {}) {
     app.get('/api/home-services/customer/me', requireHomeAuth, async (req, res) => {
         res.set('Cache-Control', 'private, no-store');
         res.json({ success: true, user: publicCustomer(req.homeServiceCustomer) });
+    });
+
+    // CEROOD_OPTIONAL_PROFILE_V1: authenticated customer can edit only their own profile.
+    app.post('/api/home-services/customer/update-profile', requireHomeAuth, async (req, res) => {
+        try {
+            const name = clean(req.body?.name, 160);
+            const email = clean(req.body?.email, 320);
+            if (email && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) throw fail(400, 'Enter a valid email address.');
+            const rows = await query(
+                `UPDATE public.cerood_home_service_customers
+                    SET name=?,email=?,updated_at=NOW()
+                  WHERE id=? RETURNING id,name,email,phone,pincode,address`,
+                [name, email || null, req.homeServiceCustomer.id]
+            );
+            if (!rows.length) throw fail(404, 'Home Services account was not found.');
+            res.set('Cache-Control', 'private, no-store');
+            res.json({ success: true, user: publicCustomer(rows[0]) });
+        } catch (error) {
+            res.status(error.status || 500).json({ success: false, message: error.message || 'Unable to save your profile.' });
+        }
     });
 
     app.post('/api/home-services/customer/update-address', requireHomeAuth, async (req, res) => {
