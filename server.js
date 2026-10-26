@@ -9802,75 +9802,53 @@ app.get('/api/test-public-tables', (req, res) => {
 // CATUS LOCATION SEARCH API
 // ==========================================
 app.get('/api/search-locations', (req, res) => {
-
-    const search = String(req.query.q || '').trim();
-
-    if (search.length < 2) {
-        return res.json({
-            success: true,
-            locations: []
-        });
-    }
-
+    const search = typeof req.query.q === 'string' ? req.query.q.trim().replace(/\s+/g, ' ') : '';
+    if (search.length < 2) return res.json({ success: true, locations: [] });
+    if (search.length > 100) return res.status(400).json({ success: false, error: 'Search must be 100 characters or fewer.' });
+    // District-name searches stay in that district. Never rewrite location data.
+    // POSITION treats %, _ and other search characters literally.
     const query = `
-        SELECT
-            id,
-            name,
-            slug,
-            district,
-            state,
-            pincode
-        FROM public.locations
-        WHERE is_active = TRUE
-          AND (
-              name ILIKE ?
-              OR slug ILIKE ?
-              OR district ILIKE ?
-              OR pincode ILIKE ?
-          )
-        ORDER BY
-            CASE
-                WHEN LOWER(name) = LOWER(?) THEN 0
-                WHEN LOWER(name) LIKE LOWER(?) THEN 1
-                ELSE 2
-            END,
-            name ASC
+        WITH input AS (SELECT LOWER(?)::text AS term),
+        district_match AS (
+            SELECT EXISTS (
+                SELECT 1 FROM public.locations l CROSS JOIN input i
+                WHERE l.is_active = TRUE AND LOWER(BTRIM(l.district)) = i.term
+            ) AS found
+        ), candidates AS (
+            SELECT l.id, l.name, l.slug, l.district, l.state, l.pincode,
+                CASE
+                    WHEN LOWER(BTRIM(l.name)) = i.term AND LOWER(BTRIM(l.district)) = i.term THEN 0
+                    WHEN LOWER(BTRIM(l.district)) = i.term THEN 1
+                    WHEN LOWER(BTRIM(l.name)) = i.term THEN 2
+                    WHEN LEFT(LOWER(BTRIM(l.name)), LENGTH(i.term)) = i.term THEN 3
+                    WHEN BTRIM(COALESCE(l.pincode::text, '')) = i.term THEN 4
+                    ELSE 5
+                END AS relevance,
+                ROW_NUMBER() OVER (
+                    PARTITION BY LOWER(BTRIM(l.name)), LOWER(BTRIM(l.district)),
+                        LOWER(BTRIM(l.state)), BTRIM(COALESCE(l.pincode::text, ''))
+                    ORDER BY CASE WHEN NULLIF(BTRIM(l.slug), '') IS NULL THEN 1 ELSE 0 END, l.id
+                ) AS duplicate_rank
+            FROM public.locations l CROSS JOIN input i CROSS JOIN district_match d
+            WHERE l.is_active = TRUE
+              AND (NOT d.found OR LOWER(BTRIM(l.district)) = i.term)
+              AND (POSITION(i.term IN LOWER(COALESCE(l.name, ''))) > 0
+                OR POSITION(i.term IN LOWER(COALESCE(l.slug, ''))) > 0
+                OR POSITION(i.term IN LOWER(COALESCE(l.district, ''))) > 0
+                OR POSITION(i.term IN COALESCE(l.pincode::text, '')) > 0)
+        )
+        SELECT id, name, slug, district, state, pincode
+        FROM candidates WHERE duplicate_rank = 1
+        ORDER BY relevance, LOWER(name), LOWER(district), LOWER(state), pincode, id
         LIMIT 30
     `;
-
-    const contains = `%${search}%`;
-    const startsWith = `${search}%`;
-
-    db.query(
-        query,
-        [
-            contains,
-            contains,
-            contains,
-            contains,
-            search,
-            startsWith
-        ],
-        (err, results) => {
-
-            if (err) {
-                console.error(
-                    'Location search error:',
-                    err
-                );
-
-                return res.status(500).json({
-                    success: false,
-                    error: err.message
-                });
-            }
-
-            return res.json({
-                success: true,
-                locations: results || []
-            });
+    db.query(query, [search.toLowerCase()], (err, results) => {
+        if (err) {
+            console.error('Location search error:', err);
+            return res.status(500).json({ success: false, error: 'Location search unavailable. Please try again.' });
         }
-    );
+        return res.json({ success: true, locations: results || [] });
+    });
 });
 
 // ==========================================
