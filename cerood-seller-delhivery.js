@@ -1520,6 +1520,25 @@ module.exports = function registerCeroodSellerDelhivery(
         }
     });
 
+    app.post('/api/seller/orders/:orderItemId/delhivery-options', requireSellerAuth, async(req,res)=>{
+        res.set('Cache-Control','no-store');
+        try {
+            const parcelSize=require('./cerood-courier-comparison').weight(req.body||{},process.env.DELHIVERY_VOLUMETRIC_DIVISOR);
+            const ref=parseOrderItemRef(req.params.orderItemId);
+            if(!ref||ref.marketplace!=='shop')throw httpError(400,'Choose a Shop order.','ORDER_ITEM');
+            await ensureSchema();delhiveryConfig(true);
+            const pickup=await loadSellerLocation(req.seller.id,String(req.body.fulfilment_location_id||''));
+            const parcel=await loadParcel(ref,req.seller.id,pickup.id);
+            await requirePickupServiceable(pickup,true);await requireDestinationServiceable(parcel);
+            let amount=null;
+            if(parcelSize.chargeable_g)try {
+                const quote=await delhiveryRequest({method:'GET',url:'/api/kinko/v1/invoice/charges/.json',params:{md:'S',ss:'Delivered',o_pin:pickup.pincode,d_pin:parcel.customer.pin,cgm:parcelSize.chargeable_g,pt:parcel.paymentMode}},true);
+                amount=require('./cerood-courier-comparison').total(quote.data);
+            }catch(_){/* A rate failure must never fabricate a price. */}
+            return res.json({success:true,courier:'delhivery',available:true,service:'SURFACE',amount,currency:'INR',estimated:true,chargeable_g:parcelSize.chargeable_g,eta:null,message:amount===null?'Quote unavailable. Confirm charges with Cerood before booking.':'Provider estimate; final invoice may change after weight verification.',checked_at:new Date().toISOString()});
+        }catch(error){return res.status(error.status||503).json({success:false,courier:'delhivery',available:false,message:error.status?error.message:'Delhivery availability could not be checked. Try again.'});}
+    });
+
     app.get('/api/sellers/shipping-assignment', requireSellerAuth, (req,res) => {
         res.set('Cache-Control','no-store');
         try { res.json(require('./cerood-shop-courier-policy').config()); }

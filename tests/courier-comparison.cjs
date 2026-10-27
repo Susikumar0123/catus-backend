@@ -1,0 +1,8 @@
+'use strict';
+const assert=require('node:assert/strict'),fs=require('node:fs'),m=require('../cerood-courier-comparison'),policy=require('../cerood-shop-courier-policy');
+const b={weight_g:500,length_cm:20,width_cm:20,height_cm:20};assert.equal(m.weight(b,5000).chargeable_g,1600);assert.equal(m.weight(b).chargeable_g,null);assert.equal(m.weight({...b,weight_g:2000},5000).chargeable_g,2000);
+for(const bad of [{...b,weight_g:0},{...b,length_cm:501},{...b,height_cm:1.5},{...b,weight_g:Infinity}])assert.throws(()=>m.weight(bad,5000));
+assert.equal(m.total([{total_amount:'72.18'}]),72.18);assert.equal(m.total({Total_amount:99}),99);for(const d of [[],[{},{}],{total_amount:0},{total_amount:-1},{total_amount:'NaN'},{}])assert.equal(m.total(d),null);
+for(const c of ['delhivery','ekart'])policy.assertAssigned(c,'shop');assert.throws(()=>policy.assertAssigned('unknown','shop'));assert.equal(policy.config({}).assignment,'seller_choice');
+for(const [file,c] of [['cerood-seller-delhivery.js','delhivery'],['cerood-seller-ekart.js','ekart']]){const s=fs.readFileSync(require.resolve('../'+file),'utf8'),start=s.indexOf("app.post('/api/seller/orders/:orderItemId/"+c+"-options'"),end=s.indexOf('\n    app.',start+1),route=s.slice(start,end);assert(start>0);assert(route.includes('requireSellerAuth'));assert(route.includes('req.seller.id'));assert(route.includes('loadParcel'));assert(!/reserveBooking|ensureWarehouse|ensurePickupAlias|bookShipmentForSeller|manifestPayload/.test(route));}
+console.log('PASS: parcel limits, configured volumetric calculation, unavailable/invalid estimate rejection, seller courier selection, authenticated owned-order comparison routes and no booking calls in quote handlers. No live provider calls.');

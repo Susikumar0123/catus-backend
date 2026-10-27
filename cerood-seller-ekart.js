@@ -1293,6 +1293,21 @@ module.exports = function registerCeroodSellerEkart(
         }
     });
 
+    app.post('/api/seller/orders/:orderItemId/ekart-options', requireSellerAuth, async(req,res)=>{
+        res.set('Cache-Control','no-store');
+        try {
+            require('./cerood-courier-comparison').weight(req.body||{});
+            const ref=parseOrderItemRef(req.params.orderItemId);
+            if(!ref||ref.marketplace!=='shop')throw httpError(400,'Choose a Shop order.','ORDER_ITEM');
+            if(process.env.EKART_SKIP_SERVICEABILITY_CHECK==='true')throw httpError(503,'Verified Ekart route checks must be enabled.','SERVICEABILITY_DISABLED');
+            await ensureSchema();const input=bookingInput({...req,body:{...req.body,service:'SURFACE'}});
+            const pickup=await loadSellerLocation(req.seller.id,input.locationId);
+            const parcel=await loadParcel(ref,req.seller.id,input.locationId);
+            await requirePickupServiceable(pickup,true);await serviceabilityCheck(parcel,pickup,input);
+            return res.json({success:true,courier:'ekart',available:true,service:'SURFACE',amount:null,currency:'INR',estimated:true,eta:null,message:'Route available. Quote unavailable; confirm charges with Cerood before booking.',checked_at:new Date().toISOString()});
+        }catch(error){return res.status(error.status||503).json({success:false,courier:'ekart',available:false,message:error.status?error.message:'Ekart availability could not be checked. Try again.'});}
+    });
+
     app.post('/api/seller/orders/:orderItemId/ekart-shipment', requireSellerAuth, async (req, res) => {
         res.set('Cache-Control', 'no-store');
         let bookingRow;
