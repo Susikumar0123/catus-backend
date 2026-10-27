@@ -12747,11 +12747,12 @@ app.post('/api/shop/place-cod-order',optionalCeroodCustomerSession,async(req,res
         : await query(`UPDATE public.cerood_shop_products SET stock=stock-?,updated_at=NOW()
             WHERE id=? AND status='published' AND approval_status='approved' AND stock>=? RETURNING id`,[line.quantity,line.p.id,line.quantity]);
       if(!changed.length)throw Object.assign(new Error('Stock changed. Refresh your cart and try again.'),{status:409});
-      await query(`INSERT INTO public.cerood_shop_order_items
+      const financeItem=await query(`INSERT INTO public.cerood_shop_order_items
         (order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,variant_id,variant_sku,variant_values)
-        VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?,?::uuid,?,?::jsonb)`,
+        VALUES (?::uuid,?::uuid,?::uuid,?,?,?,?,?::uuid,?,?::jsonb) RETURNING id`,
         [order.id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,
          line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
+      await require('./cerood-shop-commission').snapshot(client,financeItem[0].id,line.p.seller_id);
     }
     await require('./cerood-shop-inventory').syncVariantTotals(client,lines.filter(x=>x.variant_id).map(x=>x.p.id));
     const savedItems=await query('SELECT * FROM public.cerood_shop_order_items WHERE order_id=? ORDER BY id',[order.id]);

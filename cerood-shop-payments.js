@@ -32,7 +32,8 @@ function createService(db,provider,h){
     ?await c.query("UPDATE cerood_product_variants SET stock=stock-$1,updated_at=now() WHERE id=$2 AND marketplace='general' AND product_id=$3 AND is_active=true AND stock>=$1 RETURNING id",[line.quantity,line.variant_id,String(line.p.id)])
     :await c.query('UPDATE cerood_shop_products SET stock=stock-$1,updated_at=now() WHERE id=$2 AND stock>=$1 RETURNING id',[line.quantity,line.p.id]);
     if(changed.length!==1)throw bad('Stock changed. Refresh the checkout.',409);
-    await c.query(`INSERT INTO cerood_shop_order_items(order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,variant_id,variant_sku,variant_values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb)`,[id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
+    const financeItem=await c.query(`INSERT INTO cerood_shop_order_items(order_id,product_id,seller_id,product_name,unit_price,quantity,line_total,variant_id,variant_sku,variant_values) VALUES($1,$2,$3,$4,$5,$6,$7,$8,$9,$10::jsonb) RETURNING id`,[id,line.p.id,line.p.seller_id,line.p.name,line.unit_price,line.quantity,line.line_total,line.variant_id,line.variant_sku,JSON.stringify(line.variant_values)]);
+    await require('./cerood-shop-commission').snapshot(c,financeItem[0].id,line.p.seller_id);
    }
    await require('./cerood-shop-inventory').syncVariantTotals(c,totals.lines.filter(x=>x.variant_id).map(x=>x.p.id));
    await c.query('COMMIT');done=true;return response(order);
