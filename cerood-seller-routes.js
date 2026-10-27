@@ -7,6 +7,7 @@
 
 const bcrypt = require('bcryptjs');
 const jwt = require('jsonwebtoken');
+const crypto = require('node:crypto');
 
 module.exports = function registerSellerRoutes(
     app,
@@ -109,6 +110,8 @@ module.exports = function registerSellerRoutes(
     const validUUID = (value) =>
         /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i.test(value);
 
+
+    require('./cerood-seller-password-reset').register(app, db, verifyMsg91AccessToken, extractVerifiedPhoneFromMsg91);
 
     // ==========================================
     // 5. SELLER REGISTRATION
@@ -527,6 +530,7 @@ module.exports = function registerSellerRoutes(
                 }
 
 
+                const passwordVersion = crypto.createHash('sha256').update(seller.password_hash).digest('hex');
                 delete seller.password_hash;
 
 
@@ -540,7 +544,8 @@ module.exports = function registerSellerRoutes(
 
                         sub: seller.id,
 
-                        role: 'seller'
+                        role: 'seller',
+                        password_version: passwordVersion
 
                     },
 
@@ -667,7 +672,7 @@ module.exports = function registerSellerRoutes(
 
                 `SELECT
 
-                    ${publicFields}
+                    ${publicFields}, password_hash
 
                 FROM public.cerood_sellers
 
@@ -702,6 +707,9 @@ module.exports = function registerSellerRoutes(
             }
 
 
+            const expectedVersion = crypto.createHash('sha256').update(String(rows[0].password_hash || '')).digest('hex');
+            if (typeof decoded.password_version !== 'string' || decoded.password_version !== expectedVersion) throw new Error('Seller password changed. Sign in again.');
+            delete rows[0].password_hash;
             req.seller = rows[0];
 
             next();
