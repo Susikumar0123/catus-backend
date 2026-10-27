@@ -1221,6 +1221,7 @@ module.exports = function registerCeroodSellerDelhivery(
         await ensureSchema();
         const ref = parseOrderItemRef(rawItemId);
         if (!ref) throw httpError(400, 'Invalid seller order item.', 'ORDER_ITEM');
+        require('./cerood-shop-courier-policy').assertAssigned('delhivery', ref.marketplace);
         const input = bookingInput(body || {});
         const pickup = await loadSellerLocation(sellerId, input.locationId);
 
@@ -1517,6 +1518,12 @@ module.exports = function registerCeroodSellerDelhivery(
                 message: error.message || 'Unable to register Delhivery pickup warehouse.'
             });
         }
+    });
+
+    app.get('/api/sellers/shipping-assignment', requireSellerAuth, (req,res) => {
+        res.set('Cache-Control','no-store');
+        try { res.json(require('./cerood-shop-courier-policy').config()); }
+        catch(error) { res.status(error.status||503).json({success:false,code:error.code,message:error.message}); }
     });
 
     app.post('/api/seller/orders/:orderItemId/delhivery-shipment', requireSellerAuth, async (req, res) => {

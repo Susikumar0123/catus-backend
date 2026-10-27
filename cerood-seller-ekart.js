@@ -1301,6 +1301,7 @@ module.exports = function registerCeroodSellerEkart(
             await ensureSchema();
             const ref = parseOrderItemRef(req.params.orderItemId);
             if (!ref) throw httpError(400, 'Invalid seller order item.', 'ORDER_ITEM');
+            require('./cerood-shop-courier-policy').assertAssigned('ekart', ref.marketplace);
             const input = bookingInput(req);
             const pickup = await loadSellerLocation(req.seller.id, input.locationId);
 
