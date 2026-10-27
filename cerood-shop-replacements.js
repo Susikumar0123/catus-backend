@@ -25,6 +25,7 @@ function createService(db){
   if(!uuid(returnId)||!uuid(body.request_key)||body.confirm_same_option!==true)throw fail('Confirm a same-option replacement and provide a valid request key.',400);const explanation=note(body.note);
   return tx(db,async c=>{
    const {order,item,request}=await purchased(c,returnId);
+   await require('./cerood-shop-direct-exchange').assertNoDirect(c,returnId);
    const retry=(await c.query('SELECT * FROM cerood_shop_replacements WHERE request_key=$1',[body.request_key]))[0];if(retry){if(retry.return_request_id!==returnId||retry.reservation_note!==explanation)throw fail('This reservation key already belongs to another request.');return {replacement:retry,idempotent:true};}
    const existing=(await c.query("SELECT * FROM cerood_shop_replacements WHERE return_request_id=$1 AND status<>'cancelled'",[returnId]))[0];if(existing)return {replacement:existing,idempotent:true};
    if(!['exchange','replacement'].includes(request.request_type)||request.status!=='received'||!request.inspected_at||order.status!=='delivered'||!item.seller_id||['rejected','cancelled'].includes(item.seller_order_status))throw fail('Receive and inspect an approved exchange/replacement item first.');
@@ -47,7 +48,7 @@ function createService(db){
   const shipping=body.status==='shipped'?tracking(body):null,explanation=body.status==='cancelled'?note(body.note):null;
   return tx(db,async c=>{
    const {item,request}=await purchased(c,link.return_request_id);
-   if(body.status==='cancelled')await stock(c,item);
+   if(body.status==='cancelled'){await require('./cerood-shop-direct-exchange').assertNoDirect(c,link.return_request_id);await stock(c,item);}
    const row=(await c.query('SELECT * FROM cerood_shop_replacements WHERE id=$1 FOR UPDATE',[id]))[0];
    if(row.status===body.status){if(shipping&&(row.courier_name!==shipping.courier||row.tracking_number!==shipping.number||(row.tracking_url||'')!==shipping.url)||explanation&&row.cancellation_note!==explanation)throw fail('The recorded action has different details.');return {replacement:row,idempotent:true};}
    if(body.status==='cancelled'){

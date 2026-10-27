@@ -8,6 +8,7 @@ async function record(db,body={}){const item=String(body.order_item_id||'').repl
  const client=await db.getClient();let committed=false;try{await client.query('BEGIN');const link=(await client.query('SELECT order_id FROM public.cerood_shop_order_items WHERE id=$1',[item]))[0];if(!link)throw Object.assign(Error('Order item not found.'),{status:404});
  await client.query('SELECT id FROM public.cerood_shop_orders WHERE id=$1 FOR UPDATE',[link.order_id]);
  const purchased=await client.query(`SELECT i.id,i.seller_id,i.line_total,i.commission_bps,i.settlement_hold_days,i.seller_order_status,o.delivered_at,o.status_timestamps,o.id AS order_id,o.total,o.status,o.payment_method,o.payment_status FROM public.cerood_shop_order_items i JOIN public.cerood_shop_orders o ON o.id=i.order_id WHERE i.id=$1 FOR UPDATE OF i`,[item]);const p=purchased[0];
+ if(action!=='void_pending')await require('./cerood-shop-direct-exchange').settlementHold(client,item);
 
  const saved=await client.query('SELECT * FROM public.cerood_shop_settlements WHERE order_item_id=$1 FOR UPDATE',[item]);const old=saved[0];
  if(old?.status==='paid'){if(action==='record_paid'&&old.transfer_reference===reference){await client.query('COMMIT');committed=true;return {settlement:old,idempotent:true}}throw Object.assign(Error('This paid ledger record is immutable. Contact support for reconciliation.'),{status:409});}

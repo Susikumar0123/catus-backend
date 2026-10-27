@@ -12572,6 +12572,8 @@ require('./cerood-seller-workspace').register(app,db,requireSellerAuth);
 const sellerPriceSchedules=require('./cerood-seller-price-schedules').register(app,db,requireSellerAuth,requireAdminAuth);
 const sellerPriceScheduleTimer=setInterval(()=>sellerPriceSchedules.tick().catch(e=>console.error('Price schedule worker:',e.message)),60000);
 sellerPriceScheduleTimer.unref?.();
+require('./cerood-account-push').register(app,db,renewedCustomerSession,requireAdminAuth);
+require('./cerood-shop-direct-exchange').register(app,db,{resolve:shopResolveCheckout,items:shopItems},renewedCustomerSession,requireAdminAuth);
 const shopOperationsService=require('./cerood-shop-operations').register(app,db,renewedCustomerSession,requireSellerAuth,requireAdminAuth);
 const shopRefundService=require('./cerood-shop-refunds').register(app,db,razorpayInstance,requireAdminAuth);
 require('./cerood-shop-payments').register(app,db,razorpayInstance,{address:shopAddress,items:shopItems,resolve:shopResolveCheckout,matches:shopCheckoutMatches,refunds:shopRefundService,operations:shopOperationsService},renewedCustomerSession,requireAdminAuth);
