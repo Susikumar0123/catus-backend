@@ -1298,7 +1298,7 @@ module.exports = function registerCeroodSellerEkart(
         try {
             require('./cerood-courier-comparison').weight(req.body||{});
             const ref=parseOrderItemRef(req.params.orderItemId);
-            if(!ref||ref.marketplace!=='shop')throw httpError(400,'Choose a Shop order.','ORDER_ITEM');
+            if(!ref)throw httpError(400,'Choose a valid seller order item.','ORDER_ITEM');
             if(process.env.EKART_SKIP_SERVICEABILITY_CHECK==='true')throw httpError(503,'Verified Ekart route checks must be enabled.','SERVICEABILITY_DISABLED');
             await ensureSchema();const input=bookingInput({...req,body:{...req.body,service:'SURFACE'}});
             const pickup=await loadSellerLocation(req.seller.id,input.locationId);

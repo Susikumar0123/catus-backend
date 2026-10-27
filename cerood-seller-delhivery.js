@@ -1525,7 +1525,7 @@ module.exports = function registerCeroodSellerDelhivery(
         try {
             const parcelSize=require('./cerood-courier-comparison').weight(req.body||{},process.env.DELHIVERY_VOLUMETRIC_DIVISOR);
             const ref=parseOrderItemRef(req.params.orderItemId);
-            if(!ref||ref.marketplace!=='shop')throw httpError(400,'Choose a Shop order.','ORDER_ITEM');
+            if(!ref)throw httpError(400,'Choose a valid seller order item.','ORDER_ITEM');
             await ensureSchema();delhiveryConfig(true);
             const pickup=await loadSellerLocation(req.seller.id,String(req.body.fulfilment_location_id||''));
             const parcel=await loadParcel(ref,req.seller.id,pickup.id);
