@@ -7,6 +7,7 @@ const order={id,total:'1000.00',status:'delivered',payment_method:cod?'cod':'onl
 const settlement={id:'12',order_item_id:'1',seller_id:sellerId,status:'pending',gross_amount:'1000.00',deductions:'100',finance_breakdown:{},release_at:'2020-01-01'};
 const query=async(sql,args=[])=>{
 if(['BEGIN','COMMIT','ROLLBACK'].includes(sql))return [];
+if(sql==='SELECT * FROM cerood_shop_order_items WHERE id=$1')return [{id:'1',order_id:id,seller_id:sellerId,line_total:'1000.00',quantity:2}];
 if(sql.includes('to_regclass'))return [{relation:'yes'}];
 if(sql.includes('SELECT * FROM cerood_shop_operations WHERE kind='))return operations.filter(o=>o.kind===args[0]&&o.entity_key===String(args[1]));
 if(sql.startsWith('INSERT INTO cerood_shop_operations')){const o={id:args[0],kind:args[1],entity_key:args[2],order_id:args[3],payload:JSON.parse(args[4]),state:'initiating'};operations.push(o);return [o];}
