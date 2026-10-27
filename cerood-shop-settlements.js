@@ -11,6 +11,7 @@ async function record(db,body={}){const item=String(body.order_item_id||'').repl
 
  const saved=await client.query('SELECT * FROM public.cerood_shop_settlements WHERE order_item_id=$1 FOR UPDATE',[item]);const old=saved[0];
  if(old?.status==='paid'){if(action==='record_paid'&&old.transfer_reference===reference){await client.query('COMMIT');committed=true;return {settlement:old,idempotent:true}}throw Object.assign(Error('This paid ledger record is immutable. Contact support for reconciliation.'),{status:409});}
+ if(['record_paid','void_pending'].includes(action)&&await finance.hasTable(client.query.bind(client),'cerood_shop_operations')&&(await client.query("SELECT id FROM cerood_shop_operations WHERE kind='payout' AND entity_key=$1 LIMIT 1",[String(old?.id||'')])).length)throw Object.assign(Error('An automatic payout attempt exists. Use provider reconciliation; do not mark paid manually or void this record.'),{status:409});
  if(action==='void_pending'){
  if(!old)throw Object.assign(Error('No prepared settlement to cancel.'),{status:409});
  if(old.status==='void'){if(old.void_reason!==note)throw Object.assign(Error('Cancelled record has a different reason.'),{status:409});await client.query('COMMIT');committed=true;return {settlement:old,idempotent:true};}
