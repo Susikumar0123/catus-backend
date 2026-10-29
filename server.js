@@ -91,6 +91,7 @@ app.use('/api/local/auth', (req, res) => res.status(404).json({error: 'Auth rout
 
 const allowedOrigins = [
     'https://catus-frontend.susikumar0123.workers.dev',
+    'https://cerood-stage14-test.susikumar0123.workers.dev',
     'https://cerood-seller-workspace.susikumar.chatgpt.site',
     'https://cerood.com',
     'https://www.cerood.com',
