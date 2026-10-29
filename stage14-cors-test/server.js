@@ -47,6 +47,8 @@ const server = http.createServer((req, res) => {
   }));
 });
 
-server.listen(31014, '127.0.0.1', () => {
-  console.log('Stage 14 isolated test API running on port 31014');
+const PORT = process.env.PORT || 31014;
+
+server.listen(PORT, '0.0.0.0', () => {
+  console.log(`Stage 14 isolated test API running on port ${PORT}`);
 });
