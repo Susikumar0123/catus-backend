@@ -146,6 +146,8 @@ app.use('/api/cosmetics/razorpay-webhook', express.raw({type:'application/json',
 app.use('/api/shop/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/clothing/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
 app.use('/api/home-services/razorpay-webhook', express.raw({type:'application/json',limit:'256kb'}));
+// Contacts-only 10MB parser; do not change webhook raw bodies.
+app.use('/api/save-contacts', express.json({limit:'10mb'}));
 app.use(express.json());
 
 // Reject unresolved template placeholders rather than serving an indexable page.
@@ -2029,6 +2031,11 @@ const ceroodHomeCustomerAuth = require('./cerood-home-auth')(
     }
 );
 require('./cerood-home-admin-customers')(app, db, requireAdminAuth, ceroodHomeCustomerAuth);
+// Optional, consent-based contacts storage.
+require('./cerood-contacts-api').register(app, db, {
+  requireHomeAuth: ceroodHomeCustomerAuth.requireHomeAuth,
+  requireAdminAuth
+});
 
 
 // ==========================================
