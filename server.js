@@ -9,6 +9,7 @@ const path = require('path');
 const sharp = require('sharp');
 const db = require('./db');
 const ceroodHomeConversions = require('./cerood-home-conversions');
+const ceroodLocalSeoContentV1 = require('./cerood-local-seo-content-v1'); // CEROOD CONTENT PHASE5
 const axios = require('axios');
 require('dotenv').config();
 
@@ -10204,9 +10205,20 @@ NULL AS content
                 });
             }
 
+            const page = results[0];
+            const localSeoContent = ceroodLocalSeoContentV1.findContent({
+                state: stateSlug, district: districtSlug,
+                location: locationSlug, service: serviceIdentifier
+            });
+            if (localSeoContent) {
+                // Informational backend API data; NOT Google-visible page HTML.
+                // Does not claim that a technician is currently available.
+                page.content = localSeoContent.content;
+                page.seo_content_sections = localSeoContent.sections;
+            }
             return res.json({
                 success: true,
-                page: results[0]
+                page
             });
         }
     );
